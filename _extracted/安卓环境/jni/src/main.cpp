@@ -34,8 +34,8 @@ int main(int argc, char *argv[]) {
     ::abs_ScreenX = (displayInfo.height > displayInfo.width ? displayInfo.height : displayInfo.width);
     ::abs_ScreenY = (displayInfo.height < displayInfo.width ? displayInfo.height : displayInfo.width);
     
-    ::native_window_screen_x = (displayInfo.height > displayInfo.width ? displayInfo.height : displayInfo.width);
-    ::native_window_screen_y = (displayInfo.height > displayInfo.width ? displayInfo.height : displayInfo.width);
+    ::native_window_screen_x = displayInfo.width;
+    ::native_window_screen_y = displayInfo.height;
     // 初始化imgui
     if (!initGUI_draw(native_window_screen_x, native_window_screen_y, true)) {
         return -1;

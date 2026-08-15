@@ -6,6 +6,7 @@
 #include <dlfcn.h>
 #include <sys/system_properties.h>
 
+#include <climits>
 #include <cstddef>
 #include <unordered_map>
 #include <string>
@@ -425,6 +426,7 @@ namespace android
                 if (12 <= Functionals::GetInstance().systemVersion) {
                     static SurfaceComposerClientTransaction transaction;
                     transaction.SetTrustedOverlay(result, true);
+                    transaction.SetLayer(result, INT_MAX); // 将悬浮窗设置为最高层级，避免被其他窗口遮挡
                     transaction.Apply(false, true);
                 }
                 return {result.get()};
