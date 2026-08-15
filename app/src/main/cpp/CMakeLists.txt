@@ -55,18 +55,23 @@ target_link_libraries(imgui_overlay PRIVATE
 )
 
 # ---- YOLO 推理：TensorFlow Lite + NNAPI delegate（可选）----
-# 仅在 GitHub 云端编译时通过环境变量注入 TFLite_ROOT/TFLITE_LIB；
+# 仅在 GitHub 云端编译时通过环境变量注入 TFLITE_ROOT/TFLITE_LIB_DIR；
 # 本地不带 TFLite 的构建会跳过，保证原有工程仍可编译。
 set(TFLITE_ROOT_ENV "$ENV{TFLITE_ROOT}")
-set(TFLITE_LIB_ENV "$ENV{TFLITE_LIB}")
-if(TFLITE_ROOT_ENV AND TFLITE_LIB_ENV)
+set(TFLITE_LIB_DIR_ENV "$ENV{TFLITE_LIB_DIR}")
+if(TFLITE_ROOT_ENV AND TFLITE_LIB_DIR_ENV)
     message(STATUS "YOLO: enabling TFLite inference")
     target_compile_definitions(imgui_overlay PRIVATE ENABLE_YOLO)
     target_include_directories(imgui_overlay PRIVATE "${TFLITE_ROOT_ENV}")
+
+    # 静态链接 tf_build 目录下（含子目录）所有静态库，解决 ruy/flatbuffers/fft2d 等传递依赖
+    set(TFLITE_ARCHIVES "")
+    file(GLOB_RECURSE TFLITE_ARCHIVES "${TFLITE_LIB_DIR_ENV}/*.a")
     target_link_libraries(imgui_overlay PRIVATE
-        "${TFLITE_LIB_ENV}"
+        "${TFLITE_ARCHIVES}"
         z
         dl
+        log
         m
     )
 endif ()

@@ -63,7 +63,7 @@ jobs:
           mkdir -p third_party/tflite/lib
           cp tf_build/libtensorflow-lite.a third_party/tflite/lib/
           echo "TFLITE_ROOT=$GITHUB_WORKSPACE/tf_src" >> "$GITHUB_ENV"
-          echo "TFLITE_LIB=$GITHUB_WORKSPACE/third_party/tflite/lib/libtensorflow-lite.a" >> "$GITHUB_ENV"
+          echo "TFLITE_LIB_DIR=$GITHUB_WORKSPACE/tf_build" >> "$GITHUB_ENV"
 
       - name: Grant execute permission
         run: chmod +x gradlew
