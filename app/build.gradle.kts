@@ -102,9 +102,9 @@ val collectNativeBinary by tasks.registering(Copy::class) {
     duplicatesStrategy = DuplicatesStrategy.INCLUDE
 }
 
-// 确保 assets 合并发生在原生二进制收集之后
+// 确保 assets 合并 与 release lint 校验 都发生在原生二进制收集之后
 tasks.configureEach {
-    if (name.startsWith("merge") && name.endsWith("Assets")) {
+    if ((name.startsWith("merge") && name.endsWith("Assets")) || name.contains("LintVital")) {
         dependsOn(collectNativeBinary)
     }
 }
