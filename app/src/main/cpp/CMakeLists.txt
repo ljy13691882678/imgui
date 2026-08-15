@@ -69,6 +69,7 @@ if(TFLITE_ROOT_ENV AND TFLITE_LIB_DIR_ENV)
     file(GLOB_RECURSE TFLITE_ARCHIVES "${TFLITE_LIB_DIR_ENV}/*.a")
     target_link_libraries(imgui_overlay PRIVATE
         "${TFLITE_ARCHIVES}"
+        c
         z
         dl
         log

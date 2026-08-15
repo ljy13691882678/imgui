@@ -86,7 +86,7 @@ val buildNativeBinary by tasks.registering {
                 "-DCMAKE_TOOLCHAIN_FILE=$toolchainFile",
                 "-DCMAKE_BUILD_TYPE=Release",
                 "-DANDROID_ABI=$abi",
-                "-DANDROID_PLATFORM=android-21",
+                "-DANDROID_PLATFORM=android-26",
                 "-DANDROID_STL=c++_static",
                 "-DANDROID_ARM_NEON=ON"
             )
