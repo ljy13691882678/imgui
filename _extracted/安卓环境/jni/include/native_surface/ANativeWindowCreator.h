@@ -169,6 +169,7 @@ namespace android
                         14,
                         {
                             {reinterpret_cast<void **>(&LayerMetadata__Constructor), "_ZN7android3gui13LayerMetadataC2Ev"},
+                            {reinterpret_cast<void **>(&LayerMetadata__setInt32), "_ZN7android3gui13LayerMetadata8setInt32Eji"},
                             {reinterpret_cast<void **>(&SurfaceComposerClient__CreateSurface), "_ZN7android21SurfaceComposerClient13createSurfaceERKNS_7String8EjjiiRKNS_2spINS_7IBinderEEENS_3gui13LayerMetadataEPj"},
                         },
                     },
@@ -238,8 +239,14 @@ namespace android
                 ResolveMethod(SurfaceControl, DisConnect, libgui, "_ZN7android14SurfaceControl10disconnectEv");
                 
                 auto it = patchesTable.find(systemVersion);
+                if (it == patchesTable.end() && systemVersion >= 14)
+                {
+                    // Android 14 及以上版本共享同一套补丁：相关符号已从 android:: 迁移到
+                    // android::gui 命名空间（LayerMetadata / createSurface 等）。
+                    it = patchesTable.find(14);
+                }
                 if (it != patchesTable.end()) {
-                    for (const auto &[patchTo, signature] : patchesTable.at(systemVersion))
+                    for (const auto &[patchTo, signature] : it->second)
                     {
                         *patchTo = symbolMethod.Find(libgui, signature);
                         if (nullptr != *patchTo)
