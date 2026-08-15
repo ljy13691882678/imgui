@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.22.1)
 
+# 强制链接 API 26+ 的 bionic libc：TFLite 静圇库引用了 API 26 才引入的
+# strtod_l / __write_chk 等符号，若链接到 android-21 的 libc，会因未定义符号而链接失败。
+# 目标设备为 Android 16，运行时这些符号均存在。
+set(ANDROID_PLATFORM 26 CACHE STRING "" FORCE)
+
 project(imgui_overlay CXX)
 
 set(CMAKE_CXX_STANDARD 17)

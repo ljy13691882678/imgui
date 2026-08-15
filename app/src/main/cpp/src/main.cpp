@@ -182,6 +182,27 @@ static void InferLoop() {
             g_ox = g_latestOx;
             g_oy = g_latestOy;
         }
+        // 诊断：每 60 帧打印一次检测数量与画面平均亮度，用于排查“有帧但是没框”。
+        // 平均亮度过低(接近 0)= 画面黑/数据损坏；检测数为 0 = 模型在画面上没检到目标。
+        {
+            static long diagCount = 0;
+            if ((diagCount++ % 60) == 0) {
+                size_t dN = 0;
+                uint64_t lum = 0;
+                {
+                    std::lock_guard<std::mutex> lk(g_detMutex);
+                    dN = g_detections.size();
+                }
+                size_t px = (size_t)w * h;
+                if (px > 0) {
+                    for (size_t i = 0; i < px; i += 4)  // 采样，避免拖慢推理线程
+                        lum += rgba[i * 4 + 0];
+                    lum = lum / (px / 4);
+                }
+                printf("[yolo] diag det=%zu avgR=%llu cap=%dx%d\n",
+                       dN, (unsigned long long)lum, w, h);
+            }
+        }
         // 推理帧率：相邻两次出结果间隔的滑动平均
         auto now = std::chrono::steady_clock::now();
         double dt = std::chrono::duration<double>(now - last).count();

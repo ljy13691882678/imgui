@@ -20,8 +20,17 @@
 #define IMG_FMT_YUV420_SEMI    0x15   // NV12
 #define IMG_FMT_RGBA_FLEXIBLE  0x7F000001
 
-// 一块解码缓冲的读取大小（H264 流从管道持续流入）
-static const int kReadChunk = 65536;
+// 在 [data, data+size) 中从 from 起查找 H264 起始码（00 00 01 或 00 00 00 01）。
+// 返回起始码起点下标；找到则通过 *codeLen 输出其长度(3 或 4)；找不到返回 size。
+static size_t FindStartCode(const uint8_t *data, size_t size, size_t from, size_t *codeLen) {
+    for (size_t i = from; i + 3 <= size; i++) {
+        if (data[i] == 0 && data[i + 1] == 0) {
+            if (data[i + 2] == 1) { *codeLen = 3; return i; }
+            if (i + 4 <= size && data[i + 2] == 0 && data[i + 3] == 1) { *codeLen = 4; return i; }
+        }
+    }
+    return size;
+}
 
 H264Stream::H264Stream() = default;
 H264Stream::~H264Stream() { Stop(); }
@@ -116,6 +125,7 @@ void H264Stream::DecodeLoop() {
     bool codecStarted = false;
     long frameCount = 0;
     bool firstFrame = true;
+    std::vector<uint8_t> buf;          // 累积未解析的 H264 字节
 
     while (running_) {
         if (!codec) {
@@ -152,33 +162,55 @@ void H264Stream::DecodeLoop() {
             break;
         }
 
-        // 读一小段 H264 送入解码器
-        std::vector<uint8_t> chunk(kReadChunk);
-        ssize_t n = read(procFd_, chunk.data(), chunk.size());
+        // 读入更多 H264 字节，累积到 buf
+        uint8_t tmp[16384];
+        ssize_t n = read(procFd_, tmp, sizeof(tmp));
         if (n <= 0) {
             // 管道 EOF：screenrecord 已结束
-            if (running_) {
-                // 若已有帧可继续供，先退出采集（screenrecord 受 time-limit 限制需重启，
-                // 此处简单起见直接结束，由上层重新 Start 即可）
-                lastError_ = "screenrecord EOF";
-            }
+            if (running_) lastError_ = "screenrecord EOF";
             break;
         }
+        buf.insert(buf.end(), tmp, tmp + n);
 
-        // 送入输入缓冲
-        ssize_t inIdx = AMediaCodec_dequeueInputBuffer(codec, 10000);
-        if (inIdx >= 0) {
-            size_t sz = 0;
-            uint8_t *buf = AMediaCodec_getInputBuffer(codec, inIdx, &sz);
-            if (buf && sz > 0) {
-                size_t copy = (size_t)n < sz ? (size_t)n : sz;
-                memcpy(buf, chunk.data(), copy);
-                AMediaCodec_queueInputBuffer(codec, inIdx, 0, copy, tsUs, 0);
-                tsUs += 16000;   // ~60fps 采样间隔
-            } else {
-                // 缓冲不可用：以 0 长度入队跳过该缓冲
-                AMediaCodec_queueInputBuffer(codec, inIdx, 0, 0, tsUs, 0);
+        // 按 H264 起始码把累积字节切成完整 NAL 单元后逐个送入解码器。
+        // 关键：不能把任意长度的字节块当做一个输入缓冲，否则会把 NAL 从中截断，
+        // 解码器拿到残缺码流会输出乱码/花屏，导致画面错误、检测不到目标。
+        size_t pos = 0;
+        while (pos < buf.size()) {
+            size_t scLen = 0;
+            size_t sc = FindStartCode(buf.data(), buf.size(), pos, &scLen);
+            if (sc == buf.size()) break;                 // 尚无起始码，等待更多数据
+            size_t nalStart = sc + scLen;
+            size_t nextLen = 0;
+            size_t next = FindStartCode(buf.data(), buf.size(), nalStart, &nextLen);
+            if (next == buf.size()) break;               // 下一个起始码未凑齐，等待更多数据
+            size_t len = next - nalStart;
+            if (len > 0) {
+                uint8_t hdr = buf[nalStart];
+                int nalType = (hdr >> 1) & 0x1F;
+                uint32_t flags = (nalType == 7 || nalType == 8)
+                                     ? AMEDIA_BUFFER_FLAG_CODEC_CONFIG : 0;  // SPS/PPS
+                ssize_t inIdx = AMediaCodec_dequeueInputBuffer(codec, 10000);
+                if (inIdx >= 0) {
+                    size_t cap = 0;
+                    uint8_t *inb = AMediaCodec_getInputBuffer(codec, inIdx, &cap);
+                    if (inb && cap >= len) {
+                        memcpy(inb, &buf[nalStart], len);
+                        AMediaCodec_queueInputBuffer(codec, inIdx, 0, len, tsUs, flags);
+                        tsUs += 16000;   // ~60fps 采样间隔
+                    } else {
+                        // 输入缓冲不可用/过小：以 0 长度入队跳过该缓冲
+                        AMediaCodec_queueInputBuffer(codec, inIdx, 0, 0, tsUs, 0);
+                    }
+                }
             }
+            pos = next;
+        }
+        // 丢弃已处理字节，保留未解析的尾部（含不完整 NAL / 起始码）
+        if (pos > 0) buf.erase(buf.begin(), buf.begin() + pos);
+        // 异常保护：若尾部累积过大（如缺少起始码），只保留末尾 1MB 防止内存膨胀
+        if (buf.size() > (1u << 20)) {
+            buf.erase(buf.begin(), buf.end() - (1u << 20));
         }
 
         // 取输出
@@ -211,10 +243,15 @@ void H264Stream::DecodeLoop() {
                             frameCount++;
                             if (firstFrame) {
                                 firstFrame = false;
-                                printf("[h264] first frame decoded %dx%d\n", iw, ih);
+                                printf("[h264] first frame decoded %dx%d fmt=0x%x\n",
+                                       iw, ih, (unsigned)AImage_getFormat(img));
                             } else if ((frameCount % 60) == 0) {
                                 printf("[h264] decoded %ld frames\n", frameCount);
                             }
+                        } else {
+                            if (firstFrame)
+                                printf("[h264] ImageToRGBA failed fmt=0x%x\n",
+                                       (unsigned)AImage_getFormat(img));
                         }
                     }
                     AImage_delete(img);
