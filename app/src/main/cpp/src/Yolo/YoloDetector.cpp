@@ -73,17 +73,31 @@ bool YoloDetector::LoadModel(const std::string &path) {
         return false;
     }
 
-    // 读取输入尺寸
+    // 读取输入尺寸与量化参数
     const TfLiteTensor *in = TfLiteInterpreterGetInputTensor(interp, 0);
-    if (!in || TfLiteTensorType(in) != kTfLiteUInt8) {
-        // 输入必须是 uint8 int8 量化
+    if (!in) {
         TfLiteInterpreterDelete(interp);
         if (nnDelegate_) TfLiteNnapiDelegateDelete((TfLiteDelegate *)nnDelegate_);
         nnDelegate_ = nullptr;
         TfLiteModelDelete(model);
-        lastError_ = "input tensor not uint8";
+        lastError_ = "no input tensor";
         return false;
     }
+    TfLiteType itype = TfLiteTensorType(in);
+    if (itype != kTfLiteInt8 && itype != kTfLiteUInt8) {
+        // int8 / uint8 量化输入均可
+        TfLiteInterpreterDelete(interp);
+        if (nnDelegate_) TfLiteNnapiDelegateDelete((TfLiteDelegate *)nnDelegate_);
+        nnDelegate_ = nullptr;
+        TfLiteModelDelete(model);
+        char buf[128];
+        snprintf(buf, sizeof(buf), "input tensor type %d, need int8/uint8", (int)itype);
+        lastError_ = buf;
+        return false;
+    }
+    inputType_   = (int)itype;
+    inputScale_  = TfLiteTensorQuantizationParams(in).scale;
+    inputZp_     = TfLiteTensorQuantizationParams(in).zero_point;
     int32_t ndims = TfLiteTensorNumDims(in);
     if (ndims >= 4) {
         inputH = TfLiteTensorDim(in, 1);
@@ -150,6 +164,23 @@ std::vector<Detection> YoloDetector::Detect(const uint8_t *rgba, int screenW, in
     double t0 = (double)clock() / CLOCKS_PER_SEC;
 
     Preprocess(rgba, screenW, screenH, inputW, inputH, inputBuf_.data());
+
+    // 按输入张量的量化参数量化：期望实值 = (q - zp) * scale，输入为归一化 0..1
+    // 标准 int8 图像输入 scale=1/255, zp=-128 → q = r - 128；uint8 scale=1/255, zp=0 → q = r
+    {
+        const float invScale = (inputScale_ != 0.f) ? (1.0f / inputScale_) : 255.0f;
+        const int lo = (inputType_ == kTfLiteInt8) ? -128 : 0;
+        const int hi = (inputType_ == kTfLiteInt8) ? 127 : 255;
+        const size_t n = (size_t)inputW * inputH * 3;
+        for (size_t i = 0; i < n; i++) {
+            // 归一化到 0..1 再按 scale/zp 反推量化值
+            float f = inputBuf_[i] * (1.0f / 255.0f);
+            int q = (int)std::lround(f * invScale + inputZp_);
+            if (q < lo) q = lo;
+            if (q > hi) q = hi;
+            inputBuf_[i] = (uint8_t)(q & 0xFF);
+        }
+    }
 
     const TfLiteTensor *in = TfLiteInterpreterGetInputTensor((TfLiteInterpreter *)interpreter_, 0);
     // C API 的输入张量访问器返回 const，写入需要 const_cast

@@ -49,4 +49,9 @@ private:
     float conf_ = 0.25f;
     float iou_ = 0.45f;
     int   numClass_ = 80;
+
+    // 输入张量元信息（int8/uint8 量化）
+    int   inputType_ = 0;      // kTfLiteInt8 或 kTfLiteUInt8
+    float inputScale_ = 1.0f;  // 量化 scale
+    float inputZp_ = 0.0f;     // 量化 zero_point
 };
