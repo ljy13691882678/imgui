@@ -136,6 +136,17 @@ bool YoloDetector::LoadModel(const std::string &path) {
 
 // 双线性插值 RGBA -> RGB 并缩放到模型输入尺寸
 static void Preprocess(const uint8_t *rgba, int sw, int sh, int dw, int dh, uint8_t *out) {
+    // 等尺寸快路径：采集尺寸 == 模型输入时，跳过双线性插值，只做 RGBA→RGB，
+    // 省掉整幅插值循环，是 120+ FPS 的关键路径之一。
+    if (sw == dw && sh == dh) {
+        const size_t npx = (size_t)sw * sh;
+        for (size_t i = 0, j = 0; i < npx; i++, j += 3) {
+            out[j + 0] = rgba[i * 4 + 0];
+            out[j + 1] = rgba[i * 4 + 1];
+            out[j + 2] = rgba[i * 4 + 2];
+        }
+        return;
+    }
     for (int y = 0; y < dh; y++) {
         float sy = (sh > 1) ? (y + 0.5f) * sh / dh - 0.5f : 0.0f;
         sy = std::max(0.0f, std::min(sy, (float)(sh - 1)));

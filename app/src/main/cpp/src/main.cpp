@@ -86,7 +86,8 @@ static int g_latestOy = 0;
 static bool g_frameReady = false;
 
 // 采集尺寸选择：0=全屏，否则为屏幕正中间的正方形边长（640/416/320/256）
-static std::atomic<int> g_captureSize{0};
+// 默认 256：与 256×256 模型输入一致，走 Preprocess 等尺寸快路径，追 120+ FPS。
+static std::atomic<int> g_captureSize{256};
 // 当前推理帧率（由推理线程按相邻两次出结果间隔计算）
 static std::atomic<float> g_inferFps{0.0f};
 // 当前用于推理的采集尺寸与采集范围原点（与 g_detections 一起在 g_detMutex 下更新）
@@ -94,6 +95,9 @@ static int g_capW = 0;
 static int g_capH = 0;
 static int g_ox = 0;
 static int g_oy = 0;
+// H264 解码帧相对全屏的缩放因子（解码降为 1/2 分辨率时 = 2.0）。
+// 检测框坐标从解码帧坐标映射回全屏坐标时乘此因子。
+static float g_h264Scale = 1.0f;
 
 // 在屏幕正中间裁剪一个 cs x cs 的 RGBA 区域
 static void CropCenterRGBA(const uint8_t *src, int sw, int sh,
@@ -127,6 +131,10 @@ static void CaptureLoop() {
             got = ScreenCaptureRGBA(fr);
         }
         if (got && fr.width > 0 && fr.height > 0) {
+            // 记录解码帧相对全屏的缩放因子，供检测框坐标还原到全屏。
+            // 全屏时 =1.0；解码降为 1/2 分辨率时 =2.0。
+            if (displayInfo.width > 0 && fr.width > 0)
+                g_h264Scale = (float)displayInfo.width / fr.width;
             int cs = g_captureSize.load();
             int capW = fr.width, capH = fr.height;
             int ox = 0, oy = 0;
@@ -218,8 +226,12 @@ static void InferLoop() {
 
 static void StartInfer() {
     if (g_captureRunning) return;
-    // 启动高帧率 H264 流式采集（原生分辨率，居中裁剪在采集线程内完成）
-    if (!g_h264.Start(displayInfo.width, displayInfo.height, 8 * 1000 * 1000)) {
+    // 启动高帧率 H264 流式采集：解码为 1/2 分辨率，显著降低每帧 memcpy/解码开销，
+    // 让采集线程能跟上高帧率推理。坐标还原由 g_h264Scale 处理。
+    int decodeW = displayInfo.width / 2, decodeH = displayInfo.height / 2;
+    if (decodeW < 2) decodeW = displayInfo.width;
+    if (decodeH < 2) decodeH = displayInfo.height;
+    if (!g_h264.Start(decodeW, decodeH, 8 * 1000 * 1000)) {
         printf("[yolo] H264 capture start failed: %s, fallback to screencap\n",
                g_h264.LastError());
     } else {
@@ -330,11 +342,14 @@ void Layout_tick_UI() {
     if (showBoxes && yoloOn) {
         ImDrawList *dl = ImGui::GetBackgroundDrawList();
         std::lock_guard<std::mutex> lk(g_detMutex);
-        const int ox = g_ox, oy = g_oy;   // 采集范围在屏幕上的原点（全屏为 0,0）
+        const int ox = g_ox, oy = g_oy;   // 采集范围在解码帧上的原点（全屏为 0,0）
+        const float sc = g_h264Scale;      // 解码帧 → 全屏 缩放因子
         const int capW = g_capW, capH = g_capH;
         for (const auto &d : g_detections) {
             if (!ClassAllowed(d.classId, filter)) continue;
-            ImVec2 p1(d.x1 + ox, d.y1 + oy), p2(d.x2 + ox, d.y2 + oy);
+            float bx1 = (d.x1 + ox) * sc, by1 = (d.y1 + oy) * sc;
+            float bx2 = (d.x2 + ox) * sc, by2 = (d.y2 + oy) * sc;
+            ImVec2 p1(bx1, by1), p2(bx2, by2);
             dl->AddRect(p1, p2,
                         IM_COL32(0, 255, 0, 255), 0.0f, 0, 3.0f);
             if (showLabels) {
@@ -350,7 +365,8 @@ void Layout_tick_UI() {
         }
         // 2) 描出采集范围（让用户知道当前采集区域在哪）
         if (capW > 0 && capH > 0) {
-            dl->AddRect(ImVec2(ox, oy), ImVec2(ox + capW, oy + capH),
+            dl->AddRect(ImVec2(ox * sc, oy * sc),
+                        ImVec2((ox + capW) * sc, (oy + capH) * sc),
                         IM_COL32(255, 0, 0, 255), 0.0f, 0, 2.0f);
         }
     }
