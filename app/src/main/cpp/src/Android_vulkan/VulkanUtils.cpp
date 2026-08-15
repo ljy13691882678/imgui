@@ -291,14 +291,13 @@ void UploadFonts() {
 }
 
 void SwapChainRebuild(int w, int h) {
-    if (g_SwapChainRebuild) {
-        ImGui_ImplVulkan_SetMinImageCount(g_MinImageCount);
-        ImGui_ImplVulkanH_CreateOrResizeWindow(g_Instance, g_PhysicalDevice, g_Device, &g_MainWindowData,
-                                               g_QueueFamily, g_Allocator, w, h,
-                                               g_MinImageCount);
-        g_MainWindowData.FrameIndex = 0;
-        g_SwapChainRebuild = false;
-    }
+    // 旋转/尺寸变化后重建交换链，否则 vkAcquireNextImageKHR 返回 OUT_OF_DATE 后渲染停止
+    ImGui_ImplVulkan_SetMinImageCount(g_MinImageCount);
+    ImGui_ImplVulkanH_CreateOrResizeWindow(g_Instance, g_PhysicalDevice, g_Device, &g_MainWindowData,
+                                           g_QueueFamily, g_Allocator, w, h,
+                                           g_MinImageCount);
+    g_MainWindowData.FrameIndex = 0;
+    g_SwapChainRebuild = false;
 }
 
 void FrameRender(ImDrawData *draw_data) {

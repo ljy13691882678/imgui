@@ -151,13 +151,19 @@ void drawBegin() {
     screen_config();
     if (::orientation != displayInfo.orientation) {
         ::orientation = displayInfo.orientation;
+        // 更新窗口/渲染尺寸为新的显示分辨率（横屏/竖屏切换）
+        native_window_screen_x = displayInfo.width;
+        native_window_screen_y = displayInfo.height;
+        ::abs_ScreenX = displayInfo.width;
+        ::abs_ScreenY = displayInfo.height;
         UpdateScreenData(displayInfo.width, displayInfo.height, displayInfo.orientation);
-        //touchEnd();
+        // 用新尺寸重建窗口缓冲区与交换链，避免 OUT_OF_DATE 后渲染停止导致悬浮窗消失
+        ANativeWindow_setBuffersGeometry(native_window, native_window_screen_x, native_window_screen_y, 0);
+        #ifndef USE_OPENGL
+            SwapChainRebuild(native_window_screen_x, native_window_screen_y);
+        #endif
         g_window->Pos.x = 100;
         g_window->Pos.y = 125;
-        //Init_touch_config();
-        
-        //cout << " width:" << displayInfo.width << " height:" << displayInfo.height << " orientation:" << displayInfo.orientation << endl;
     }
 
     #ifdef USE_OPENGL
