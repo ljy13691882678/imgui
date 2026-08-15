@@ -32,6 +32,7 @@ int abs_ScreenY = 0;
 #ifdef ENABLE_YOLO
 #include "Yolo/YoloDetector.h"
 #include "Yolo/ScreenCapture.h"
+#include "H264/H264Stream.h"
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -64,6 +65,10 @@ static bool ClassAllowed(int classId, const std::set<int> &filter) {
 static YoloDetector        g_detector;
 static std::mutex          g_detMutex;
 static std::vector<Detection> g_detections;
+
+// H264 流式采集（高帧率）：启动后由 screenrecord + AMediaCodec 硬件解码，
+// 相比逐帧 screencap 可把采集帧率从 ~2FPS 提升到 30~60FPS。
+static H264Stream          g_h264;
 
 // 采集 → 推理 流水线：采集线程持续抓最新屏幕帧，推理线程只跑最新帧，两者重叠互不阻塞
 static std::thread         g_captureThread;
@@ -103,12 +108,25 @@ static void CropCenterRGBA(const uint8_t *src, int sw, int sh,
     }
 }
 
-// 采集线程：以屏幕变化频率持续抓取最新帧（RAW screencap，无 PNG 编解码）
+// 采集线程：以屏幕变化频率持续抓取最新帧
+// 优先用 H264 流式采集（高帧率），不可用时回退逐帧 screencap
 static void CaptureLoop() {
     printf("[yolo] capture thread started\n");
     while (g_captureRunning) {
         CapturedFrame fr;
-        if (ScreenCaptureRGBA(fr) && fr.width > 0 && fr.height > 0) {
+        bool got = false;
+        if (g_h264.Running()) {
+            // H264 流式：取最新解码帧，无新帧则稍等避免空转
+            got = g_h264.GrabFrame(fr.rgba, fr.width, fr.height);
+            if (!got) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                continue;
+            }
+        } else {
+            // 回退：逐帧 screencap
+            got = ScreenCaptureRGBA(fr);
+        }
+        if (got && fr.width > 0 && fr.height > 0) {
             int cs = g_captureSize.load();
             int capW = fr.width, capH = fr.height;
             int ox = 0, oy = 0;
@@ -179,6 +197,13 @@ static void InferLoop() {
 
 static void StartInfer() {
     if (g_captureRunning) return;
+    // 启动高帧率 H264 流式采集（原生分辨率，居中裁剪在采集线程内完成）
+    if (!g_h264.Start(displayInfo.width, displayInfo.height, 8 * 1000 * 1000)) {
+        printf("[yolo] H264 capture start failed: %s, fallback to screencap\n",
+               g_h264.LastError());
+    } else {
+        printf("[yolo] H264 capture started\n");
+    }
     g_captureRunning = true;
     g_inferRunning = true;
     g_captureThread = std::thread(CaptureLoop);
@@ -192,6 +217,7 @@ static void StopInfer() {
     g_frameCv.notify_all();
     if (g_captureThread.joinable()) g_captureThread.join();
     if (g_inferThread.joinable()) g_inferThread.join();
+    g_h264.Stop();
 }
 #endif // ENABLE_YOLO
 
@@ -312,8 +338,10 @@ void Layout_tick_UI() {
     if (yoloOn) {
         ImDrawList *fdl = ImGui::GetForegroundDrawList();
         char hud[128];
-        snprintf(hud, sizeof(hud), "推理 FPS: %.1f  |  引擎: %s",
-                 g_inferFps.load(), g_detector.IsLoaded() ? g_detector.EngineName() : "未加载");
+        snprintf(hud, sizeof(hud), "推理 FPS: %.1f  |  %s  |  %s",
+                 g_inferFps.load(),
+                 g_detector.IsLoaded() ? g_detector.EngineName() : "未加载",
+                 g_h264.Running() ? "H264流式" : "逐帧screencap");
         const char *text = hud;
         ImVec2 tsz = ImGui::CalcTextSize(text);
         float pad = 8.0f;

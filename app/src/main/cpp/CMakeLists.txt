@@ -16,6 +16,7 @@ add_executable(imgui_overlay
     src/main.cpp
     src/Android_draw/draw.cpp
     src/Android_touch/TouchHelperA.cpp
+    src/H264/H264Stream.cpp
     src/ImGui/imgui.cpp
     src/ImGui/imgui_demo.cpp
     src/ImGui/imgui_draw.cpp
@@ -52,6 +53,7 @@ target_link_libraries(imgui_overlay PRIVATE
     android
     EGL
     GLESv3
+    mediandk
 )
 
 # ---- YOLO 推理：TensorFlow Lite + NNAPI delegate（可选）----
