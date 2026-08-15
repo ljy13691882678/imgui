@@ -43,6 +43,7 @@ private:
 
     void    *model_ = nullptr;        // TfLiteModel*
     void    *interpreter_ = nullptr;  // TfLiteInterpreter*
+    void    *nnDelegate_ = nullptr;   // TfLiteDelegate* (NNAPI), 需活得比解释器久
     std::string lastError_;
     std::vector<uint8_t> inputBuf_;
     float conf_ = 0.25f;

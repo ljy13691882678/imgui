@@ -1,7 +1,7 @@
 #ifdef ENABLE_YOLO
 #include "tensorflow/lite/c/c_api.h"
 #include "tensorflow/lite/c/c_api_types.h"
-#include "tensorflow/lite/delegates/nnapi/nnapi_delegate_c.h"
+#include "tensorflow/lite/delegates/nnapi/nnapi_delegate_c_api.h"
 #endif
 
 #include "Yolo/YoloDetector.h"
@@ -18,8 +18,10 @@ YoloDetector::~YoloDetector() { Unload(); }
 void YoloDetector::Unload() {
 #ifdef ENABLE_YOLO
     if (interpreter_) TfLiteInterpreterDelete((TfLiteInterpreter *)interpreter_);
+    if (nnDelegate_) TfLiteNnapiDelegateDelete((TfLiteDelegate *)nnDelegate_);
     if (model_) TfLiteModelDelete((TfLiteModel *)model_);
     interpreter_ = nullptr;
+    nnDelegate_ = nullptr;
     model_ = nullptr;
 #endif
 }
@@ -43,9 +45,11 @@ bool YoloDetector::LoadModel(const std::string &path) {
     TfLiteInterpreterOptionsSetNumThreads(opts, 2);
 
     // 启用 NNAPI delegate：优先走骁龙 Hexagon NPU，不支持的算子自动回落 CPU
-    TfLiteDelegate *nnapi = TfLiteGetNNAPIDelegate();
+    TfLiteNnapiDelegateOptions nnOpts = TfLiteNnapiDelegateOptionsDefault();
+    TfLiteDelegate *nnapi = TfLiteNnapiDelegateCreate(&nnOpts);
     if (nnapi) {
         TfLiteInterpreterOptionsAddDelegate(opts, nnapi);
+        nnDelegate_ = nnapi;
         printf("[yolo] NNAPI delegate enabled\n");
     } else {
         printf("[yolo] NNAPI delegate unavailable, fallback CPU\n");
@@ -54,12 +58,16 @@ bool YoloDetector::LoadModel(const std::string &path) {
     TfLiteInterpreter *interp = TfLiteInterpreterCreate(model, opts);
     TfLiteInterpreterOptionsDelete(opts);
     if (!interp) {
+        if (nnDelegate_) TfLiteNnapiDelegateDelete((TfLiteDelegate *)nnDelegate_);
+        nnDelegate_ = nullptr;
         TfLiteModelDelete(model);
         lastError_ = "TfLiteInterpreterCreate failed";
         return false;
     }
     if (TfLiteInterpreterAllocateTensors(interp) != kTfLiteOk) {
         TfLiteInterpreterDelete(interp);
+        if (nnDelegate_) TfLiteNnapiDelegateDelete((TfLiteDelegate *)nnDelegate_);
+        nnDelegate_ = nullptr;
         TfLiteModelDelete(model);
         lastError_ = "AllocateTensors failed";
         return false;
@@ -70,6 +78,8 @@ bool YoloDetector::LoadModel(const std::string &path) {
     if (!in || TfLiteTensorType(in) != kTfLiteUInt8) {
         // 输入必须是 uint8 int8 量化
         TfLiteInterpreterDelete(interp);
+        if (nnDelegate_) TfLiteNnapiDelegateDelete((TfLiteDelegate *)nnDelegate_);
+        nnDelegate_ = nullptr;
         TfLiteModelDelete(model);
         lastError_ = "input tensor not uint8";
         return false;
