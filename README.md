@@ -99,10 +99,12 @@ adb shell "chmod 755 /data/local/tmp/imgui_overlay && /data/local/tmp/imgui_over
 - 数据来源：root 实时采集屏幕（`screencap`）。
 - 检测框按**真实屏幕坐标**直接描边叠加在透明全屏悬浮层上，不遮挡真实屏幕。
 - 控制面板为**单个可收起面板**：点击「收起 <<」缩成图标，再点图标展开。
-  面板内含三组折叠分区：
+  面板内含四组折叠分区：
   - **推理参数**：检测开关、置信度、IOU。
   - **模型与显示**：模型路径、显示检测框、显示标签。
+  - **类别设置**：类别名称（逗号分隔，按类别ID顺序）、启用类别过滤、仅显示的类别ID。
   - **性能信息**：帧率、推理耗时、总耗时、检测数量。
+- 右上角「退出」按钮可结束悬浮窗（结束 imgui 进程）。
 
 ### 用前准备
 
@@ -110,10 +112,11 @@ adb shell "chmod 755 /data/local/tmp/imgui_overlay && /data/local/tmp/imgui_over
 2. 把模型放到设备目录（App 启动时自动创建）：
 
 ```bash
-adb push yolov8n-int8.tflite /data/local/tmp/models/
+adb push valorant_256_v26n.tflite /data/local/tmp/models/
 ```
 
-3. 打开面板 → 输入模型路径（默认 `/data/local/tmp/models/yolov8n-int8.tflite`）→ 勾选「启用检测」→ 点「加载模型」。
+3. 打开面板 → 输入模型路径（默认 `/data/local/tmp/models/valorant_256_v26n.tflite`）→ 勾选「启用检测」→ 点「加载模型」。
+4. 在「类别设置」里按类别 ID 顺序填写类别名称（如 `player,enemy,head`），需要筛选时勾选「启用类别过滤」并填入要显示的类别 ID（如 `0,1`）。
 
 > 说明：模型需为 **uint8 int8 量化**；NNAPI 命中 NPU 为尽力而为，个别算子回退 CPU 不影响运行。
 > 若需每一层都强制走 NPU，需改用 QNN 方案（本版本不启用）。

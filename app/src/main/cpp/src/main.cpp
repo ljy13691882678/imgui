@@ -35,6 +35,29 @@ int abs_ScreenY = 0;
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <set>
+#include <sstream>
+#include <cstdlib>
+#include <cstring>
+
+// 解析逗号分隔字符串（去空白），用于类别名称 / 类别过滤
+static std::vector<std::string> ParseCSV(const char *s) {
+    std::vector<std::string> out;
+    std::stringstream ss(s ? s : "");
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        size_t b = item.find_first_not_of(" \t");
+        size_t e = item.find_last_not_of(" \t");
+        if (b == std::string::npos) continue;
+        out.push_back(item.substr(b, e - b + 1));
+    }
+    return out;
+}
+
+// 类别过滤：filter 为空表示显示全部，否则仅显示集合内的 classId
+static bool ClassAllowed(int classId, const std::set<int> &filter) {
+    return filter.empty() || filter.count(classId) > 0;
+}
 
 static YoloDetector        g_detector;
 static std::mutex          g_detMutex;
@@ -131,24 +154,45 @@ void Layout_tick_UI() {
     static bool showLabels = true;          // 显示标签
     static float conf = 0.25f;
     static float iou = 0.45f;
-    static char modelPath[512] = "/data/local/tmp/models/yolov8n-int8.tflite";
+    static char modelPath[512] = "/data/local/tmp/models/valorant_256_v26n.tflite";
     static bool modelLoadFailed = false;
+
+    // 类别设置：名称（逗号分隔）+ 过滤
+    static char classNames[2048] = "player,enemy,head";
+    static bool enableClassFilter = false;
+    static char classFilter[256] = "";
 
 #ifdef ENABLE_YOLO
     // 同步阈值到检测器
     g_detector.SetConfidence(conf);
     g_detector.SetIou(iou);
 
-    // 1) 在透明全屏层上叠加检测框（真实屏幕坐标）
+    // 解析类别名称与过滤集合
+    std::vector<std::string> names = ParseCSV(classNames);
+    std::set<int> filter;
+    if (enableClassFilter) {
+        for (auto &tok : ParseCSV(classFilter)) {
+            int v = atoi(tok.c_str());
+            if (v >= 0) filter.insert(v);
+        }
+    }
+
+    // 1) 在透明全屏层上叠加检测框（真实屏幕坐标，描边框）
     if (showBoxes && yoloOn) {
         ImDrawList *dl = ImGui::GetBackgroundDrawList();
         std::lock_guard<std::mutex> lk(g_detMutex);
         for (const auto &d : g_detections) {
+            if (!ClassAllowed(d.classId, filter)) continue;
             dl->AddRect(ImVec2(d.x1, d.y1), ImVec2(d.x2, d.y2),
                         IM_COL32(0, 255, 0, 255), 0.0f, 0, 3.0f);
             if (showLabels) {
-                char label[96];
-                snprintf(label, sizeof(label), "id%d %.2f", d.classId, d.score);
+                char label[128];
+                const char *cname = (d.classId >= 0 && d.classId < (int)names.size())
+                                        ? names[d.classId].c_str() : nullptr;
+                if (cname && cname[0])
+                    snprintf(label, sizeof(label), "%s %.2f", cname, d.score);
+                else
+                    snprintf(label, sizeof(label), "id%d %.2f", d.classId, d.score);
                 dl->AddText(ImVec2(d.x1, d.y1 - 16), IM_COL32(0, 255, 0, 255), label);
             }
         }
@@ -166,13 +210,15 @@ void Layout_tick_UI() {
         ImGui::End();
     } else {
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(380, 0), ImGuiCond_FirstUseEver);
         ImGui::Begin("YOLO 控制", nullptr,
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
 
         if (ImGui::Button("收起 <<")) collapsed = true;
         ImGui::SameLine();
         ImGui::Text("可拖动本窗口");
+        ImGui::SameLine();
+        if (ImGui::Button("退出")) main_thread_flag = false;
         ImGui::Separator();
 
         // ---- 推理参数 ----
@@ -202,6 +248,17 @@ void Layout_tick_UI() {
             ImGui::InputText("模型路径", modelPath, sizeof(modelPath));
             ImGui::Checkbox("显示检测框", &showBoxes);
             ImGui::Checkbox("显示标签", &showLabels);
+        }
+
+        // ---- 类别设置 ----
+        if (ImGui::CollapsingHeader("类别设置", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::TextWrapped("类别名称按类别ID顺序用逗号分隔，例如：player,enemy,head");
+            ImGui::InputText("类别名称", classNames, sizeof(classNames));
+            ImGui::Checkbox("启用类别过滤", &enableClassFilter);
+            if (enableClassFilter) {
+                ImGui::TextWrapped("仅显示这些类别ID（逗号分隔），留空=全部");
+                ImGui::InputText("类别过滤", classFilter, sizeof(classFilter));
+            }
         }
 
         // ---- 性能信息 ----
