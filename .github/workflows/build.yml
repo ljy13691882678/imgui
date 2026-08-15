@@ -1,0 +1,53 @@
+name: Build Android ImGui Executable
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (${{ matrix.variant.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - name: vulkan
+            opengl: 0
+          - name: opengl
+            opengl: 1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Android NDK (r25c)
+        run: |
+          curl -sL -o ndk.zip https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+          unzip -q ndk.zip
+          echo "NDK_HOME=${GITHUB_WORKSPACE}/android-ndk-r25c" >> "${GITHUB_ENV}"
+
+      - name: Select render backend
+        working-directory: _extracted/安卓环境
+        run: |
+          sed -i "s/^OPENGL_DRAW = .*/OPENGL_DRAW = ${{ matrix.variant.opengl }}/" jni/Android.mk
+          grep -n '^OPENGL_DRAW' jni/Android.mk
+
+      - name: Build with ndk-build
+        working-directory: _extracted/安卓环境
+        run: |
+          export PATH="${NDK_HOME}:${PATH}"
+          ndk-build -j2
+
+      - name: Show outputs
+        run: |
+          find _extracted/安卓环境/libs -type f -exec ls -lh {} \;
+
+      - name: Upload executable (${{ matrix.variant.name }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: imgui-${{ matrix.variant.name }}-arm64
+          path: _extracted/安卓环境/libs/arm64-v8a/
+          if-no-files-found: error
