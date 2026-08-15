@@ -75,39 +75,28 @@ static std::condition_variable g_frameCv;
 static std::vector<uint8_t>    g_latestRgba;   // 最新一帧 RGBA
 static int g_latestW = 0;
 static int g_latestH = 0;
+static int g_latestOx = 0;   // 采集范围在屏幕上的原点（裁剪时为居中偏移）
+static int g_latestOy = 0;
 static bool g_frameReady = false;
 
-// 采集尺寸选择：0=全屏，否则为方形边长（640/416/320/256）
+// 采集尺寸选择：0=全屏，否则为屏幕正中间的正方形边长（640/416/320/256）
 static std::atomic<int> g_captureSize{0};
-// 当前用于推理的采集尺寸（与 g_detections 一起在 g_detMutex 下更新）
+// 当前用于推理的采集尺寸与采集范围原点（与 g_detections 一起在 g_detMutex 下更新）
 static int g_capW = 0;
 static int g_capH = 0;
+static int g_ox = 0;
+static int g_oy = 0;
 
-// RGBA 双线性缩放到目标方形尺寸（用于降低采集分辨率，减小预处理开销）
-static void ResizeRGBA(const uint8_t *src, int sw, int sh,
-                       std::vector<uint8_t> &dst, int ds) {
-    dst.resize((size_t)ds * ds * 4);
-    for (int y = 0; y < ds; y++) {
-        float sy = (sh > 1) ? (y + 0.5f) * sh / ds - 0.5f : 0.0f;
-        if (sy < 0) sy = 0; else if (sy > sh - 1) sy = (float)(sh - 1);
-        int y0 = (int)sy;
-        int y1 = y0 + 1 < sh ? y0 + 1 : sh - 1;
-        float fy = sy - y0;
-        for (int x = 0; x < ds; x++) {
-            float sx = (sw > 1) ? (x + 0.5f) * sw / ds - 0.5f : 0.0f;
-            if (sx < 0) sx = 0; else if (sx > sw - 1) sx = (float)(sw - 1);
-            int x0 = (int)sx;
-            int x1 = x0 + 1 < sw ? x0 + 1 : sw - 1;
-            float fx = sx - x0;
-            uint8_t *out = &dst[((size_t)y * ds + x) * 4];
-            for (int c = 0; c < 4; c++) {
-                float v = (1 - fy) * (1 - fx) * src[((size_t)y0 * sw + x0) * 4 + c]
-                        + (1 - fy) * fx      * src[((size_t)y0 * sw + x1) * 4 + c]
-                        + fy      * (1 - fx) * src[((size_t)y1 * sw + x0) * 4 + c]
-                        + fy      * fx       * src[((size_t)y1 * sw + x1) * 4 + c];
-                out[c] = (uint8_t)(v + 0.5f);
-            }
-        }
+// 在屏幕正中间裁剪一个 cs x cs 的 RGBA 区域
+static void CropCenterRGBA(const uint8_t *src, int sw, int sh,
+                           std::vector<uint8_t> &dst, int cs, int &ox, int &oy) {
+    ox = (sw - cs) / 2;
+    oy = (sh - cs) / 2;
+    dst.resize((size_t)cs * cs * 4);
+    for (int y = 0; y < cs; y++) {
+        memcpy(&dst[(size_t)y * cs * 4],
+               &src[((size_t)(oy + y) * sw + ox) * 4],
+               (size_t)cs * 4);
     }
 }
 
@@ -119,10 +108,12 @@ static void CaptureLoop() {
         if (ScreenCaptureRGBA(fr) && fr.width > 0 && fr.height > 0) {
             int cs = g_captureSize.load();
             int capW = fr.width, capH = fr.height;
-            if (cs > 0) {  // 按所选尺寸降采样（方形）
-                std::vector<uint8_t> small;
-                ResizeRGBA(fr.rgba.data(), fr.width, fr.height, small, cs);
-                fr.rgba = std::move(small);
+            int ox = 0, oy = 0;
+            if (cs > 0 && cs < fr.width && cs < fr.height) {
+                // 采集屏幕正中间 cs x cs 区域
+                std::vector<uint8_t> cropped;
+                CropCenterRGBA(fr.rgba.data(), fr.width, fr.height, cropped, cs, ox, oy);
+                fr.rgba = std::move(cropped);
                 capW = cs;
                 capH = cs;
             }
@@ -131,6 +122,8 @@ static void CaptureLoop() {
                 g_latestRgba = std::move(fr.rgba);
                 g_latestW = capW;
                 g_latestH = capH;
+                g_latestOx = ox;
+                g_latestOy = oy;
                 g_frameReady = true;
             }
             g_frameCv.notify_one();
@@ -161,8 +154,10 @@ static void InferLoop() {
         {
             std::lock_guard<std::mutex> lk(g_detMutex);
             g_detections = std::move(dets);
-            g_capW = w;   // 记录本次推理的采集尺寸，供绘制缩放到全屏
+            g_capW = w;   // 记录本次推理的采集尺寸与采集范围原点，供绘制还原到全屏
             g_capH = h;
+            g_ox = g_latestOx;
+            g_oy = g_latestOy;
         }
     }
     printf("[yolo] inference thread stopped\n");
@@ -274,12 +269,11 @@ void Layout_tick_UI() {
     if (showBoxes && yoloOn) {
         ImDrawList *dl = ImGui::GetBackgroundDrawList();
         std::lock_guard<std::mutex> lk(g_detMutex);
-        // 采集帧尺寸 -> 全屏坐标 的缩放（全屏采集时 g_capW/H=全屏尺寸，缩放为 1）
-        float sx = (g_capW > 0) ? (float)abs_ScreenX / g_capW : 1.0f;
-        float sy = (g_capH > 0) ? (float)abs_ScreenY / g_capH : 1.0f;
+        const int ox = g_ox, oy = g_oy;   // 采集范围在屏幕上的原点（全屏为 0,0）
+        const int capW = g_capW, capH = g_capH;
         for (const auto &d : g_detections) {
             if (!ClassAllowed(d.classId, filter)) continue;
-            ImVec2 p1(d.x1 * sx, d.y1 * sy), p2(d.x2 * sx, d.y2 * sy);
+            ImVec2 p1(d.x1 + ox, d.y1 + oy), p2(d.x2 + ox, d.y2 + oy);
             dl->AddRect(p1, p2,
                         IM_COL32(0, 255, 0, 255), 0.0f, 0, 3.0f);
             if (showLabels) {
@@ -292,6 +286,11 @@ void Layout_tick_UI() {
                     snprintf(label, sizeof(label), "id%d %.2f", d.classId, d.score);
                 dl->AddText(ImVec2(p1.x, p1.y - 16), IM_COL32(0, 255, 0, 255), label);
             }
+        }
+        // 2) 描出采集范围（让用户知道当前采集区域在哪）
+        if (capW > 0 && capH > 0) {
+            dl->AddRect(ImVec2(ox, oy), ImVec2(ox + capW, oy + capH),
+                        IM_COL32(255, 0, 0, 255), 0.0f, 0, 2.0f);
         }
     }
 #endif
