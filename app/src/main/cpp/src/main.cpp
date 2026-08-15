@@ -34,6 +34,7 @@ int abs_ScreenY = 0;
 #include "Yolo/ScreenCapture.h"
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 #include <atomic>
 #include <set>
 #include <sstream>
@@ -62,33 +63,80 @@ static bool ClassAllowed(int classId, const std::set<int> &filter) {
 static YoloDetector        g_detector;
 static std::mutex          g_detMutex;
 static std::vector<Detection> g_detections;
+
+// 采集 → 推理 流水线：采集线程持续抓最新屏幕帧，推理线程只跑最新帧，两者重叠互不阻塞
+static std::thread         g_captureThread;
 static std::thread         g_inferThread;
+static std::atomic<bool>   g_captureRunning{false};
 static std::atomic<bool>   g_inferRunning{false};
 
-static void CaptureAndInfer() {
-    printf("[yolo] inference thread started\n");
-    while (g_inferRunning) {
+static std::mutex              g_frameMutex;
+static std::condition_variable g_frameCv;
+static std::vector<uint8_t>    g_latestRgba;   // 最新一帧 RGBA
+static int g_latestW = 0;
+static int g_latestH = 0;
+static bool g_frameReady = false;
+
+// 采集线程：以屏幕变化频率持续抓取最新帧（RAW screencap，无 PNG 编解码）
+static void CaptureLoop() {
+    printf("[yolo] capture thread started\n");
+    while (g_captureRunning) {
         CapturedFrame fr;
-        if (ScreenCaptureRGBA(fr)) {
-            std::vector<Detection> dets = g_detector.Detect(fr.rgba.data(), fr.width, fr.height);
+        if (ScreenCaptureRGBA(fr) && fr.width > 0 && fr.height > 0) {
             {
-                std::lock_guard<std::mutex> lk(g_detMutex);
-                g_detections = std::move(dets);
+                std::lock_guard<std::mutex> lk(g_frameMutex);
+                g_latestRgba = std::move(fr.rgba);
+                g_latestW = fr.width;
+                g_latestH = fr.height;
+                g_frameReady = true;
             }
+            g_frameCv.notify_one();
+        }
+    }
+    printf("[yolo] capture thread stopped\n");
+}
+
+// 推理线程：取最新一帧推理（采集快时自动跳过中间帧，始终用最新画面）
+static void InferLoop() {
+    printf("[yolo] inference thread started\n");
+    std::vector<uint8_t> rgba;
+    while (true) {
+        int w = 0, h = 0;
+        {
+            std::unique_lock<std::mutex> lk(g_frameMutex);
+            g_frameCv.wait(lk, [] { return g_frameReady || !g_captureRunning; });
+            if (!g_frameReady) {
+                if (!g_captureRunning) break;  // 采集停止且无新帧 → 退出
+                continue;
+            }
+            rgba = std::move(g_latestRgba);
+            w = g_latestW;
+            h = g_latestH;
+            g_frameReady = false;
+        }
+        std::vector<Detection> dets = g_detector.Detect(rgba.data(), w, h);
+        {
+            std::lock_guard<std::mutex> lk(g_detMutex);
+            g_detections = std::move(dets);
         }
     }
     printf("[yolo] inference thread stopped\n");
 }
 
 static void StartInfer() {
-    if (g_inferRunning) return;
+    if (g_captureRunning) return;
+    g_captureRunning = true;
     g_inferRunning = true;
-    g_inferThread = std::thread(CaptureAndInfer);
+    g_captureThread = std::thread(CaptureLoop);
+    g_inferThread = std::thread(InferLoop);
 }
 
 static void StopInfer() {
-    if (!g_inferRunning) return;
+    if (!g_captureRunning) return;
+    g_captureRunning = false;
     g_inferRunning = false;
+    g_frameCv.notify_all();
+    if (g_captureThread.joinable()) g_captureThread.join();
     if (g_inferThread.joinable()) g_inferThread.join();
 }
 #endif // ENABLE_YOLO
