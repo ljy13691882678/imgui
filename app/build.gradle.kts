@@ -101,8 +101,9 @@ val buildNativeBinary by tasks.registering {
 
 val collectNativeBinary by tasks.registering(Copy::class) {
     dependsOn(buildNativeBinary)
-    from(nativeBuildDir)
-    include("**/imgui_overlay")
+    // 从 abi 目录直接复制，去掉 arm64-v8a/ 层级，使产物落在 assets/bin/imgui_overlay
+    from(nativeBuildDir.get().dir(abi))
+    include("imgui_overlay")
     into(nativeAssetsDir.get().dir("bin"))
     rename { "imgui_overlay" }
     duplicatesStrategy = DuplicatesStrategy.INCLUDE
