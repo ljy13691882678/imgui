@@ -77,11 +77,13 @@ class MainActivity : Activity() {
         }
 
         // 2. 通过 su 部署到 /data/local/tmp 并后台运行
+        //    setsid 让进程完全脱离 su 会话，避免 su 退出后后台进程被系统回收
         val shell = StringBuilder()
         shell.append("cp '$localBin' '$remoteBin'")
         shell.append(" && chmod 755 '$remoteBin'")
         shell.append(" && cd '$remoteDir'")
-        shell.append(" && nohup ./imgui_overlay > '$remoteLog' 2>&1 & echo \$! > '$remotePid'")
+        shell.append(" && setsid nohup ./imgui_overlay < /dev/null > '$remoteLog' 2>&1 &")
+        shell.append(" echo \$! > '$remotePid'")
         shell.append(" && echo '进程已启动，pid: ' ; cat '$remotePid'")
 
         val output = runAsRoot(su, shell.toString())
@@ -114,26 +116,41 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * 找到可用的 su 并实际验证其能提权（su -c id 返回 uid=0）。
+     * 仅检查文件存在不可靠（KernelSU / Magisk 挂载方式不同），
+     * 因此对每个候选路径都真实执行一次提权测试。
+     */
     private fun findSu(): String? {
-        val candidates = listOf(
+        val candidates = mutableListOf(
+            "/data/adb/magisk/bin/su",
+            "/data/adb/ksu/bin/ksu",
+            "/data/adb/ksu/bin/su",
             "/sbin/su",
             "/su/bin/su",
             "/system/bin/su",
             "/system/xbin/su",
             "/system/bin/.ext/.su",
-            "/vendor/bin/su",
-            "/data/adb/magisk/bin/su"
+            "/vendor/bin/su"
         )
-        for (c in candidates) {
-            if (File(c).exists()) return c
-        }
-        // 回退：尝试 PATH 中的 su
-        return try {
+        // 追加 PATH 中能找到的 su
+        try {
             val p = ProcessBuilder("which", "su").redirectErrorStream(true).start()
             val out = p.inputStream.bufferedReader().readText().trim()
-            if (out.isNotBlank()) out.lines().first() else null
-        } catch (e: Exception) {
-            null
+            if (out.isNotBlank()) candidates += out.lines()
+        } catch (_: Exception) {
         }
+        // 去重
+        val seen = HashSet<String>()
+        val unique = candidates.filter { seen.add(it) }
+
+        for (c in unique) {
+            if (!File(c).exists()) continue
+            val out = runAsRoot(c, "id")
+            if (out.contains("uid=0") || out.contains("uid=0(")) {
+                return c
+            }
+        }
+        return null
     }
 }
