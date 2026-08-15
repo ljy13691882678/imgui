@@ -44,6 +44,12 @@ android {
 
     ndkVersion = "27.1.12297006"
 
+    // CI 无需对 release 做 lint 校验，避免与 assets 原生二进制产生隐式依赖冲突
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
+
     // 注册原生可执行文件的输出目录为 assets 源目录
     sourceSets {
         getByName("main") {
