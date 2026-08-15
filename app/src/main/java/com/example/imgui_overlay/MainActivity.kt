@@ -95,9 +95,13 @@ class MainActivity : Activity() {
             runOnUiThread { appendLog("已提取原生二进制到 ${localBin.absolutePath}") }
 
             // 2. 通过 su 部署到 /data/local/tmp 并后台运行
+            //    先杀掉残留进程（否则 cp 会因 Text file busy 失败），再清空旧日志
             //    setsid 让进程完全脱离 su 会话，避免 su 退出后后台进程被系统回收
             val shell = StringBuilder()
-            shell.append("cp '$localBin' '$remoteBin'")
+            shell.append("pkill -x imgui_overlay 2>/dev/null;")
+            shell.append(" sleep 1;")
+            shell.append(" rm -f '$remoteLog' '$remotePid';")
+            shell.append(" cp '$localBin' '$remoteBin'")
             shell.append(" && chmod 755 '$remoteBin'")
             shell.append(" && cd '$remoteDir'")
             shell.append(" && setsid ./imgui_overlay < /dev/null > '$remoteLog' 2>&1 &")
