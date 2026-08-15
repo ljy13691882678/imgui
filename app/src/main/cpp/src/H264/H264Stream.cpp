@@ -11,6 +11,7 @@
 
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
+#include <media/NdkImage.h>
 
 // AMediaCodec 输出颜色格式常量（与 AMediaFormat 兼容）
 #define IMG_FMT_RGBA8888       0x11   // COLOR_Format32bitRGBA8888
@@ -192,25 +193,31 @@ void H264Stream::DecodeLoop() {
             if (w > 0 && h > 0) { outW_ = w; outH_ = h; }
         } else if (outIdx >= 0) {
             if (binfo.size > 0) {
-                size_t sz = 0;
-                uint8_t *buf = AMediaCodec_getOutputBuffer(codec, outIdx, &sz);
-                if (buf && sz >= (size_t)binfo.size) {
-                    std::vector<uint8_t> rgba((size_t)outW_ * outH_ * 4);
-                    int32_t fmt_out = CurrentOutputColorFormat(codec);
-                    ConvertOutput(buf, (size_t)binfo.size, outW_, outH_, rgba.data(), fmt_out);
-                    {
-                        std::lock_guard<std::mutex> lk(frameMutex_);
-                        latest_ = std::move(rgba);
-                        latestW_ = outW_;
-                        latestH_ = outH_;
+                // 用官方 AImage 接口读取解码输出，正确处理 RGBA / YUV420 的 stride 与像素步长
+                AImage *img = nullptr;
+                if (AMediaCodec_getOutputImage(codec, outIdx, &img) == AMEDIA_OK && img) {
+                    int32_t iw = 0, ih = 0;
+                    AImage_getWidth(img, &iw);
+                    AImage_getHeight(img, &ih);
+                    if (iw > 0 && ih > 0) {
+                        std::vector<uint8_t> rgba((size_t)iw * ih * 4);
+                        if (ImageToRGBA(img, iw, ih, rgba.data())) {
+                            {
+                                std::lock_guard<std::mutex> lk(frameMutex_);
+                                latest_ = std::move(rgba);
+                                latestW_ = iw;
+                                latestH_ = ih;
+                            }
+                            frameCount++;
+                            if (firstFrame) {
+                                firstFrame = false;
+                                printf("[h264] first frame decoded %dx%d\n", iw, ih);
+                            } else if ((frameCount % 60) == 0) {
+                                printf("[h264] decoded %ld frames\n", frameCount);
+                            }
+                        }
                     }
-                    frameCount++;
-                    if (firstFrame) {
-                        firstFrame = false;
-                        printf("[h264] first frame decoded %dx%d\n", outW_, outH_);
-                    } else if ((frameCount % 60) == 0) {
-                        printf("[h264] decoded %ld frames\n", frameCount);
-                    }
+                    AImage_delete(img);
                 }
             }
             AMediaCodec_releaseOutputBuffer(codec, outIdx, false);
@@ -238,77 +245,63 @@ void H264Stream::DecodeLoop() {
     running_ = false;
 }
 
-int32_t H264Stream::CurrentOutputColorFormat(void *codec) {
-    AMediaFormat *of = AMediaCodec_getOutputFormat((AMediaCodec *)codec);
-    int32_t fmt = IMG_FMT_RGBA8888;
-    AMediaFormat_getInt32(of, AMEDIAFORMAT_KEY_COLOR_FORMAT, &fmt);
-    AMediaFormat_delete(of);
-    return fmt;
-}
+// 用 AImage 平面访问接口把解码输出转换为 RGBA8。
+// 通过 RowStride/PixelStride 正确处理实际的缓冲排列（含对齐 padding），
+// 兼容 RGBA_8888 单平面与 YUV_420_888 三平面两种常见输出。
+bool H264Stream::ImageToRGBA(AImage *img, int w, int h, uint8_t *dst) {
+    int32_t fmt = AImage_getFormat(img);
 
-// 将解码输出转换为 RGBA8。支持 RGBA/ARGB 与常见 YUV420 平面/半平面。
-void H264Stream::ConvertOutput(const uint8_t *src, size_t bytes, int w, int h,
-                               uint8_t *dst, int32_t fmt) {
-    const size_t need = (size_t)w * h * 4;
-    if (bytes < need) return;
-
-    switch (fmt) {
-        case IMG_FMT_RGBA_FLEXIBLE:
-        case IMG_FMT_RGBA8888: {
-            memcpy(dst, src, need);
-            return;
-        }
-        case IMG_FMT_ARGB8888: {
-            for (int i = 0; i < w * h; i++) {
-                dst[i * 4 + 0] = src[i * 4 + 1];
-                dst[i * 4 + 1] = src[i * 4 + 2];
-                dst[i * 4 + 2] = src[i * 4 + 3];
-                dst[i * 4 + 3] = 255;
+    if (fmt == AIMAGE_FORMAT_RGBA_8888) {
+        uint8_t *data = nullptr;
+        int len = 0;
+        if (AImage_getPlaneData(img, 0, &data, &len) != AMEDIA_OK || !data) return false;
+        int32_t rowStride = AImage_getPlaneRowStride(img, 0);
+        int32_t pixStride = AImage_getPlanePixelStride(img, 0);
+        for (int y = 0; y < h; y++) {
+            const uint8_t *src = data + (size_t)y * rowStride;
+            uint8_t *d = dst + (size_t)y * w * 4;
+            for (int x = 0; x < w; x++) {
+                d[x * 4 + 0] = src[x * pixStride + 0];
+                d[x * 4 + 1] = src[x * pixStride + 1];
+                d[x * 4 + 2] = src[x * pixStride + 2];
+                d[x * 4 + 3] = 255;
             }
-            return;
         }
-        case IMG_FMT_YUV420_PLANAR: { // I420: YYYY UU VV
-            const uint8_t *Y = src;
-            const uint8_t *U = src + (size_t)w * h;
-            const uint8_t *V = U + ((size_t)w * h) / 4;
-            for (int j = 0; j < h; j++) {
-                for (int i = 0; i < w; i++) {
-                    int yi = j * w + i;
-                    int uv = (j / 2) * (w / 2) + (i / 2);
-                    int y = Y[yi], u = U[uv] - 128, v = V[uv] - 128;
-                    int r = (298 * y + 409 * v + 128) >> 8;
-                    int g = (298 * y - 100 * u - 208 * v + 128) >> 8;
-                    int b = (298 * y + 516 * u + 128) >> 8;
-                    dst[yi * 4 + 0] = (uint8_t)(r < 0 ? 0 : (r > 255 ? 255 : r));
-                    dst[yi * 4 + 1] = (uint8_t)(g < 0 ? 0 : (g > 255 ? 255 : g));
-                    dst[yi * 4 + 2] = (uint8_t)(b < 0 ? 0 : (b > 255 ? 255 : b));
-                    dst[yi * 4 + 3] = 255;
-                }
-            }
-            return;
-        }
-        case IMG_FMT_YUV420_SEMI: { // NV12: YYYY UVUV
-            const uint8_t *Y = src;
-            const uint8_t *UV = src + (size_t)w * h;
-            for (int j = 0; j < h; j++) {
-                for (int i = 0; i < w; i++) {
-                    int yi = j * w + i;
-                    int uv = (j / 2) * w + (i & ~1);
-                    int y = Y[yi], u = UV[uv] - 128, v = UV[uv + 1] - 128;
-                    int r = (298 * y + 409 * v + 128) >> 8;
-                    int g = (298 * y - 100 * u - 208 * v + 128) >> 8;
-                    int b = (298 * y + 516 * u + 128) >> 8;
-                    dst[yi * 4 + 0] = (uint8_t)(r < 0 ? 0 : (r > 255 ? 255 : r));
-                    dst[yi * 4 + 1] = (uint8_t)(g < 0 ? 0 : (g > 255 ? 255 : g));
-                    dst[yi * 4 + 2] = (uint8_t)(b < 0 ? 0 : (b > 255 ? 255 : b));
-                    dst[yi * 4 + 3] = 255;
-                }
-            }
-            return;
-        }
-        default: {
-            memset(dst, 90, need);   // 未知格式置灰，避免崩溃
-            return;
-        }
+        return true;
     }
+
+    if (fmt == AIMAGE_FORMAT_YUV_420_888) {
+        uint8_t *Y = nullptr, *U = nullptr, *V = nullptr;
+        int ylen = 0, ulen = 0, vlen = 0;
+        AImage_getPlaneData(img, 0, &Y, &ylen);
+        AImage_getPlaneData(img, 1, &U, &ulen);
+        AImage_getPlaneData(img, 2, &V, &vlen);
+        if (!Y || !U || !V) return false;
+        int32_t yRs = AImage_getPlaneRowStride(img, 0);
+        int32_t uRs = AImage_getPlaneRowStride(img, 1);
+        int32_t vRs = AImage_getPlaneRowStride(img, 2);
+        int32_t uPs = AImage_getPlanePixelStride(img, 1);
+        int32_t vPs = AImage_getPlanePixelStride(img, 2);
+        for (int j = 0; j < h; j++) {
+            const uint8_t *yp = Y + (size_t)j * yRs;
+            const uint8_t *up = U + (size_t)(j / 2) * uRs;
+            const uint8_t *vp = V + (size_t)(j / 2) * vRs;
+            uint8_t *d = dst + (size_t)j * w * 4;
+            for (int i = 0; i < w; i++) {
+                int y = yp[i];
+                int u = up[(i / 2) * uPs] - 128;
+                int v = vp[(i / 2) * vPs] - 128;
+                int r = (298 * y + 409 * v + 128) >> 8;
+                int g = (298 * y - 100 * u - 208 * v + 128) >> 8;
+                int b = (298 * y + 516 * u + 128) >> 8;
+                d[i * 4 + 0] = (uint8_t)(r < 0 ? 0 : (r > 255 ? 255 : r));
+                d[i * 4 + 1] = (uint8_t)(g < 0 ? 0 : (g > 255 ? 255 : g));
+                d[i * 4 + 2] = (uint8_t)(b < 0 ? 0 : (b > 255 ? 255 : b));
+                d[i * 4 + 3] = 255;
+            }
+        }
+        return true;
+    }
+
+    return false;
 }

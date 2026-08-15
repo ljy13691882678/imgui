@@ -32,9 +32,7 @@ private:
     void DecodeLoop();                       // 解码线程主循环
     bool StartScreenRecord();                // 拉起 screenrecord 子进程
     void StopScreenRecord();
-    int32_t CurrentOutputColorFormat(void *codec);   // 查询解码输出颜色格式
-    static void ConvertOutput(const uint8_t *src, size_t bytes, int w, int h,
-                              uint8_t *dst, int32_t fmt);
+    static bool ImageToRGBA(void *img, int w, int h, uint8_t *dst);  // AImage → RGBA8
 
     // 内部状态
     volatile bool running_ = false;
