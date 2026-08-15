@@ -158,6 +158,8 @@ namespace android
                 systemVersionString.resize(__system_property_get("ro.build.version.release", systemVersionString.data()));
                 if (!systemVersionString.empty())
                     systemVersion = std::stoi(systemVersionString);
+                __android_log_print(ANDROID_LOG_INFO, "ImGui", "[+] system version = %zu", systemVersion);
+                printf("[imgui] system version = %zu\n", systemVersion);
 
                 if (9 > systemVersion)
                 {
@@ -436,11 +438,15 @@ namespace android
                 } else if (Functionals::GetInstance().systemVersion >= 10) {
                     result = Functionals::GetInstance().SurfaceComposerClient__CreateSurface(data, windowName, width, height, 1, flags, parentHandle, layerMetadata, nullptr);
                 }
-                
+                __android_log_print(ANDROID_LOG_INFO, "ImGui", "[+] createSurface ret=%p (system=%zu)", result.get(), Functionals::GetInstance().systemVersion);
+                printf("[imgui] createSurface ret=%p\n", result.get());
+
                 if (12 <= Functionals::GetInstance().systemVersion) {
                     static SurfaceComposerClientTransaction transaction;
                     transaction.SetTrustedOverlay(result, true);
                     transaction.Apply(false, true);
+                    __android_log_print(ANDROID_LOG_INFO, "ImGui", "[+] trusted overlay applied");
+                    printf("[imgui] trusted overlay applied\n");
                 }
                 return {result.get()};
             }

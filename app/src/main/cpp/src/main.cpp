@@ -29,17 +29,27 @@ int abs_ScreenY = 0;
 #endif
 
 int main(int argc, char *argv[]) {
+    // 关闭 stdout 缓冲：重定向到文件时 printf 立即写入，便于排错
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
+    printf("[imgui] main start, pid=%d\n", getpid());
     //获取屏幕信息
-    screen_config(); 
+    screen_config();
+    printf("[imgui] displayInfo: w=%d h=%d orientation=%d\n",
+           displayInfo.width, displayInfo.height, displayInfo.orientation);
     ::abs_ScreenX = (displayInfo.height > displayInfo.width ? displayInfo.height : displayInfo.width);
     ::abs_ScreenY = (displayInfo.height < displayInfo.width ? displayInfo.height : displayInfo.width);
     
     ::native_window_screen_x = (displayInfo.height > displayInfo.width ? displayInfo.height : displayInfo.width);
     ::native_window_screen_y = (displayInfo.height > displayInfo.width ? displayInfo.height : displayInfo.width);
+    printf("[imgui] window size: %dx%d\n", native_window_screen_x, native_window_screen_y);
     // 初始化imgui
     if (!initGUI_draw(native_window_screen_x, native_window_screen_y, true)) {
+        printf("[imgui] initGUI_draw FAILED\n");
         return -1;
     }
+    printf("[imgui] initGUI_draw OK\n");
 
         
     printf("安卓开发环境\n");

@@ -23,10 +23,14 @@ bool initGUI_draw(uint32_t _screen_x, uint32_t _screen_y, bool log) {
             return false;
         }
     #else
+        printf("[imgui] InitVulkan...\n");
         InitVulkan();
         SetupVulkan();
+        printf("[imgui] create native window %dx%d...\n", _screen_x, _screen_y);
         ::native_window = android::ANativeWindowCreator::Create("AImGui", _screen_x, _screen_y, true);
+        printf("[imgui] native_window=%p\n", ::native_window);
         SetupVulkanWindow(::native_window, (int) _screen_x, (int) _screen_y);
+        printf("[imgui] vulkan window setup done\n");
     #endif
     if (!ImGui_init()) {
         return false;
@@ -35,6 +39,7 @@ bool initGUI_draw(uint32_t _screen_x, uint32_t _screen_y, bool log) {
     #ifndef USE_OPENGL
         UploadFonts();
     #endif
+    printf("[imgui] initGUI_draw done\n");
      
     return true;
 }
