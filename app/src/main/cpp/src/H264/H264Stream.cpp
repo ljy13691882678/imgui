@@ -38,6 +38,7 @@ bool H264Stream::Start(int width, int height, int bitrate) {
 
     running_ = true;
     std::thread([this] { DecodeLoop(); }).detach();
+    printf("[h264] stream started %dx%d\n", outW_, outH_);
     return true;
 }
 
@@ -54,7 +55,7 @@ void H264Stream::Stop() {
 bool H264Stream::StartScreenRecord() {
     char cmd[256];
     snprintf(cmd, sizeof(cmd),
-             "screenrecord --size %dx%d --bit-rate %d --time-limit 180 -",
+             "screenrecord --size %dx%d --bit-rate %d --output-format=h264 --time-limit 180 -",
              outW_, outH_, bitrate_);
     procCmd_ = cmd;
 
@@ -112,6 +113,8 @@ void H264Stream::DecodeLoop() {
     AMediaFormat *fmt = AMediaFormat_new();
     int64_t tsUs = 0;   // 自增时间戳（单位 us）
     bool codecStarted = false;
+    long frameCount = 0;
+    bool firstFrame = true;
 
     while (running_) {
         if (!codec) {
@@ -201,6 +204,13 @@ void H264Stream::DecodeLoop() {
                         latestW_ = outW_;
                         latestH_ = outH_;
                     }
+                    frameCount++;
+                    if (firstFrame) {
+                        firstFrame = false;
+                        printf("[h264] first frame decoded %dx%d\n", outW_, outH_);
+                    } else if ((frameCount % 60) == 0) {
+                        printf("[h264] decoded %ld frames\n", frameCount);
+                    }
                 }
             }
             AMediaCodec_releaseOutputBuffer(codec, outIdx, false);
@@ -224,6 +234,7 @@ void H264Stream::DecodeLoop() {
         std::lock_guard<std::mutex> lk(frameMutex_);
         latest_.clear();
     }
+    printf("[h264] decode loop exit, err=%s\n", lastError_.empty() ? "none" : lastError_.c_str());
     running_ = false;
 }
 
