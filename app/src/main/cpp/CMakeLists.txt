@@ -68,7 +68,6 @@ if(TFLITE_ROOT_ENV AND TFLITE_LIB_ENV)
         z
         dl
         m
-        neuralnetworks
     )
 endif ()
 
