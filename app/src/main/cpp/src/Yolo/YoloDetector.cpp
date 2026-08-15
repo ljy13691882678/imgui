@@ -165,7 +165,9 @@ std::vector<Detection> YoloDetector::Detect(const uint8_t *rgba, int screenW, in
 
     const TfLiteTensor *out = TfLiteInterpreterGetOutputTensor((TfLiteInterpreter *)interpreter_, 0);
     if (!out) return {};
-    int32_t total = TfLiteTensorByteSize(out) / TfLiteTypeSize(TfLiteTensorType(out));
+    // 元素总数 = 各维度乘积
+    int32_t total = 1;
+    for (int i = 0; i < TfLiteTensorNumDims(out); i++) total *= TfLiteTensorDim(out, i);
     const void *raw = TfLiteTensorData(out);
     if (!raw) return {};
 
