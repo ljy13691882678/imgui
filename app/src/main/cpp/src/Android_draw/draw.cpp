@@ -160,10 +160,10 @@ void drawBegin() {
         // 用新尺寸重建窗口缓冲区与交换链，避免 OUT_OF_DATE 后渲染停止导致悬浮窗消失
         ANativeWindow_setBuffersGeometry(native_window, native_window_screen_x, native_window_screen_y, 0);
         #ifndef USE_OPENGL
+            // 旋转/尺寸变化后重建交换链，否则渲染在 OUT_OF_DATE 后停止导致悬浮窗消失。
+            // 注意：不要在这里访问 g_window（它恒为 nullptr，取值会发生段错误）。
             SwapChainRebuild(native_window_screen_x, native_window_screen_y);
         #endif
-        g_window->Pos.x = 100;
-        g_window->Pos.y = 125;
     }
 
     #ifdef USE_OPENGL

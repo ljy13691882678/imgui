@@ -1347,8 +1347,8 @@ void ImGui_ImplVulkanH_CreateWindowSwapChain(VkPhysicalDevice physical_device, V
     wd->Frames = nullptr;
     wd->FrameSemaphores = nullptr;
     wd->ImageCount = 0;
-    if (wd->RenderPass)
-        vkDestroyRenderPass(device, wd->RenderPass, allocator);
+    // RenderPass 保持跨交换链重建复用，避免销毁后 ImGui 渲染管道（在初始化时按原 RenderPass 创建）
+    // 引用到已被销毁的 RenderPass，导致旋转/尺寸变化后悬浮窗渲染失效（画面消失）。
     if (wd->Pipeline)
         vkDestroyPipeline(device, wd->Pipeline, allocator);
 
@@ -1411,8 +1411,8 @@ void ImGui_ImplVulkanH_CreateWindowSwapChain(VkPhysicalDevice physical_device, V
     if (old_swapchain)
         vkDestroySwapchainKHR(device, old_swapchain, allocator);
 
-    // Create the Render Pass
-    if (wd->UseDynamicRendering == false)
+    // Create the Render Pass (only once; reused across swapchain rebuilds)
+    if (wd->UseDynamicRendering == false && wd->RenderPass == VK_NULL_HANDLE)
     {
         VkAttachmentDescription attachment = {};
         attachment.format = wd->SurfaceFormat.format;
