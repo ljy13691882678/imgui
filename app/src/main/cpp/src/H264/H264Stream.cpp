@@ -9,9 +9,9 @@
 #include <signal.h>
 #include <sys/wait.h>
 
+#include <media/NdkImage.h>
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
-#include <media/NdkImage.h>
 
 // AMediaCodec 输出颜色格式常量（与 AMediaFormat 兼容）
 #define IMG_FMT_RGBA8888       0x11   // COLOR_Format32bitRGBA8888
@@ -189,7 +189,7 @@ void H264Stream::DecodeLoop() {
                 uint8_t hdr = buf[nalStart];
                 int nalType = (hdr >> 1) & 0x1F;
                 uint32_t flags = (nalType == 7 || nalType == 8)
-                                     ? AMEDIA_BUFFER_FLAG_CODEC_CONFIG : 0;  // SPS/PPS
+                                     ? AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG : 0;  // SPS/PPS
                 ssize_t inIdx = AMediaCodec_dequeueInputBuffer(codec, 10000);
                 if (inIdx >= 0) {
                     size_t cap = 0;
@@ -243,15 +243,20 @@ void H264Stream::DecodeLoop() {
                             frameCount++;
                             if (firstFrame) {
                                 firstFrame = false;
+                                int32_t dfmt = -1;
+                                AImage_getFormat(img, &dfmt);
                                 printf("[h264] first frame decoded %dx%d fmt=0x%x\n",
-                                       iw, ih, (unsigned)AImage_getFormat(img));
+                                       iw, ih, (unsigned)dfmt);
                             } else if ((frameCount % 60) == 0) {
                                 printf("[h264] decoded %ld frames\n", frameCount);
                             }
                         } else {
-                            if (firstFrame)
+                            if (firstFrame) {
+                                int32_t dfmt = -1;
+                                AImage_getFormat(img, &dfmt);
                                 printf("[h264] ImageToRGBA failed fmt=0x%x\n",
-                                       (unsigned)AImage_getFormat(img));
+                                       (unsigned)dfmt);
+                            }
                         }
                     }
                     AImage_delete(img);
@@ -285,15 +290,19 @@ void H264Stream::DecodeLoop() {
 // 用 AImage 平面访问接口把解码输出转换为 RGBA8。
 // 通过 RowStride/PixelStride 正确处理实际的缓冲排列（含对齐 padding），
 // 兼容 RGBA_8888 单平面与 YUV_420_888 三平面两种常见输出。
+// 注意：AImage_* 系列均为出参风格——返回 media_status_t，数值经指针输出。
 bool H264Stream::ImageToRGBA(AImage *img, int w, int h, uint8_t *dst) {
-    int32_t fmt = AImage_getFormat(img);
+    int32_t fmt = -1;
+    if (AImage_getFormat(img, &fmt) != AMEDIA_OK) return false;
 
     if (fmt == AIMAGE_FORMAT_RGBA_8888) {
         uint8_t *data = nullptr;
         int len = 0;
         if (AImage_getPlaneData(img, 0, &data, &len) != AMEDIA_OK || !data) return false;
-        int32_t rowStride = AImage_getPlaneRowStride(img, 0);
-        int32_t pixStride = AImage_getPlanePixelStride(img, 0);
+        int32_t rowStride = 0, pixStride = 0;
+        AImage_getPlaneRowStride(img, 0, &rowStride);
+        AImage_getPlanePixelStride(img, 0, &pixStride);
+        if (pixStride <= 0) pixStride = 4;
         for (int y = 0; y < h; y++) {
             const uint8_t *src = data + (size_t)y * rowStride;
             uint8_t *d = dst + (size_t)y * w * 4;
@@ -314,11 +323,14 @@ bool H264Stream::ImageToRGBA(AImage *img, int w, int h, uint8_t *dst) {
         AImage_getPlaneData(img, 1, &U, &ulen);
         AImage_getPlaneData(img, 2, &V, &vlen);
         if (!Y || !U || !V) return false;
-        int32_t yRs = AImage_getPlaneRowStride(img, 0);
-        int32_t uRs = AImage_getPlaneRowStride(img, 1);
-        int32_t vRs = AImage_getPlaneRowStride(img, 2);
-        int32_t uPs = AImage_getPlanePixelStride(img, 1);
-        int32_t vPs = AImage_getPlanePixelStride(img, 2);
+        int32_t yRs = 0, uRs = 0, vRs = 0, uPs = 0, vPs = 0;
+        AImage_getPlaneRowStride(img, 0, &yRs);
+        AImage_getPlaneRowStride(img, 1, &uRs);
+        AImage_getPlaneRowStride(img, 2, &vRs);
+        AImage_getPlanePixelStride(img, 1, &uPs);
+        AImage_getPlanePixelStride(img, 2, &vPs);
+        if (uPs <= 0) uPs = 1;
+        if (vPs <= 0) vPs = 1;
         for (int j = 0; j < h; j++) {
             const uint8_t *yp = Y + (size_t)j * yRs;
             const uint8_t *up = U + (size_t)(j / 2) * uRs;
