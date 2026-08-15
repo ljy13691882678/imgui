@@ -36,6 +36,7 @@ int abs_ScreenY = 0;
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <chrono>
 #include <set>
 #include <sstream>
 #include <cstdlib>
@@ -81,6 +82,8 @@ static bool g_frameReady = false;
 
 // 采集尺寸选择：0=全屏，否则为屏幕正中间的正方形边长（640/416/320/256）
 static std::atomic<int> g_captureSize{0};
+// 当前推理帧率（由推理线程按相邻两次出结果间隔计算）
+static std::atomic<float> g_inferFps{0.0f};
 // 当前用于推理的采集尺寸与采集范围原点（与 g_detections 一起在 g_detMutex 下更新）
 static int g_capW = 0;
 static int g_capH = 0;
@@ -136,6 +139,8 @@ static void CaptureLoop() {
 static void InferLoop() {
     printf("[yolo] inference thread started\n");
     std::vector<uint8_t> rgba;
+    auto last = std::chrono::steady_clock::now();
+    float ema = 0.0f;
     while (true) {
         int w = 0, h = 0;
         {
@@ -158,6 +163,15 @@ static void InferLoop() {
             g_capH = h;
             g_ox = g_latestOx;
             g_oy = g_latestOy;
+        }
+        // 推理帧率：相邻两次出结果间隔的滑动平均
+        auto now = std::chrono::steady_clock::now();
+        double dt = std::chrono::duration<double>(now - last).count();
+        last = now;
+        if (dt > 0.0) {
+            float inst = (float)(1.0 / dt);
+            ema = (ema == 0.0f) ? inst : ema * 0.9f + inst * 0.1f;
+            g_inferFps.store(ema);
         }
     }
     printf("[yolo] inference thread stopped\n");
@@ -292,6 +306,24 @@ void Layout_tick_UI() {
             dl->AddRect(ImVec2(ox, oy), ImVec2(ox + capW, oy + capH),
                         IM_COL32(255, 0, 0, 255), 0.0f, 0, 2.0f);
         }
+    }
+
+    // 3) 右上角常驻 HUD：推理帧率 + 推理引擎
+    if (yoloOn) {
+        ImDrawList *fdl = ImGui::GetForegroundDrawList();
+        char hud[128];
+        snprintf(hud, sizeof(hud), "推理 FPS: %.1f  |  引擎: %s",
+                 g_inferFps.load(), g_detector.IsLoaded() ? g_detector.EngineName() : "未加载");
+        const char *text = hud;
+        ImVec2 tsz = ImGui::CalcTextSize(text);
+        float pad = 8.0f;
+        float x = abs_ScreenX - tsz.x - pad - 10.0f;
+        float y = 10.0f;
+        // 半透明背景
+        fdl->AddRectFilled(ImVec2(x - pad, y - pad),
+                           ImVec2(x + tsz.x + pad, y + tsz.y + pad),
+                           IM_COL32(0, 0, 0, 160), 4.0f);
+        fdl->AddText(ImVec2(x, y), IM_COL32(255, 255, 0, 255), text);
     }
 #endif
 

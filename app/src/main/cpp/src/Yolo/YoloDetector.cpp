@@ -23,6 +23,7 @@ void YoloDetector::Unload() {
     interpreter_ = nullptr;
     nnDelegate_ = nullptr;
     model_ = nullptr;
+    engineName_ = "CPU";
 #endif
 }
 
@@ -50,8 +51,10 @@ bool YoloDetector::LoadModel(const std::string &path) {
     if (nnapi) {
         TfLiteInterpreterOptionsAddDelegate(opts, nnapi);
         nnDelegate_ = nnapi;
+        engineName_ = "NNAPI (骁龙NPU)";
         printf("[yolo] NNAPI delegate enabled\n");
     } else {
+        engineName_ = "CPU";
         printf("[yolo] NNAPI delegate unavailable, fallback CPU\n");
     }
 

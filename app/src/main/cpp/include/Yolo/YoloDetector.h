@@ -31,6 +31,8 @@ public:
     float Iou() const { return iou_; }
     void SetNumClass(int n) { numClass_ = n; }
     const char *LastError() const { return lastError_.c_str(); }
+    // 当前推理引擎：NNAPI(骁龙NPU) 或 CPU
+    const char *EngineName() const { return engineName_.c_str(); }
 
     // 统计
     double lastInferMs = 0.0;   // 单次推理耗时
@@ -49,6 +51,8 @@ private:
     float conf_ = 0.25f;
     float iou_ = 0.45f;
     int   numClass_ = 80;
+    // 推理引擎标识
+    std::string engineName_ = "CPU";
 
     // 输入张量元信息（int8/uint8 量化）
     int   inputType_ = 0;      // kTfLiteInt8 或 kTfLiteUInt8
