@@ -70,19 +70,28 @@ int main(int argc, char *argv[]) {
 
    
 void Layout_tick_UI() {
-    static bool show_draw_Line = false;
-    static bool show_demo_window = false;
-    static bool show_another_window = false;
+    static bool show_demo_window = true;
+    static bool show_test_window = true;
     {
-        static float f = 0.0f;
-        static int counter = 0;
-        static int style_idx = 1;
-        static ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
-      
         //代码编写处
-        
-        
-     
+
+        // 显示 ImGui 示例窗口（内容丰富，用于验证渲染链路）
+        if (show_demo_window) {
+            ImGui::ShowDemoWindow(&show_demo_window);
+        }
+
+        // 显示一个简单的悬浮窗测试窗口，便于确认窗口可见
+        if (show_test_window) {
+            ImGui::SetNextWindowPos(ImVec2(80, 200), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(420, 240), ImGuiCond_FirstUseEver);
+            ImGui::Begin("悬浮窗测试", &show_test_window);
+            ImGui::Text("Hello, ImGui on Android 16!");
+            ImGui::Text("Window: %d x %d", native_window_screen_x, native_window_screen_y);
+            if (ImGui::Button("关闭本窗口")) {
+                show_test_window = false;
+            }
+            ImGui::End();
+        }
         }
        
         }
