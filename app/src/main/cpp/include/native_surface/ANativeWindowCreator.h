@@ -7,6 +7,7 @@
 #include <sys/system_properties.h>
 
 #include <cstddef>
+#include <map>
 #include <unordered_map>
 #include <string>
 #include <vector>
@@ -168,7 +169,7 @@ namespace android
                 // 符号从 android::LayerMetadata(_ZN7android13LayerMetadata*)
                 // 变为 android::gui::LayerMetadata(_ZN7android3gui13LayerMetadata*)。
                 // 14/15/16 使用相同的 gui::LayerMetadata 符号。
-                static const std::unordered_map<size_t, std::unordered_map<void **, const char *>> patchesTable = {
+                static const std::map<size_t, std::unordered_map<void **, const char *>> patchesTable = {
                     {
                         16,
                         {
