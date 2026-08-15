@@ -23,6 +23,8 @@ add_executable(imgui_overlay
     src/ImGui/imgui_widgets.cpp
     src/ImGui/backends/imgui_impl_android.cpp
     src/ImGui/backends/imgui_impl_vulkan.cpp
+    src/Yolo/YoloDetector.cpp
+    src/Yolo/ScreenCapture.cpp
     src/My_Utils/stb_image.cpp
     src/Android_vulkan/vulkan_wrapper.cpp
     src/Android_vulkan/VulkanUtils.cpp
@@ -34,6 +36,7 @@ target_include_directories(imgui_overlay PRIVATE
     include/Android_vulkan
     include/ImGui
     include/ImGui/backends
+    include/Yolo
 )
 
 target_compile_definitions(imgui_overlay PRIVATE
@@ -50,6 +53,24 @@ target_link_libraries(imgui_overlay PRIVATE
     EGL
     GLESv3
 )
+
+# ---- YOLO 推理：TensorFlow Lite + NNAPI delegate（可选）----
+# 仅在 GitHub 云端编译时通过环境变量注入 TFLite_ROOT/TFLITE_LIB；
+# 本地不带 TFLite 的构建会跳过，保证原有工程仍可编译。
+set(TFLITE_ROOT_ENV "$ENV{TFLITE_ROOT}")
+set(TFLITE_LIB_ENV "$ENV{TFLITE_LIB}")
+if(TFLITE_ROOT_ENV AND TFLITE_LIB_ENV)
+    message(STATUS "YOLO: enabling TFLite inference")
+    target_compile_definitions(imgui_overlay PRIVATE ENABLE_YOLO)
+    target_include_directories(imgui_overlay PRIVATE "${TFLITE_ROOT_ENV}")
+    target_link_libraries(imgui_overlay PRIVATE
+        "${TFLITE_LIB_ENV}"
+        z
+        dl
+        m
+        neuralnetworks
+    )
+endif ()
 
 # 裁剪符号表，减小打包体积
 target_link_options(imgui_overlay PRIVATE -s)

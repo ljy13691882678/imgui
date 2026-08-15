@@ -31,6 +31,40 @@ jobs:
                      "build-tools;36.0.0" \
                      "ndk;27.1.12297006"
 
+      - name: Cache TensorFlow Lite build
+        id: cache-tflite
+        uses: actions/cache@v4
+        with:
+          path: |
+            tf_src
+            tf_build
+            third_party/tflite
+          key: tflite-${{ runner.os }}-${{ hashFiles('.github/workflows/build-apk.yml') }}
+
+      - name: Build TensorFlow Lite (NDK arm64, NNAPI enabled)
+        if: steps.cache-tflite.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          NDK="$ANDROID_HOME/ndk/27.1.12297006"
+          git clone --depth 1 --branch v2.16.1 https://github.com/tensorflow/tensorflow.git tf_src
+          cmake -S tf_src/tensorflow/lite -B tf_build \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-26 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTFLITE_ENABLE_XNNPACK=OFF \
+            -DTFLITE_BUILD_WITH_NNAPI=ON \
+            -DTFLITE_ENABLE_GPU=OFF
+          cmake --build tf_build -j2 --target tensorflow-lite
+
+      - name: Stage TFLite lib + headers
+        run: |
+          set -e
+          mkdir -p third_party/tflite/lib
+          cp tf_build/libtensorflow-lite.a third_party/tflite/lib/
+          echo "TFLITE_ROOT=$GITHUB_WORKSPACE/tf_src" >> "$GITHUB_ENV"
+          echo "TFLITE_LIB=$GITHUB_WORKSPACE/third_party/tflite/lib/libtensorflow-lite.a" >> "$GITHUB_ENV"
+
       - name: Grant execute permission
         run: chmod +x gradlew
 

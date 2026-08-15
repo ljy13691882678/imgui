@@ -92,7 +92,35 @@ adb shell "chmod 755 /data/local/tmp/imgui_overlay && /data/local/tmp/imgui_over
 
 ---
 
-## 七、目录结构
+## 七、YOLO 推理 + 折叠控制面板
+
+支持 **TFLite int8 量化模型 + 骁龙（Hexagon）NPU 加速**（NNAPI delegate，框架 A）：
+
+- 数据来源：root 实时采集屏幕（`screencap`）。
+- 检测框按**真实屏幕坐标**直接描边叠加在透明全屏悬浮层上，不遮挡真实屏幕。
+- 控制面板为**单个可收起面板**：点击「收起 <<」缩成图标，再点图标展开。
+  面板内含三组折叠分区：
+  - **推理参数**：检测开关、置信度、IOU。
+  - **模型与显示**：模型路径、显示检测框、显示标签。
+  - **性能信息**：帧率、推理耗时、总耗时、检测数量。
+
+### 用前准备
+
+1. 编译时需在 GitHub 云端（workflow 已内置 TFLite 编译步骤），本地构建默认关闭 YOLO。
+2. 把模型放到设备目录（App 启动时自动创建）：
+
+```bash
+adb push yolov8n-int8.tflite /data/local/tmp/models/
+```
+
+3. 打开面板 → 输入模型路径（默认 `/data/local/tmp/models/yolov8n-int8.tflite`）→ 勾选「启用检测」→ 点「加载模型」。
+
+> 说明：模型需为 **uint8 int8 量化**；NNAPI 命中 NPU 为尽力而为，个别算子回退 CPU 不影响运行。
+> 若需每一层都强制走 NPU，需改用 QNN 方案（本版本不启用）。
+
+---
+
+## 八、目录结构
 
 ```
 app/src/main/cpp/                       # 原生 C/C++ 层（原 jni 移植）
@@ -101,13 +129,15 @@ app/src/main/cpp/                       # 原生 C/C++ 层（原 jni 移植）
   src/Android_touch/TouchHelperA.cpp
   src/Android_vulkan/vulkan_wrapper.cpp           # 动态加载 Vulkan
   src/Android_vulkan/VulkanUtils.cpp              # Vulkan 初始化/渲染
+  src/Yolo/YoloDetector.cpp                       # TFLite int8 + NNAPI 推理
+  src/Yolo/ScreenCapture.cpp                      # root 屏幕采集
   src/ImGui/…                                      # ImGui 内核 + 后端
   include/ImGui/font/Font.h                        # OPPOSans 中文字体
 app/src/main/java/…/MainActivity.kt               # root 启动器
 .github/workflows/build-apk.yml                   # GitHub 云端编译
 ```
 
-## 八、风险与说明
+## 九、风险与说明
 
 - 原生可执行文件依赖 libgui **私有符号**，非稳定 NDK API，Android 版本升级可能需补符号。
 - 触摸 Grab 会独占触摸屏，由 uinput 转发出，若下层 App 触摸异常请先「停止悬浮窗」。

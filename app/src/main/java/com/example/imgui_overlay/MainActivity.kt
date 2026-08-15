@@ -101,6 +101,7 @@ class MainActivity : Activity() {
             shell.append("pkill -x imgui_overlay 2>/dev/null;")
             shell.append(" sleep 1;")
             shell.append(" rm -f '$remoteLog' '$remotePid';")
+            shell.append(" mkdir -p '$remoteDir/models';")
             shell.append(" cp '$localBin' '$remoteBin'")
             shell.append(" && chmod 755 '$remoteBin'")
             shell.append(" && cd '$remoteDir'")
