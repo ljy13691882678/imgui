@@ -172,7 +172,8 @@ void H264Stream::DecodeLoop() {
                 AMediaCodec_queueInputBuffer(codec, inIdx, 0, copy, tsUs, 0);
                 tsUs += 16000;   // ~60fps 采样间隔
             } else {
-                AMediaCodec_releaseInputBuffer(codec, inIdx, 0);
+                // 缓冲不可用：以 0 长度入队跳过该缓冲
+                AMediaCodec_queueInputBuffer(codec, inIdx, 0, 0, tsUs, 0);
             }
         }
 
