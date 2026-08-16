@@ -89,10 +89,32 @@ struct AimConfig {
     // 在悬浮窗上可视化触控区/触发区当前位置（半透明矩形 + 文字，调节时可直观看到）
     bool  showZones = true;
 
+    // 从屏幕中上方向推理框画辅助连线（便于观察目标位置与准星偏移）
+    bool  showAimLines = true;
+
+    // 自瞄回正速度（归一化每帧最大瞄准点移动距离）：限制从当前位置到目标位置的
+    // 每帧移动量，防止目标在裁剪框边缘时准星一帧甩飞（0=不限制）
+    float aimApproachSpeed = 0.0f; // 0=关闭限制
+
+    // 自瞄触发区：需要物理手指在此区域内才触发自瞄，配合按钮开关
+    bool  aimTriggerZoneEnabled = false; // 开启后需点击触发区才自瞄
+    float aimTriggerZoneL = 0.0f, aimTriggerZoneT = 0.0f;
+    float aimTriggerZoneR = 0.5f, aimTriggerZoneB = 1.0f;
+    // 倍镜区（开镜区）：需要物理手指在此区域内才触发自瞄，配合按钮开关
+    bool  adsZoneEnabled = false;
+    float adsZoneL = 0.0f, adsZoneT = 0.0f;
+    float adsZoneR = 0.5f, adsZoneB = 1.0f;
+
+    // 区域编辑模式：在悬浮窗上直接拖拽控制点调整区域大小和位置
+    // 0=关闭 1=触控区 2=触发区(扳机暂停/开火区) 3=自瞄触发区 4=倍镜区
+    int   zoneEditTarget = 0;
+
     // 触发参数
     float triggerSensitivity = 0.5f;
     bool  triggerHold = false;
     int   triggerCooldownMs = 150; // 点射模式两次开火最小间隔（毫秒）
+    int   triggerDelayMin = 50;    // 扳机随机延迟最小值（ms）
+    int   triggerDelayMax = 150;   // 扳机随机延迟最大值（ms）
 
     // 目标选择
     int   selectMode = 0;          // 0=最近中心 1=最大框 2=最接近准星

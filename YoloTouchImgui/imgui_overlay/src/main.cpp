@@ -22,6 +22,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <cmath>
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/time.h>
@@ -85,6 +86,14 @@ static void syncClassConfig() {
 // 控制面板折叠：true 时只显示一个小状态框
 static bool g_panelCollapsed = false;
 
+// 区域编辑拖拽状态
+static struct {
+    bool dragging = false;
+    int dragPoint = -1; // -1=移动整个区域, 0-7=控制点(0-3角,4-7边中点)
+    float dragStartMX = 0.0f, dragStartMY = 0.0f;
+    float origL = 0.0f, origT = 0.0f, origR = 0.0f, origB = 0.0f;
+} g_zoneDrag;
+
 // 自瞄/触发控制器
 static KalmanTracker g_tracker;
 static AimController g_aim;        // 原版（拖拽+平滑）
@@ -134,6 +143,20 @@ static void releaseAimFingers() {
         if (g_touchReady) touch_up(TOUCH_TRIGGER_SLOT);
         g_triggerDown = false;
     }
+}
+
+// 检查物理手指是否按下并位于指定区域（归一化坐标）。无手指/未按下返回 false。
+// 用于自瞄触发区/倍镜区门控：只有手指点在对应区域内才允许自瞄。
+static bool isFingerInZone(float zL, float zT, float zR, float zB,
+                           int scrW, int scrH) {
+    if (!g_touchReady) return false;
+    int mx = 0, my = 0;
+    bool down = false;
+    if (!touch_get_primary_finger(&mx, &my, &down)) return false;
+    if (!down) return false;
+    float nx = (float)mx / (float)scrW;
+    float ny = (float)my / (float)scrH;
+    return nx >= zL && nx <= zR && ny >= zT && ny <= zB;
 }
 
 // ---------------------------------------------------------------------------
@@ -332,11 +355,27 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     float tzRpx = g_cfg.touchZoneR * scrW, tzBpx = g_cfg.touchZoneB * scrH;
     float tzCx = (tzLpx + tzRpx) * 0.5f, tzCy = (tzTpx + tzBpx) * 0.5f;
 
+    // 区域编辑模式下暂停自瞄/扳机（配置区域时避免误拖视角/误开火）
+    bool zoneEditing = (g_cfg.zoneEditTarget != 0);
+
+    // 自瞄触发区/倍镜区门控：开启时物理手指需点在对应区域内才允许自瞄
+    bool aimGateOk = true;
+    if (!zoneEditing) {
+        if (g_cfg.aimTriggerZoneEnabled &&
+            !isFingerInZone(g_cfg.aimTriggerZoneL, g_cfg.aimTriggerZoneT,
+                            g_cfg.aimTriggerZoneR, g_cfg.aimTriggerZoneB, scrW, scrH))
+            aimGateOk = false;
+        if (g_cfg.adsZoneEnabled &&
+            !isFingerInZone(g_cfg.adsZoneL, g_cfg.adsZoneT,
+                            g_cfg.adsZoneR, g_cfg.adsZoneB, scrW, scrH))
+            aimGateOk = false;
+    }
+
     // ── 自瞄（拖动视角式）──
     // 三种算法：0=原版(拖拽+平滑) 1=PID 2=贝塞尔，均由控制器输出每帧增量，
     // 这里保持虚拟手指按下并逐帧移动，模拟人手拖屏转向；目标进入死区后抬起手指。
     // 手指被 clamp 在触控区内。
-    if (g_touchReady && g_cfg.aimEnabled && g_cfg.enabled) {
+    if (g_touchReady && g_cfg.aimEnabled && g_cfg.enabled && !zoneEditing && aimGateOk) {
         AimOutput out;
         switch (g_cfg.aimMode) {
         case 1:
@@ -361,6 +400,14 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
                 float maxStep = (float)g_cfg.aimMaxStepPx;
                 float step = std::sqrt(dpx*dpx + dpy*dpy);
                 if (step > maxStep) { dpx *= maxStep / step; dpy *= maxStep / step; }
+            }
+            // 自瞄回正速度限制：归一化每帧最大瞄准点移动距离。目标在裁剪框边缘时
+            // 距离准星很远，若直接一帧甩过去准星会被甩飞；用该值限制每帧最大移动量，
+            // 让准星平滑地回正（0=关闭限制）
+            if (g_cfg.aimApproachSpeed > 0.0f) {
+                float maxPx = g_cfg.aimApproachSpeed * (float)std::min(scrW, scrH);
+                float step = std::sqrt(dpx*dpx + dpy*dpy);
+                if (step > maxPx) { dpx *= maxPx / step; dpy *= maxPx / step; }
             }
 
             if (!g_aimFingerDown) {
@@ -582,6 +629,31 @@ static void drawDetectionOverlay() {
                      g_cfg.fireZoneL, g_cfg.fireZoneT, g_cfg.fireZoneR, g_cfg.fireZoneB);
             draw->AddText(ImVec2(zl + 4, zt + 20), IM_COL32(255, 110, 110, 255), infolbl);
         }
+        // 自瞄触发区（点击该区域才触发自瞄）：绿色半透明
+        if (g_cfg.aimTriggerZoneEnabled) {
+            float zl = g_cfg.aimTriggerZoneL * sx, zt = g_cfg.aimTriggerZoneT * sy;
+            float zr = g_cfg.aimTriggerZoneR * sx, zb = g_cfg.aimTriggerZoneB * sy;
+            draw->AddRectFilled(ImVec2(zl, zt), ImVec2(zr, zb), IM_COL32(0, 255, 140, 28));
+            draw->AddRect(ImVec2(zl, zt), ImVec2(zr, zb), IM_COL32(0, 255, 140, 230), 0.0f, 0, 2.0f);
+            draw->AddText(ImVec2(zl + 4, zt + 4), IM_COL32(0, 255, 160, 255), "自瞄触发区");
+            char infolbl[48];
+            snprintf(infolbl, sizeof(infolbl), "L%.2f T%.2f R%.2f B%.2f",
+                     g_cfg.aimTriggerZoneL, g_cfg.aimTriggerZoneT,
+                     g_cfg.aimTriggerZoneR, g_cfg.aimTriggerZoneB);
+            draw->AddText(ImVec2(zl + 4, zt + 20), IM_COL32(0, 255, 160, 255), infolbl);
+        }
+        // 倍镜区（点击该区域才触发自瞄，开镜区域）：橙色半透明
+        if (g_cfg.adsZoneEnabled) {
+            float zl = g_cfg.adsZoneL * sx, zt = g_cfg.adsZoneT * sy;
+            float zr = g_cfg.adsZoneR * sx, zb = g_cfg.adsZoneB * sy;
+            draw->AddRectFilled(ImVec2(zl, zt), ImVec2(zr, zb), IM_COL32(255, 180, 0, 28));
+            draw->AddRect(ImVec2(zl, zt), ImVec2(zr, zb), IM_COL32(255, 180, 0, 230), 0.0f, 0, 2.0f);
+            draw->AddText(ImVec2(zl + 4, zt + 4), IM_COL32(255, 200, 60, 255), "倍镜区");
+            char infolbl[48];
+            snprintf(infolbl, sizeof(infolbl), "L%.2f T%.2f R%.2f B%.2f",
+                     g_cfg.adsZoneL, g_cfg.adsZoneT, g_cfg.adsZoneR, g_cfg.adsZoneB);
+            draw->AddText(ImVec2(zl + 4, zt + 20), IM_COL32(255, 200, 60, 255), infolbl);
+        }
     }
 
     // 裁剪区域描边：在屏幕上画一个矩形框，标出当前推理输入的裁剪范围
@@ -649,6 +721,144 @@ static void drawDetectionOverlay() {
         draw->AddLine(ImVec2(cx - 20, cy), ImVec2(cx + 20, cy), col, 2.0f);
         draw->AddLine(ImVec2(cx, cy - 20), ImVec2(cx, cy + 20), col, 2.0f);
     }
+
+    // 辅助连线：从屏幕中上方向推理框画线，横屏时便于观察目标相对准星的方位。
+    // 锚点取屏幕上沿中部（准星正上方），各推理框用其预判中心连线。
+    if (g_cfg.showAimLines && g_cfg.showBoxes) {
+        ImVec2 anchor(sx * 0.5f, sy * 0.04f);
+        draw->AddCircleFilled(anchor, 5.0f, IM_COL32(0, 255, 255, 255), 12);
+        for (const auto& t : g_tracks) {
+            float pcx = t.cx + t.vx * g_cfg.boxPredictTime;
+            float pcy = t.cy + t.vy * g_cfg.boxPredictTime;
+            ImVec2 bc(pcx * sx, pcy * sy);
+            draw->AddLine(anchor, bc, IM_COL32(0, 255, 255, 150), 1.5f);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 区域拖拽编辑：在悬浮窗上直接拖拽控制点调整区域大小和位置。
+// 通过 ImGui 的鼠标输入（主循环已把物理手指映射为鼠标）检测拖动。
+// ---------------------------------------------------------------------------
+static void drawZoneEditor() {
+    int target = g_cfg.zoneEditTarget;
+    if (target < 1 || target > 4) { g_zoneDrag.dragging = false; return; }
+
+    float sx = native_window_screen_x;
+    float sy = native_window_screen_y;
+
+    // 获取当前编辑区域的坐标（归一化）
+    float* zL = nullptr, *zT = nullptr, *zR = nullptr, *zB = nullptr;
+    ImU32 color = 0;
+    const char* label = "";
+    switch (target) {
+    case 1:
+        zL = &g_cfg.touchZoneL; zT = &g_cfg.touchZoneT;
+        zR = &g_cfg.touchZoneR; zB = &g_cfg.touchZoneB;
+        color = IM_COL32(0, 140, 255, 255); label = "触控区"; break;
+    case 2:
+        zL = &g_cfg.fireZoneL; zT = &g_cfg.fireZoneT;
+        zR = &g_cfg.fireZoneR; zB = &g_cfg.fireZoneB;
+        color = IM_COL32(255, 70, 70, 255); label = "触发区(扳机)"; break;
+    case 3:
+        zL = &g_cfg.aimTriggerZoneL; zT = &g_cfg.aimTriggerZoneT;
+        zR = &g_cfg.aimTriggerZoneR; zB = &g_cfg.aimTriggerZoneB;
+        color = IM_COL32(0, 255, 140, 255); label = "自瞄触发区"; break;
+    case 4:
+        zL = &g_cfg.adsZoneL; zT = &g_cfg.adsZoneT;
+        zR = &g_cfg.adsZoneR; zB = &g_cfg.adsZoneB;
+        color = IM_COL32(255, 180, 0, 255); label = "倍镜区"; break;
+    default: return;
+    }
+
+    ImDrawList* draw = ImGui::GetBackgroundDrawList();
+    if (!draw) return;
+
+    float zl = *zL * sx, zt = *zT * sy, zr = *zR * sx, zb = *zB * sy;
+
+    // 控制点：8 个（4 角 + 4 边中点），拖动调整大小；区域内部拖动移动整个区域
+    ImVec2 cps[8] = {
+        ImVec2(zl, zt), ImVec2(zr, zt), ImVec2(zr, zb), ImVec2(zl, zb), // 角
+        ImVec2((zl + zr) * 0.5f, zt), ImVec2(zr, (zt + zb) * 0.5f),
+        ImVec2((zl + zr) * 0.5f, zb), ImVec2(zl, (zt + zb) * 0.5f),     // 边中点
+    };
+
+    // 半透明填充 + 边框 + 标签
+    draw->AddRectFilled(ImVec2(zl, zt), ImVec2(zr, zb), (color & 0x00FFFFFF) | 0x22000000);
+    draw->AddRect(ImVec2(zl, zt), ImVec2(zr, zb), color, 0.0f, 0, 3.0f);
+    draw->AddText(ImVec2(zl + 6, zt + 6), color, label);
+
+    // 绘制控制点
+    for (int i = 0; i < 8; ++i) {
+        draw->AddCircleFilled(cps[i], 8.0f, IM_COL32(255, 255, 255, 255), 12);
+        draw->AddCircle(cps[i], 8.0f, color, 12, 2.0f);
+    }
+
+    // 触摸拖动逻辑：物理手指在控制点附近按下 → 开始拖；拖动时实时更新区域坐标
+    ImGuiIO& io = ImGui::GetIO();
+    bool mouseDown = ImGui::IsMouseDown(0);
+    ImVec2 mp = io.MousePos;
+    // 面板窗口挡住时忽略编辑（防止与面板交互冲突）
+    bool overPanel = io.WantCaptureMouse;
+
+    if (g_zoneDrag.dragging) {
+        if (!mouseDown) {
+            g_zoneDrag.dragging = false; // 抬手结束
+        } else {
+            // 计算相对拖拽起点的位移（归一化）
+            float dnx = (mp.x - g_zoneDrag.dragStartMX) / sx;
+            float dny = (mp.y - g_zoneDrag.dragStartMY) / sy;
+            float nL = g_zoneDrag.origL, nT = g_zoneDrag.origT;
+            float nR = g_zoneDrag.origR, nB = g_zoneDrag.origB;
+            int dp = g_zoneDrag.dragPoint;
+            if (dp == 0) { nL += dnx; nT += dny; }
+            else if (dp == 1) { nR += dnx; nT += dny; }
+            else if (dp == 2) { nR += dnx; nB += dny; }
+            else if (dp == 3) { nL += dnx; nB += dny; }
+            else if (dp == 4) { nT += dny; }
+            else if (dp == 5) { nR += dnx; }
+            else if (dp == 6) { nB += dny; }
+            else if (dp == 7) { nL += dnx; }
+            else if (dp == 8) { nL += dnx; nR += dnx; nT += dny; nB += dny; } // 整体移动
+            // 限制范围并保证最小尺寸
+            const float MIN = 0.02f;
+            if (nR - nL < MIN) nR = nL + MIN;
+            if (nB - nT < MIN) nB = nT + MIN;
+            nL = std::clamp(nL, 0.0f, 1.0f - MIN);
+            nT = std::clamp(nT, 0.0f, 1.0f - MIN);
+            nR = std::clamp(nR, nL + MIN, 1.0f);
+            nB = std::clamp(nB, nT + MIN, 1.0f);
+            if (nR > nL) { *zL = nL; *zR = nR; }
+            if (nB > nT) { *zT = nT; *zB = nB; }
+            // 触发区实时同步给 touch_core
+            if (target == 2 && g_touchReady) {
+                touch_set_fire_zone((int)(g_cfg.fireZoneL * sx), (int)(g_cfg.fireZoneT * sy),
+                                    (int)(g_cfg.fireZoneR * sx), (int)(g_cfg.fireZoneB * sy));
+            }
+        }
+    } else if (mouseDown && !overPanel) {
+        // 检测是否点中控制点
+        for (int i = 0; i < 8; ++i) {
+            if (std::fabs(mp.x - cps[i].x) < 22.0f && std::fabs(mp.y - cps[i].y) < 22.0f) {
+                g_zoneDrag.dragging = true;
+                g_zoneDrag.dragPoint = i;
+                g_zoneDrag.dragStartMX = mp.x;
+                g_zoneDrag.dragStartMY = mp.y;
+                g_zoneDrag.origL = *zL; g_zoneDrag.origT = *zT;
+                g_zoneDrag.origR = *zR; g_zoneDrag.origB = *zB;
+                return;
+            }
+        }
+        // 点中区域内部 → 整体移动
+        if (mp.x >= zl && mp.x <= zr && mp.y >= zt && mp.y <= zb) {
+            g_zoneDrag.dragging = true;
+            g_zoneDrag.dragPoint = 8;
+            g_zoneDrag.dragStartMX = mp.x;
+            g_zoneDrag.dragStartMY = mp.y;
+            g_zoneDrag.origL = *zL; g_zoneDrag.origT = *zT;
+            g_zoneDrag.origR = *zR; g_zoneDrag.origB = *zB;
+        }
+    }
 }
 
 // 退出进程：立即终止本进程。
@@ -693,6 +903,7 @@ static void drawControlPanel() {
     ImGui::Checkbox("显示帧率", &g_cfg.showFps);
     ImGui::Checkbox("显示裁剪框", &g_cfg.showCropBox);
     ImGui::Checkbox("显示区域", &g_cfg.showZones);
+    ImGui::Checkbox("显示连线", &g_cfg.showAimLines);
     ImGui::SliderFloat("置信度阈值", &g_cfg.confidence, 0.05f, 0.95f);
     ImGui::Separator();
 
@@ -859,6 +1070,8 @@ static void drawControlPanel() {
     ImGui::SliderFloat("拖拽灵敏度", &g_cfg.dragSens, 0.1f, 2.0f);
     ImGui::SliderInt("最大步长(px)", &g_cfg.aimMaxStepPx, 4, 160);
     ImGui::SliderFloat("预判", &g_cfg.predictGain, 0.0f, 0.2f);
+    // 自瞄回正速度（归一化每帧最大瞄准点移动距离）：目标在裁剪框边缘时防止准星甩飞
+    ImGui::SliderFloat("回正速度", &g_cfg.aimApproachSpeed, 0.0f, 0.1f, "%.4f");
     // 算法相关参数：仅在对应模式激活时显示
     if (g_cfg.aimMode == 1) {
         ImGui::Text("PID 参数");
@@ -877,6 +1090,24 @@ static void drawControlPanel() {
         ImGui::SliderFloat("移动平滑", &g_cfg.aimMoveSmooth, 0.0f, 0.95f);
     }
     ImGui::Separator();
+    // 区域拖拽编辑：在悬浮窗上直接拖动控制点调整区域大小和位置（扳机区改为拖拽调整）
+    ImGui::Text("区域编辑(拖拽调整)");
+    {
+        const char* zmodes[] = {"关闭", "触控区", "触发区(扳机)", "自瞄触发区", "倍镜区"};
+        int cur = g_cfg.zoneEditTarget;
+        if (cur < 0 || cur > 4) cur = 0;
+        if (ImGui::BeginCombo("编辑区域", zmodes[cur])) {
+            for (int i = 0; i < 5; ++i) {
+                if (ImGui::Selectable(zmodes[i], i == cur)) g_cfg.zoneEditTarget = i;
+                if (i == cur) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        if (g_cfg.zoneEditTarget != 0) {
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f),
+                               "拖动控制点调整大小/位置，编辑中自瞄/扳机暂停");
+        }
+    }
     // 触控区：自瞄拖拽注入区域（与游戏转向/瞄准区对齐）
     ImGui::Text("触控区(自瞄拖拽)");
     ImGui::SliderFloat("触控左##tzL", &g_cfg.touchZoneL, 0.0f, 1.0f, "%.2f");
@@ -884,18 +1115,20 @@ static void drawControlPanel() {
     ImGui::SliderFloat("触控右##tzR", &g_cfg.touchZoneR, 0.0f, 1.0f, "%.2f");
     ImGui::SliderFloat("触控下##tzB", &g_cfg.touchZoneB, 0.0f, 1.0f, "%.2f");
     ImGui::Separator();
-    // 触发区：玩家物理手指在此区域内时，扳机暂停自动开火
-    ImGui::Text("触发区(扳机暂停)");
-    ImGui::SliderFloat("触发左##fzL", &g_cfg.fireZoneL, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("触发上##fzT", &g_cfg.fireZoneT, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("触发右##fzR", &g_cfg.fireZoneR, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("触发下##fzB", &g_cfg.fireZoneB, 0.0f, 1.0f, "%.2f");
+    // 自瞄触发区/倍镜区：开启后需点击对应区域才触发自瞄
+    ImGui::Checkbox("自瞄触发区", &g_cfg.aimTriggerZoneEnabled);
+    ImGui::Checkbox("倍镜区", &g_cfg.adsZoneEnabled);
     ImGui::Separator();
 
     ImGui::Checkbox("扳机", &g_cfg.triggerEnabled);
     ImGui::SliderFloat("扳机灵敏度", &g_cfg.triggerSensitivity, 0.1f, 1.0f);
     ImGui::Checkbox("扳机按住", &g_cfg.triggerHold);
     ImGui::SliderInt("点射间隔(ms)", &g_cfg.triggerCooldownMs, 0, 500);
+    // 扳机随机延迟：目标进入触发区后延迟 50~300ms 内随机值再开火（防机械感/防检）
+    ImGui::SliderInt("延迟下限(ms)", &g_cfg.triggerDelayMin, 0, 300);
+    ImGui::SliderInt("延迟上限(ms)", &g_cfg.triggerDelayMax, 0, 300);
+    if (g_cfg.triggerDelayMax < g_cfg.triggerDelayMin)
+        g_cfg.triggerDelayMax = g_cfg.triggerDelayMin;
 
     if (ImGui::Button("应用置信度")) {
         if (g_engine) g_engine->setConfidence(g_cfg.confidence);
@@ -927,6 +1160,7 @@ void Layout_tick_UI() {
     if (g_panelCollapsed) drawMiniPanel();
     else drawControlPanel();
     drawDetectionOverlay();
+    drawZoneEditor();
 }
 
 // ---------------------------------------------------------------------------

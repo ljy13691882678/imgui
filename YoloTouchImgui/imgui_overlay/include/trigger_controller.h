@@ -3,6 +3,7 @@
 #include "aim_types.h"
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <sys/time.h>
 
 // TriggerBot：目标进入准星区域时自动开火（通过触摸注入）
@@ -32,25 +33,39 @@ public:
         if (dist < radius) {
             // 目标在触发区内
             if (cfg.triggerHold) {
-                // 按住模式：持续输出 holdFire=true，直到离开
                 holdFire = true;
                 m_wasHolding = true;
             } else {
-                // 点射模式：仅在冷却期内不重复触发
+                // 点射模式：检查冷却期 + 随机延迟
                 if (now >= m_cooldownUntil && !fingerDown) {
-                    fireOnce = true;
-                    m_lastFireMs = now;
-                    m_cooldownUntil = now + cfg.triggerCooldownMs;
+                    if (m_pendingFire) {
+                        // 延迟已到，执行开火
+                        if (now >= m_pendingFireAt) {
+                            fireOnce = true;
+                            m_lastFireMs = now;
+                            m_cooldownUntil = now + cfg.triggerCooldownMs;
+                            m_pendingFire = false;
+                        }
+                    } else {
+                        // 进入目标区域，生成随机延迟并等待
+                        int delayMs = cfg.triggerDelayMin;
+                        if (cfg.triggerDelayMax > cfg.triggerDelayMin) {
+                            delayMs = cfg.triggerDelayMin +
+                                (rand() % (cfg.triggerDelayMax - cfg.triggerDelayMin + 1));
+                        }
+                        m_pendingFire = true;
+                        m_pendingFireAt = now + delayMs;
+                    }
                 }
             }
         } else {
             // 目标离开触发区
+            m_pendingFire = false; // 取消待发延迟
             if (m_wasHolding) {
-                // 按住模式：释放虚拟手指
                 holdRelease = true;
                 m_wasHolding = false;
             }
-            m_cooldownUntil = 0;  // 离开后重置冷却，下次进入立刻触发
+            m_cooldownUntil = 0;
         }
     }
 
@@ -58,6 +73,8 @@ public:
         m_cooldownUntil = 0;
         m_lastFireMs = 0;
         m_wasHolding = false;
+        m_pendingFire = false;
+        m_pendingFireAt = 0;
     }
 
 private:
@@ -69,4 +86,7 @@ private:
     int64_t m_cooldownUntil = 0;
     int64_t m_lastFireMs = 0;
     bool    m_wasHolding = false;
+    // 随机延迟状态
+    bool    m_pendingFire = false;
+    int64_t m_pendingFireAt = 0;
 };
