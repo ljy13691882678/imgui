@@ -6,6 +6,9 @@
 #include <cstdlib>
 #include <cstdarg>
 #include <cstring>
+#include <set>
+#include <vector>
+#include <elf.h>
 #include <sys/stat.h>
 
 // 逐级创建目录（QNN context binary cache 需要真实存在的可写目录）
@@ -47,6 +50,92 @@ static bool fileReadable(const char* path) {
     FILE* f = fopen(path, "rb");
     if (f) { fclose(f); return true; }
     return false;
+}
+
+// 将 ELF 虚拟地址映射为文件偏移（扫描 PT_LOAD 段）
+static bool elfVaddrToOffset(FILE* f, const Elf64_Ehdr& ehdr, uint64_t vaddr, uint64_t& out) {
+    for (int i = 0; i < ehdr.e_phnum; ++i) {
+        Elf64_Phdr ph;
+        if (fseek(f, (long)(ehdr.e_phoff + i * ehdr.e_phentsize), SEEK_SET) != 0) continue;
+        if (fread(&ph, sizeof(ph), 1, f) != 1) continue;
+        if (ph.p_type == PT_LOAD && vaddr >= ph.p_vaddr && vaddr < ph.p_vaddr + ph.p_filesz) {
+            out = ph.p_offset + (vaddr - ph.p_vaddr);
+            return true;
+        }
+    }
+    return false;
+}
+
+// 读取 ELF64 的 DT_NEEDED 依赖名（通过 PT_DYNAMIC 段，不依赖可能被裁剪的节表）
+static bool readElfNeeded(const char* path, std::set<std::string>& deps) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+    bool ok = false;
+    Elf64_Ehdr ehdr;
+    if (fread(&ehdr, sizeof(ehdr), 1, f) == 1 &&
+        memcmp(ehdr.e_ident, ELFMAG, SELFMAG) == 0 &&
+        ehdr.e_ident[EI_CLASS] == ELFCLASS64) {
+        uint64_t dynOff = 0, dynSize = 0;
+        for (int i = 0; i < ehdr.e_phnum; ++i) {
+            Elf64_Phdr ph;
+            if (fseek(f, (long)(ehdr.e_phoff + i * ehdr.e_phentsize), SEEK_SET) != 0) break;
+            if (fread(&ph, sizeof(ph), 1, f) != 1) break;
+            if (ph.p_type == PT_DYNAMIC) {
+                if (elfVaddrToOffset(f, ehdr, ph.p_vaddr, dynOff)) dynSize = ph.p_filesz;
+                break;
+            }
+        }
+        if (dynOff) {
+            std::vector<Elf64_Dyn> dyn(dynSize / sizeof(Elf64_Dyn));
+            if (fseek(f, (long)dynOff, SEEK_SET) == 0 &&
+                fread(dyn.data(), sizeof(Elf64_Dyn), dyn.size(), f) == dyn.size()) {
+                uint64_t strOff = 0;
+                for (size_t i = 0; i < dyn.size() && dyn[i].d_tag != DT_NULL; ++i) {
+                    if (dyn[i].d_tag == DT_STRTAB) {
+                        elfVaddrToOffset(f, ehdr, dyn[i].d_un.d_ptr, strOff);
+                        break;
+                    }
+                }
+                if (strOff) {
+                    for (size_t i = 0; i < dyn.size() && dyn[i].d_tag != DT_NULL; ++i) {
+                        if (dyn[i].d_tag != DT_NEEDED) continue;
+                        char name[256];
+                        if (fseek(f, (long)(strOff + dyn[i].d_un.d_val), SEEK_SET) == 0 &&
+                            fread(name, 1, sizeof(name) - 1, f) > 0) {
+                            name[sizeof(name) - 1] = '\0';
+                            deps.insert(name);
+                        }
+                    }
+                    ok = true;
+                }
+            }
+        }
+    }
+    fclose(f);
+    return ok;
+}
+
+// 递归把 name 及其所有缺失的系统依赖拷贝到 libDir，绕过 linker namespace 隔离。
+// 已在默认/app 命名空间可按名加载的库（系统公共库、APK 自带库）跳过。
+static void ensureLibDeps(const char* name, const std::string& libDir,
+                          const char* const* sysDirs, size_t sysDirCount,
+                          std::set<std::string>& visited) {
+    if (!visited.insert(name).second) return;
+    std::string dst = libDir + "/" + name;
+    if (!fileReadable(dst.c_str())) {
+        for (size_t i = 0; i < sysDirCount; ++i) {
+            std::string src = std::string(sysDirs[i]) + name;
+            if (fileReadable(src.c_str()) && copyFile(src.c_str(), dst.c_str())) break;
+        }
+    }
+    if (!fileReadable(dst.c_str())) return;
+    std::set<std::string> deps;
+    if (!readElfNeeded(dst.c_str(), deps)) return;
+    for (const auto& dep : deps) {
+        void* h = dlopen(dep.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (h) { dlclose(h); continue; }
+        ensureLibDeps(dep.c_str(), libDir, sysDirs, sysDirCount, visited);
+    }
 }
 
 //==============================================================================
@@ -152,44 +241,32 @@ TfLiteDelegate* QnnEngine::buildDelegate() {
     // fastRPC 用户态库（HTP 与 DSP 通信必需，系统库）
     if (!m_preloaded) {
         std::string libDir(getSkelLibDir());
-        // libcdsprpc/libadsprpc：先按名（LD_LIBRARY_PATH）；失败则把
-        // vendor/system 的系统库拷贝到 app 库目录再加载。直接 dlopen
-        // /vendor 路径会被 linker namespace (default) 拒绝，拷贝到
-        // app 目录后既能加载，也能让同目录 stub 库的依赖 "libcdsprpc.so"
-        // 在 LD_LIBRARY_PATH 命中副本。
+        // libcdsprpc/libadsprpc 无法直接 dlopen（linker namespace 隔离）。
+        // 把它们连同 ELF 依赖（如 vendor.qti.hardware.dsp-V1-ndk.so）从
+        // vendor/system 拷贝到 app 库目录，再由同一目录加载，依赖即可解析。
         const char* rpcLibs[] = { "libcdsprpc.so", "libadsprpc.so" };
         const char* sysDirs[] = {
             "/vendor/lib64/", "/vendor/lib64/cdsp/",
             "/system/lib64/", "/system/lib64/cdsp/",
+            "/odm/lib64/", "/vendor/lib64/hw/",
         };
         for (const char* name : rpcLibs) {
+            std::set<std::string> visited;
+            ensureLibDeps(name, libDir, sysDirs,
+                          sizeof(sysDirs) / sizeof(sysDirs[0]), visited);
             std::string dst = libDir + "/" + name;
-            void* h = dlopen(name, RTLD_NOW | RTLD_LOCAL);
-            if (h) {
-                LOGD("%s preloaded (by name)", name);
-                appendDiag("[QNN] %s 加载 OK（按名）", name);
+            if (!fileReadable(dst.c_str())) {
+                appendDiag("[QNN] %s 未找到可拷贝的系统库，加载失败", name);
                 continue;
             }
-            bool copied = false;
-            for (const char* d : sysDirs) {
-                std::string src = std::string(d) + name;
-                if (fileReadable(src.c_str())) {
-                    if (copyFile(src.c_str(), dst.c_str())) { copied = true; break; }
-                }
-            }
-            if (copied) {
-                h = dlopen(dst.c_str(), RTLD_NOW | RTLD_LOCAL);
-                if (h) {
-                    LOGD("%s preloaded (copied to %s)", name, dst.c_str());
-                    appendDiag("[QNN] %s 已拷贝到 %s 并加载 OK", name, dst.c_str());
-                } else {
-                    const char* e = dlerror();
-                    LOGW("%s copied but dlopen failed: %s", name, e ? e : "(null)");
-                    appendDiag("[QNN] %s 拷贝成功但加载失败: %s", name, e ? e : "(null)");
-                }
+            void* h = dlopen(dst.c_str(), RTLD_NOW | RTLD_LOCAL);
+            if (h) {
+                LOGD("%s preloaded (deps copied to %s)", name, libDir.c_str());
+                appendDiag("[QNN] %s 依赖已拷贝到 %s 并加载 OK", name, libDir.c_str());
             } else {
                 const char* e = dlerror();
-                appendDiag("[QNN] %s 找不到系统库且拷贝失败: %s", name, e ? e : "(null)");
+                LOGW("%s dlopen failed: %s", dst.c_str(), e ? e : "(null)");
+                appendDiag("[QNN] %s 加载失败: %s", name, e ? e : "(null)");
             }
         }
 
