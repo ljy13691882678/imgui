@@ -39,7 +39,9 @@ jobs:
         working-directory: YoloTouchImgui/imgui_overlay
         run: |
           export PATH="${NDK_HOME}:${PATH}"
-          ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk -j2
+          # 注意：Application.mk 位于工程根目录，ndk-build 只在 $(NDK_PROJECT_PATH)/jni/ 下查找，
+          # 因此 APP_STL / APP_ABI / APP_PLATFORM 需显式传入，否则 libc++ 不会链接导致 STL 符号未定义。
+          ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk APP_STL=c++_static APP_ABI=arm64-v8a APP_PLATFORM=android-21 -j2
 
       - name: Show outputs
         run: |
