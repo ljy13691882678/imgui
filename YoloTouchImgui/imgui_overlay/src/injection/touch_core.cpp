@@ -477,6 +477,10 @@ void touch_set_kernel_mode(bool en) {
 
 bool touch_kernel_mode(void) { return g_kernelMode; }
 
+bool touch_kernel_connected(void) {
+    return g_kernelMode && kdrv_connected();
+}
+
 // ─── Public API (touch_core.h) ─────────────────────────────────────
 
 bool touch_init(int screenW, int screenH, int rotation) {

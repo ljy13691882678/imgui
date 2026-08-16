@@ -20,6 +20,7 @@ extern "C" {
 // 默认 false=uinput 注入；置 true 后 touch_init 将不再创建 uinput，注入函数路由到内核驱动。
 void touch_set_kernel_mode(bool en);
 bool touch_kernel_mode(void);
+bool touch_kernel_connected(void);  // 内核驱动是否已连接（仅内核模式有效）
 bool touch_init(int screenW, int screenH, int rotation);
 void touch_close(void);
 bool touch_is_initialized(void);

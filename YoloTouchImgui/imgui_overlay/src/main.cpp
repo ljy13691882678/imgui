@@ -1179,6 +1179,17 @@ static void drawControlPanel() {
             }
             if (g_cfg.injectMode == 1) ImGui::TextDisabled("内核驱动需已加载 TimeDriver，重启生效");
         }
+        // 注入状态：内核驱动连接成功则显示"驱动已连接"
+        if (g_cfg.injectMode == 1) {
+            if (touch_kernel_connected())
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.3f, 1.0f), "驱动已连接");
+            else
+                ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "驱动未连接");
+        } else {
+            ImGui::TextColored(g_touchReady ? ImVec4(0.2f, 1.0f, 0.3f, 1.0f)
+                                            : ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                               g_touchReady ? "uinput 已就绪" : "uinput 未就绪");
+        }
         ImGui::Checkbox("陀螺仪自瞄", &g_cfg.gyroAim);
         ImGui::SameLine();
         ImGui::TextDisabled("(仅内核驱动)");
