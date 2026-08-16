@@ -4,6 +4,23 @@
 #include <dlfcn.h>
 #include <cstdio>
 #include <cstdlib>
+#include <sys/stat.h>
+
+// 逐级创建目录（QNN context binary cache 需要真实存在的可写目录）
+static void ensureDir(const char* path) {
+    char buf[512];
+    strncpy(buf, path, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    size_t len = strlen(buf);
+    for (size_t i = 1; i < len; ++i) {
+        if (buf[i] == '/') {
+            buf[i] = '\0';
+            mkdir(buf, 0755);
+            buf[i] = '/';
+        }
+    }
+    mkdir(buf, 0755);
+}
 
 //==============================================================================
 //  Helper: Get native library directory
@@ -104,15 +121,31 @@ TfLiteDelegate* QnnEngine::buildDelegate() {
         m_preloaded = true;
     }
 
+    // QNN HTP context binary cache 目录必须存在，否则 backend 初始化失败
+    const char* cachePath = "/data/data/com.yolotouch.imgui/cache/qnn";
+    ensureDir(cachePath);
+
     TfLiteQnnDelegateOptions qnn_options = TfLiteQnnDelegateOptionsDefault();
     qnn_options.backend_type = kHtpBackend;
     qnn_options.skel_library_dir = getSkelLibDir();
-    qnn_options.cache_dir = "/data/data/com.yolotouch.imgui/cache/qnn";
+    qnn_options.cache_dir = cachePath;
     qnn_options.model_token = "yolov8n_htp_v1";
+    // 打开 QNN delegate/backend 日志，便于定位 HTP 初始化失败原因
+    qnn_options.log_level = kLogLevelWarn;
+    // 默认模型为 int8 量化，HTP 用量化精度（默认 kHtpFp16 对量化模型不友好）
+    qnn_options.htp_options.precision = kHtpQuantized;
+    qnn_options.htp_options.performance_mode = kHtpSustainedHighPerformance;
+
+    // HTP 运行时能力检测：1=支持 0=不支持
+    TfLiteQnnDelegateCapabilityStatus capFp16 = TfLiteQnnDelegateHasCapability(kCapHtpRuntimeFp16);
+    TfLiteQnnDelegateCapabilityStatus capQuant = TfLiteQnnDelegateHasCapability(kCapHtpRuntimeQuant);
+    LOGD("QNN HTP capability fp16=%d quant=%d (1=supported)", capFp16, capQuant);
 
     m_delegate = TfLiteQnnDelegateCreate(&qnn_options);
     if (m_delegate) {
         LOGD("QNN HTP delegate created");
+        // 高性能投票（默认 kHtpPerfCtrlManual 策略下立即生效）
+        TfLiteQnnDelegateSetPerf(m_delegate, kPerformanceVote);
     } else {
         LOGW("QNN HTP delegate creation failed");
     }
