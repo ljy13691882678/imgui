@@ -26,6 +26,7 @@ bool touch_init(int screenW, int screenH, int rotation);
 void touch_close(void);
 bool touch_is_initialized(void);
 int  touch_get_output_fd(void);
+int  touch_device_count(void);      // 已打开的触摸设备数（面板诊断用）
 
 // Reader threads (for zone detection)
 void touch_start_readers(void);

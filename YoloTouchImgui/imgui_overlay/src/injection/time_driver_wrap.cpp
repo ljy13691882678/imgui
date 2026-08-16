@@ -81,6 +81,10 @@ void kdrv_touch_disable(void) {
 // ─── 内核陀螺仪 ───
 bool kdrv_gyro_init(void) {
     if (!kdrv_init()) return false;
+    // 驱动仅用于陀螺仪自瞄：连接后立即关闭触摸接管（Touch_Disable），
+    // 避免驱动 Init/Touch hook 拦截真实触摸，导致系统/游戏（屏幕触控）与
+    // /dev/input 读取（ImGui 交互）都收不到触摸事件。
+    TIME_Driver->Touch_Disable();
     bool ok = TIME_Driver->Gyro_Init();
     LOGD("kdrv gyro init ok=%d", (int)ok);
     return ok;

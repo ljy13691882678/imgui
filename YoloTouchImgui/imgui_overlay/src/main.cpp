@@ -57,6 +57,12 @@ static bool g_touchReady = false;
 // 陀螺仪自瞄走内核驱动，不依赖此状态。
 static bool injectReady() { return g_touchReady && touch_inject_ready(); }
 
+// 触摸诊断（面板显示，排查"无法触控屏幕/ImGui"）
+static bool  g_diagHasFinger = false;
+static int   g_diagX = 0, g_diagY = 0;
+static bool  g_diagDown = false;
+static int   g_diagFrame = 0;
+
 // 共享内存
 static ShmFrameReader* g_shm = nullptr;
 static std::atomic<bool> g_shmReady{false};
@@ -1236,8 +1242,14 @@ static void drawControlPanel() {
         if (g_cfg.injectMode == 1) {
             if (touch_kernel_connected())
                 ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.3f, 1.0f), "驱动已连接");
-            else
+            else {
                 ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "驱动未连接");
+                ImGui::SameLine();
+                if (ImGui::Button("连接驱动")) {
+                    bool ok = touch_kernel_gyro_init();
+                    printf("kernel driver connect: %s\n", ok ? "ok" : "failed");
+                }
+            }
             // 版本信息：对比驱动实际版本与 SDK 期望版本（不匹配会连接失败）
             uint32_t ver = kdrv_version();
             if (ver == 0)
@@ -1249,6 +1261,16 @@ static void drawControlPanel() {
             else
                 ImGui::TextDisabled("驱动版本: %u", ver);
         }
+        // 触摸诊断：reader 是否读到物理手指（排查"无法触控屏幕/ImGui"）
+        if (g_touchReady && (++g_diagFrame & 7) == 0) {
+            int mx = 0, my = 0; bool dn = false;
+            g_diagHasFinger = touch_get_primary_finger(&mx, &my, &dn);
+            g_diagX = mx; g_diagY = my; g_diagDown = dn;
+        }
+        ImGui::TextDisabled("触摸诊断: 设备%d 主手指:%s (%d,%d)%s",
+                            g_touchReady ? touch_device_count() : -1,
+                            g_diagHasFinger ? "有" : "无", g_diagX, g_diagY,
+                            g_diagDown ? " 按下" : "");
         ImGui::Checkbox("陀螺仪自瞄", &g_cfg.gyroAim);
         ImGui::SameLine();
         ImGui::TextDisabled("(仅内核驱动)");
@@ -1415,8 +1437,8 @@ int main(int argc, char* argv[]) {
     } else {
         fprintf(stderr, "touch_init failed (need root)\n");
     }
-    // 内核驱动连接与陀螺仪 hook：与 uinput 注入无关，内核模式下启动即初始化
-    if (touch_kernel_mode()) touch_kernel_gyro_init();
+    // 内核驱动不再于启动时初始化：避免驱动接管/拦截真实触摸导致无法触控。
+    // 改为惰性连接——陀螺仪自瞄首次注入时自动连接，或面板"连接驱动"手动连接。
 
     // 初始化推理引擎
     auto engine = std::make_unique<LiteRtEngine>();

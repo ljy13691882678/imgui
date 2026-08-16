@@ -237,30 +237,58 @@ static void upload() {
     int count = 0;
     int activeFingerCount = 0;
     bool hasActiveFinger = false;
-    size_t deviceCount = std::min(g_devices.size(), static_cast<size_t>(maxE));
 
-    for (size_t di = 0; di < deviceCount; ++di) {
-        for (int fi = 0; fi < maxF; ++fi) {
-            const TouchObj& finger = g_devices[di].fingers[fi];
-            bool wasUploaded = g_uploadedFingerDown[di][fi];
-            int slot = static_cast<int>(di * maxF + fi);
+    // 无 grab 架构：真实手指已自然透传系统，uinput 只注入合成手指（自瞄/扳机）。
+    // 只在设备 0 的保留槽位（TOUCH_VIRTUAL_SLOT/TOUCH_TRIGGER_SLOT）上注入，
+    // 绝不能把真实物理手指回放成第二路触摸——否则游戏会同时收到真实触摸与
+    // uinput 回放触摸两路事件，导致触控冲突/无响应。
+    const TouchObj& virt = g_devices[0].fingers[TOUCH_VIRTUAL_SLOT];
+    const TouchObj& trig = g_devices[0].fingers[TOUCH_TRIGGER_SLOT];
+    const bool virtWas = g_uploadedFingerDown[0][TOUCH_VIRTUAL_SLOT];
+    const bool trigWas = g_uploadedFingerDown[0][TOUCH_TRIGGER_SLOT];
+    // 无任何合成手指按下/抬起时，不向 uinput 发空包（reader 线程每次 SYN 都会走到这里）
+    if (!virt.isDown && !trig.isDown && !virtWas && !trigWas) return;
 
-            if (finger.isDown) {
-                hasActiveFinger = true;
-                ++activeFingerCount;
-                pushEvent(count, EV_ABS, ABS_MT_SLOT, slot);
-                if (!wasUploaded)
-                    pushEvent(count, EV_ABS, ABS_MT_TRACKING_ID, finger.id);
-                pushEvent(count, EV_ABS, ABS_MT_POSITION_X, static_cast<int>(finger.pos.x));
-                pushEvent(count, EV_ABS, ABS_MT_POSITION_Y, static_cast<int>(finger.pos.y));
-                pushEvent(count, EV_ABS, ABS_X, static_cast<int>(finger.pos.x));
-                pushEvent(count, EV_ABS, ABS_Y, static_cast<int>(finger.pos.y));
-                g_uploadedFingerDown[di][fi] = true;
-            } else if (wasUploaded) {
-                pushEvent(count, EV_ABS, ABS_MT_SLOT, slot);
-                pushEvent(count, EV_ABS, ABS_MT_TRACKING_ID, -1);
-                g_uploadedFingerDown[di][fi] = false;
-            }
+    if (virt.isDown || virtWas) {
+        const TouchObj& finger = virt;
+        bool wasUploaded = virtWas;
+        int slot = TOUCH_VIRTUAL_SLOT;
+        if (finger.isDown) {
+            hasActiveFinger = true;
+            ++activeFingerCount;
+            pushEvent(count, EV_ABS, ABS_MT_SLOT, slot);
+            if (!wasUploaded)
+                pushEvent(count, EV_ABS, ABS_MT_TRACKING_ID, finger.id);
+            pushEvent(count, EV_ABS, ABS_MT_POSITION_X, static_cast<int>(finger.pos.x));
+            pushEvent(count, EV_ABS, ABS_MT_POSITION_Y, static_cast<int>(finger.pos.y));
+            pushEvent(count, EV_ABS, ABS_X, static_cast<int>(finger.pos.x));
+            pushEvent(count, EV_ABS, ABS_Y, static_cast<int>(finger.pos.y));
+            g_uploadedFingerDown[0][TOUCH_VIRTUAL_SLOT] = true;
+        } else {
+            pushEvent(count, EV_ABS, ABS_MT_SLOT, slot);
+            pushEvent(count, EV_ABS, ABS_MT_TRACKING_ID, -1);
+            g_uploadedFingerDown[0][TOUCH_VIRTUAL_SLOT] = false;
+        }
+    }
+    if (trig.isDown || trigWas) {
+        const TouchObj& finger = trig;
+        bool wasUploaded = trigWas;
+        int slot = TOUCH_TRIGGER_SLOT;
+        if (finger.isDown) {
+            hasActiveFinger = true;
+            ++activeFingerCount;
+            pushEvent(count, EV_ABS, ABS_MT_SLOT, slot);
+            if (!wasUploaded)
+                pushEvent(count, EV_ABS, ABS_MT_TRACKING_ID, finger.id);
+            pushEvent(count, EV_ABS, ABS_MT_POSITION_X, static_cast<int>(finger.pos.x));
+            pushEvent(count, EV_ABS, ABS_MT_POSITION_Y, static_cast<int>(finger.pos.y));
+            pushEvent(count, EV_ABS, ABS_X, static_cast<int>(finger.pos.x));
+            pushEvent(count, EV_ABS, ABS_Y, static_cast<int>(finger.pos.y));
+            g_uploadedFingerDown[0][TOUCH_TRIGGER_SLOT] = true;
+        } else {
+            pushEvent(count, EV_ABS, ABS_MT_SLOT, slot);
+            pushEvent(count, EV_ABS, ABS_MT_TRACKING_ID, -1);
+            g_uploadedFingerDown[0][TOUCH_TRIGGER_SLOT] = false;
         }
     }
 
@@ -563,6 +591,7 @@ void touch_close(void) {
 
 bool touch_is_initialized(void) { return g_initialized; }
 int  touch_get_output_fd(void)   { return g_outputFd; }
+int  touch_device_count(void)    { return static_cast<int>(g_devices.size()); }
 
 // uinput 注入设备是否已就绪（触摸注入可用）
 bool touch_inject_ready(void) { return g_initialized && g_outputFd > 0; }
@@ -664,6 +693,10 @@ bool touch_kernel_gyro_init(void) {
 
 void touch_gyro_apply(bool enable, float pitch, float yaw) {
     if (!g_kernelMode) return;
+    // 惰性连接驱动：仅在真正需要陀螺仪自瞄时才初始化驱动。启动即初始化驱动，
+    // 若驱动会接管/拦截真实触摸，会导致游戏和 ImGui 都收不到触摸（本次无法触控
+    // 问题的首要嫌疑）。未连接则先尝试连接，失败则本次注入无效。
+    if (!kdrv_connected() && !touch_kernel_gyro_init()) return;
     kdrv_gyro_set(enable, pitch, yaw, (uint32_t)g_rotation, 1, TIME_GYRO_MASK_ALL);
 }
 
