@@ -67,11 +67,14 @@ jobs:
       - name: Build APK with Gradle
         working-directory: YoloTouchImgui
         run: |
-          # 生成 release keystore，注入签名环境变量（避免 unsigned APK 无法安装/闪退）
-          keytool -genkeypair -v -keystore release.jks -keyalg RSA -keysize 2048 \
-            -validity 10000 -alias yolotouch \
-            -storepass yolotouch -keypass yolotouch \
-            -dname "CN=YoloTouch, OU=Dev, O=YoloTouch, L=CN, S=CN, C=CN" || true
+          # 使用仓库内固定的 release.jks（签名固定，覆盖安装无需卸载重装）。
+          # 若不存在（如首次本地构建前），回退生成临时 keystore。
+          if [ ! -f release.jks ]; then
+            keytool -genkeypair -v -keystore release.jks -keyalg RSA -keysize 2048 \
+              -validity 10000 -alias yolotouch \
+              -storepass yolotouch -keypass yolotouch \
+              -dname "CN=YoloTouch, OU=Dev, O=YoloTouch, L=CN, S=CN, C=CN" || true
+          fi
           export KEYSTORE_PATH="${GITHUB_WORKSPACE}/YoloTouchImgui/release.jks"
           export KEYSTORE_PASSWORD=yolotouch
           export KEY_ALIAS=yolotouch

@@ -58,6 +58,10 @@ struct AimConfig {
     int   aimLockTimeMs = 300;     // 锁定时间
     // 自瞄锁定部位：0=中心 1=头部 2=身体（按目标框计算瞄准点，头部/身体按类别名 head/body 识别）
     int   aimPart = 0;
+    // 自瞄瞄准点微调（归一化，相对屏幕）：在锁定部位计算出的瞄准点上再叠加偏移，
+    // 用于微调锁点位置（如锁头时略向下，避免顶到头顶 / 打偏）
+    float aimOffsetX = 0.0f;       // X 偏移（正=右）
+    float aimOffsetY = 0.0f;       // Y 偏移（正=下）
     // 自瞄拖拽灵敏度（拖动视角式）：归一化增量 × 屏幕 × dragSens → 每帧拖拽像素
     float dragSens = 0.35f;
     // 自瞄单帧最大拖拽像素（防止瞬移/抖动）

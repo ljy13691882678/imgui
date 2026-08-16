@@ -71,6 +71,41 @@ static AimConfig g_cfg;
 static bool g_aimActive = false;
 static float g_aimX = 0.5f, g_aimY = 0.5f;
 
+// 配置文件路径（工作目录下）+ 上次保存副本（用于自动保存差异检测）
+static std::string g_cfgFile = "yolotouch_cfg.bin";
+static AimConfig g_cfgLastSaved;
+
+// 保存配置到文件（魔数 + 版本 + 结构体二进制）
+static void saveConfig() {
+    FILE* f = fopen(g_cfgFile.c_str(), "wb");
+    if (!f) return;
+    const char magic[4] = {'Y', 'T', 'C', 'T'};
+    uint32_t version = 1;
+    fwrite(magic, 1, 4, f);
+    fwrite(&version, 4, 1, f);
+    fwrite(&g_cfg, 1, sizeof(g_cfg), f);
+    fclose(f);
+}
+
+// 从文件加载配置（版本/大小不符时静默忽略，保留默认值）
+static bool loadConfig() {
+    FILE* f = fopen(g_cfgFile.c_str(), "rb");
+    if (!f) return false;
+    char magic[4] = {0};
+    uint32_t version = 0;
+    bool ok = false;
+    if (fread(magic, 1, 4, f) == 4 && fread(&version, 4, 1, f) == 1 &&
+        memcmp(magic, "YTCT", 4) == 0 && version == 1) {
+        AimConfig cfg;
+        if (fread(&cfg, 1, sizeof(cfg), f) == sizeof(cfg)) {
+            g_cfg = cfg;
+            ok = true;
+        }
+    }
+    fclose(f);
+    return ok;
+}
+
 // 类别显示过滤：classEnabled[i]==false 时该类别的框不显示、不参与自瞄/扳机
 static std::vector<bool> g_classEnabled;
 
@@ -329,6 +364,10 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     {
         float ax, ay;
         computeAimPoint(*pick, g_cfg.aimPart, &ax, &ay);
+        // 自瞄瞄准点微调：在锁定部位计算出的瞄准点上叠加偏移，
+        // 用于微调锁点位置（如锁头时略向下，避免顶到头顶 / 打偏）
+        ax += g_cfg.aimOffsetX;
+        ay += g_cfg.aimOffsetY;
         // 瞄准点时间平滑（EMA）：同一跟踪目标用指数移动平均压掉检测框抖动，
         // 避免“拖视角→框移动→再拖”的反馈振荡传导到自瞄（尤其锁头/身体时 Y 轴上下甩）。
         // 切换跟踪目标时重置，避免新旧目标位置混叠。
@@ -874,157 +913,166 @@ static void drawControlPanel() {
     ImGui::SetNextWindowPos(ImVec2(20, 80), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(360, 580), ImGuiCond_FirstUseEver);
     ImGui::Begin("YoloTouch 控制面板", nullptr, ImGuiWindowFlags_NoCollapse);
+    // 顶部：折叠 + 退出（并列），下方显示状态
     if (ImGui::Button("折叠 ▾")) g_panelCollapsed = true;
     ImGui::SameLine();
+    if (ImGui::Button("退出")) exitImgui();
     ImGui::Text("后端: %s", g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "无");
     ImGui::Text("帧源: %llu FPS | 推理: %llu FPS",
                 (unsigned long long)g_srcFps.load(),
                 (unsigned long long)g_inferFps.load());
     ImGui::Separator();
 
-    // 模型选择
-    if (!g_modelList.empty()) {
-        const char* preview = g_modelIndex >= 0 && (size_t)g_modelIndex < g_modelList.size()
-            ? strrchr(g_modelList[g_modelIndex].c_str(), '/') + 1
-            : g_modelList[0].c_str();
-        if (ImGui::BeginCombo("模型", preview)) {
-            for (int i = 0; i < (int)g_modelList.size(); ++i) {
-                const char* name = strrchr(g_modelList[i].c_str(), '/') + 1;
-                if (ImGui::Selectable(name, i == g_modelIndex)) {
-                    if (i != g_modelIndex) loadModel(i);
-                }
-            }
-            ImGui::EndCombo();
-        }
-        ImGui::Separator();
-    }
-
-    ImGui::Checkbox("启用", &g_cfg.enabled);
-    ImGui::Checkbox("显示检测框", &g_cfg.showBoxes);
-    ImGui::Checkbox("显示帧率", &g_cfg.showFps);
-    ImGui::Checkbox("显示裁剪框", &g_cfg.showCropBox);
-    ImGui::Checkbox("显示区域", &g_cfg.showZones);
-    ImGui::Checkbox("显示连线", &g_cfg.showAimLines);
-    ImGui::SliderFloat("置信度阈值", &g_cfg.confidence, 0.05f, 0.95f);
-    ImGui::Separator();
-
-    // 居中裁剪尺寸选择（面板切换后，传给 APK 重建共享内存）
-    {
-        char previewBuf[32];
-        if (CROP_OPTIONS[g_cfg.cropIndex] == 0)
-            snprintf(previewBuf, sizeof(previewBuf), "全屏");
-        else
-            snprintf(previewBuf, sizeof(previewBuf), "%d", CROP_OPTIONS[g_cfg.cropIndex]);
-        if (g_shm && g_shm->valid()) {
-            auto ci = g_shm->cropInfo();
-            if (ci.size == 0)
-                snprintf(previewBuf, sizeof(previewBuf), "全屏 (当前)");
-            else if (ci.size > 0)
-                snprintf(previewBuf, sizeof(previewBuf), "%d (当前)", ci.size);
-        }
-        if (ImGui::BeginCombo("裁剪尺寸", previewBuf)) {
-            for (int i = 0; i < (int)(sizeof(CROP_OPTIONS)/sizeof(CROP_OPTIONS[0])); ++i) {
-                char label[32];
-                if (CROP_OPTIONS[i] == 0)
-                    snprintf(label, sizeof(label), "全屏");
-                else
-                    snprintf(label, sizeof(label), "%d×%d", CROP_OPTIONS[i], CROP_OPTIONS[i]);
-                bool selected = (i == g_cfg.cropIndex);
-                if (ImGui::Selectable(label, selected)) {
-                    if (i != g_cfg.cropIndex) {
-                        g_cfg.cropIndex = i;
-                        int newSize = CROP_OPTIONS[i];
-                        printf("[panel] requesting crop size change to %d\n", newSize);
-                        if (g_shm && g_shm->valid()) {
-                            g_shm->requestCrop(newSize);
-                        }
+    // ===== 推理分类 =====
+    if (ImGui::CollapsingHeader("推理", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // 模型选择
+        if (!g_modelList.empty()) {
+            const char* preview = g_modelIndex >= 0 && (size_t)g_modelIndex < g_modelList.size()
+                ? strrchr(g_modelList[g_modelIndex].c_str(), '/') + 1
+                : g_modelList[0].c_str();
+            if (ImGui::BeginCombo("模型", preview)) {
+                for (int i = 0; i < (int)g_modelList.size(); ++i) {
+                    const char* name = strrchr(g_modelList[i].c_str(), '/') + 1;
+                    if (ImGui::Selectable(name, i == g_modelIndex)) {
+                        if (i != g_modelIndex) loadModel(i);
                     }
                 }
-                if (selected) ImGui::SetItemDefaultFocus();
+                ImGui::EndCombo();
             }
-            ImGui::EndCombo();
+        }
+        ImGui::Checkbox("启用", &g_cfg.enabled);
+        ImGui::Checkbox("显示检测框", &g_cfg.showBoxes);
+        ImGui::Checkbox("显示帧率", &g_cfg.showFps);
+        ImGui::Checkbox("显示裁剪框", &g_cfg.showCropBox);
+        ImGui::Checkbox("显示区域", &g_cfg.showZones);
+        ImGui::Checkbox("显示连线", &g_cfg.showAimLines);
+        ImGui::SliderFloat("置信度阈值", &g_cfg.confidence, 0.05f, 0.95f);
+
+        // 居中裁剪尺寸选择（面板切换后，传给 APK 重建共享内存）
+        {
+            char previewBuf[32];
+            if (CROP_OPTIONS[g_cfg.cropIndex] == 0)
+                snprintf(previewBuf, sizeof(previewBuf), "全屏");
+            else
+                snprintf(previewBuf, sizeof(previewBuf), "%d", CROP_OPTIONS[g_cfg.cropIndex]);
+            if (g_shm && g_shm->valid()) {
+                auto ci = g_shm->cropInfo();
+                if (ci.size == 0)
+                    snprintf(previewBuf, sizeof(previewBuf), "全屏 (当前)");
+                else if (ci.size > 0)
+                    snprintf(previewBuf, sizeof(previewBuf), "%d (当前)", ci.size);
+            }
+            if (ImGui::BeginCombo("裁剪尺寸", previewBuf)) {
+                for (int i = 0; i < (int)(sizeof(CROP_OPTIONS)/sizeof(CROP_OPTIONS[0])); ++i) {
+                    char label[32];
+                    if (CROP_OPTIONS[i] == 0)
+                        snprintf(label, sizeof(label), "全屏");
+                    else
+                        snprintf(label, sizeof(label), "%d×%d", CROP_OPTIONS[i], CROP_OPTIONS[i]);
+                    bool selected = (i == g_cfg.cropIndex);
+                    if (ImGui::Selectable(label, selected)) {
+                        if (i != g_cfg.cropIndex) {
+                            g_cfg.cropIndex = i;
+                            int newSize = CROP_OPTIONS[i];
+                            printf("[panel] requesting crop size change to %d\n", newSize);
+                            if (g_shm && g_shm->valid()) {
+                                g_shm->requestCrop(newSize);
+                            }
+                        }
+                    }
+                    if (selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+        }
+        // 推理帧率上限（节流：0=不限，可选 60/90/120/144）
+        {
+            const int FPS_OPTIONS[] = {0, 60, 90, 120, 144};
+            char previewBuf[16];
+            if (g_cfg.fpsLimit > 0)
+                snprintf(previewBuf, sizeof(previewBuf), "%d FPS", g_cfg.fpsLimit);
+            else
+                snprintf(previewBuf, sizeof(previewBuf), "不限");
+            if (ImGui::BeginCombo("推理帧率上限", previewBuf)) {
+                for (int f : FPS_OPTIONS) {
+                    char label[16];
+                    if (f == 0) snprintf(label, sizeof(label), "不限");
+                    else snprintf(label, sizeof(label), "%d FPS", f);
+                    bool sel = (g_cfg.fpsLimit == f);
+                    if (ImGui::Selectable(label, sel)) g_cfg.fpsLimit = f;
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+        }
+        // 检测框描边粗细
+        ImGui::SliderInt("框描边", &g_cfg.boxThickness, 1, 4);
+        ImGui::Checkbox("框标签", &g_cfg.showBoxLabels);
+        // 检测框速度预判（毫秒）：调大让框更超前，补偿快速转动时的捕获→绘制延迟
+        float boxPredictMs = g_cfg.boxPredictTime * 1000.0f;
+        if (ImGui::SliderFloat("框预判(ms)", &boxPredictMs, 0.0f, 80.0f, "%.0f"))
+            g_cfg.boxPredictTime = boxPredictMs / 1000.0f;
+
+        // 类别显示过滤（类名来自模型同目录 labels 文件，如 head/body）
+        if (g_engine && g_engineReady && g_engine->getNumClasses() > 0) {
+            syncClassConfig();
+            ImGui::Text("显示类别:");
+            for (int i = 0; i < g_engine->getNumClasses(); ++i) {
+                const char* name = g_engine->getClassName(i);
+                char label[64];
+                if (name && name[0]) snprintf(label, sizeof(label), "%s##c%d", name, i);
+                else snprintf(label, sizeof(label), "类别%d##c%d", i, i);
+                bool on = g_classEnabled[i];
+                if (ImGui::Checkbox(label, &on)) g_classEnabled[i] = on;
+                if (i % 2 == 0) ImGui::SameLine();
+            }
+        }
+        if (ImGui::Button("应用置信度")) {
+            if (g_engine) g_engine->setConfidence(g_cfg.confidence);
         }
     }
-    // 推理帧率上限（节流：0=不限，可选 60/90/120/144）
-    {
-        const int FPS_OPTIONS[] = {0, 60, 90, 120, 144};
-        char previewBuf[16];
-        if (g_cfg.fpsLimit > 0)
-            snprintf(previewBuf, sizeof(previewBuf), "%d FPS", g_cfg.fpsLimit);
-        else
-            snprintf(previewBuf, sizeof(previewBuf), "不限");
-        if (ImGui::BeginCombo("推理帧率上限", previewBuf)) {
-            for (int f : FPS_OPTIONS) {
-                char label[16];
-                if (f == 0) snprintf(label, sizeof(label), "不限");
-                else snprintf(label, sizeof(label), "%d FPS", f);
-                bool sel = (g_cfg.fpsLimit == f);
-                if (ImGui::Selectable(label, sel)) g_cfg.fpsLimit = f;
-                if (sel) ImGui::SetItemDefaultFocus();
-            }
-            ImGui::EndCombo();
-        }
-    }
-    // 检测框描边粗细
-    ImGui::SliderInt("框描边", &g_cfg.boxThickness, 1, 4);
-    ImGui::Checkbox("框标签", &g_cfg.showBoxLabels);
-    // 检测框速度预判（毫秒）：调大让框更超前，补偿快速转动时的捕获→绘制延迟
-    float boxPredictMs = g_cfg.boxPredictTime * 1000.0f;
-    if (ImGui::SliderFloat("框预判(ms)", &boxPredictMs, 0.0f, 80.0f, "%.0f"))
-        g_cfg.boxPredictTime = boxPredictMs / 1000.0f;
     ImGui::Separator();
 
-    // 类别显示过滤（类名来自模型同目录 labels 文件，如 head/body）
-    if (g_engine && g_engineReady && g_engine->getNumClasses() > 0) {
-        syncClassConfig();
-        ImGui::Text("显示类别:");
-        for (int i = 0; i < g_engine->getNumClasses(); ++i) {
-            const char* name = g_engine->getClassName(i);
-            char label[64];
-            if (name && name[0]) snprintf(label, sizeof(label), "%s##c%d", name, i);
-            else snprintf(label, sizeof(label), "类别%d##c%d", i, i);
-            bool on = g_classEnabled[i];
-            if (ImGui::Checkbox(label, &on)) g_classEnabled[i] = on;
-            if (i % 2 == 0) ImGui::SameLine();
-        }
-        ImGui::Separator();
-    }
-
-    ImGui::Checkbox("自瞄", &g_cfg.aimEnabled);
-    // 自瞄算法切换：0=原版(拖拽+平滑) 1=PID 2=贝塞尔
-    {
-        static int lastMode = -1;
-        const char* modes[] = {"原版(拖拽+平滑)", "PID", "贝塞尔"};
-        int cur = g_cfg.aimMode;
-        if (cur < 0 || cur > 2) cur = 0;
-        if (ImGui::BeginCombo("自瞄算法", modes[cur])) {
-            for (int i = 0; i < 3; ++i) {
-                if (ImGui::Selectable(modes[i], i == cur)) g_cfg.aimMode = i;
-                if (i == cur) ImGui::SetItemDefaultFocus();
+    // ===== 自瞄分类 =====
+    if (ImGui::CollapsingHeader("自瞄", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("自瞄", &g_cfg.aimEnabled);
+        // 自瞄算法切换：0=原版(拖拽+平滑) 1=PID 2=贝塞尔
+        {
+            static int lastMode = -1;
+            const char* modes[] = {"原版(拖拽+平滑)", "PID", "贝塞尔"};
+            int cur = g_cfg.aimMode;
+            if (cur < 0 || cur > 2) cur = 0;
+            if (ImGui::BeginCombo("自瞄算法", modes[cur])) {
+                for (int i = 0; i < 3; ++i) {
+                    if (ImGui::Selectable(modes[i], i == cur)) g_cfg.aimMode = i;
+                    if (i == cur) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
             }
-            ImGui::EndCombo();
-        }
-        // 切换算法时重置对应控制器内部状态，避免跨算法串扰
-        if (g_cfg.aimMode != lastMode) {
-            if (g_cfg.aimMode == 1) g_pidAim.reset();
-            else if (g_cfg.aimMode == 2) g_bezierAim.reset();
-            else g_aim.reset();
-            lastMode = g_cfg.aimMode;
-        }
-    }
-    // 自瞄锁定部位（按模型类别名 head/body 识别头部/身体框）
-    {
-        const char* parts[] = {"锁中心", "锁头部", "锁身体"};
-        const char* preview = parts[g_cfg.aimPart];
-        if (g_cfg.aimPart < 0 || g_cfg.aimPart > 2) preview = parts[0];
-        if (ImGui::BeginCombo("锁定部位", preview)) {
-            for (int i = 0; i < 3; ++i) {
-                if (ImGui::Selectable(parts[i], i == g_cfg.aimPart)) g_cfg.aimPart = i;
-                if (i == g_cfg.aimPart) ImGui::SetItemDefaultFocus();
+            // 切换算法时重置对应控制器内部状态，避免跨算法串扰
+            if (g_cfg.aimMode != lastMode) {
+                if (g_cfg.aimMode == 1) g_pidAim.reset();
+                else if (g_cfg.aimMode == 2) g_bezierAim.reset();
+                else g_aim.reset();
+                lastMode = g_cfg.aimMode;
             }
-            ImGui::EndCombo();
         }
-    }
+        // 自瞄锁定部位（按模型类别名 head/body 识别头部/身体框）
+        {
+            const char* parts[] = {"锁中心", "锁头部", "锁身体"};
+            const char* preview = parts[g_cfg.aimPart];
+            if (g_cfg.aimPart < 0 || g_cfg.aimPart > 2) preview = parts[0];
+            if (ImGui::BeginCombo("锁定部位", preview)) {
+                for (int i = 0; i < 3; ++i) {
+                    if (ImGui::Selectable(parts[i], i == g_cfg.aimPart)) g_cfg.aimPart = i;
+                    if (i == g_cfg.aimPart) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+        }
+        // 自瞄瞄准点微调 X/Y
+        ImGui::SliderFloat("瞄准微调 X", &g_cfg.aimOffsetX, -0.05f, 0.05f, "%.4f");
+        ImGui::SliderFloat("瞄准微调 Y", &g_cfg.aimOffsetY, -0.05f, 0.05f, "%.4f");
     // 自瞄类别锁定（aimClass: -1=全部, >=0=仅锁定该类）
     {
         char clsBuf[64];
@@ -1090,53 +1138,52 @@ static void drawControlPanel() {
         ImGui::SliderFloat("收敛阈值(px)", &g_cfg.convergeThresh, 1.0f, 60.0f);
         ImGui::SliderFloat("移动平滑", &g_cfg.aimMoveSmooth, 0.0f, 0.95f);
     }
+    }
     ImGui::Separator();
-    // 区域拖拽编辑：在悬浮窗上直接拖动控制点调整区域大小和位置（扳机区改为拖拽调整）
-    ImGui::Text("区域编辑(拖拽调整)");
-    {
-        const char* zmodes[] = {"关闭", "触控区", "触发区(扳机)", "自瞄触发区", "倍镜区"};
-        int cur = g_cfg.zoneEditTarget;
-        if (cur < 0 || cur > 4) cur = 0;
-        if (ImGui::BeginCombo("编辑区域", zmodes[cur])) {
-            for (int i = 0; i < 5; ++i) {
-                if (ImGui::Selectable(zmodes[i], i == cur)) g_cfg.zoneEditTarget = i;
-                if (i == cur) ImGui::SetItemDefaultFocus();
+
+    // ===== 区域分类 =====
+    if (ImGui::CollapsingHeader("区域")) {
+        // 区域拖拽编辑：在悬浮窗上直接拖动控制点调整区域大小和位置（扳机区改为拖拽调整）
+        ImGui::Text("区域编辑(拖拽调整)");
+        {
+            const char* zmodes[] = {"关闭", "触控区", "触发区(扳机)", "自瞄触发区", "倍镜区"};
+            int cur = g_cfg.zoneEditTarget;
+            if (cur < 0 || cur > 4) cur = 0;
+            if (ImGui::BeginCombo("编辑区域", zmodes[cur])) {
+                for (int i = 0; i < 5; ++i) {
+                    if (ImGui::Selectable(zmodes[i], i == cur)) g_cfg.zoneEditTarget = i;
+                    if (i == cur) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
             }
-            ImGui::EndCombo();
+            if (g_cfg.zoneEditTarget != 0) {
+                ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f),
+                                   "拖动控制点调整大小/位置，编辑中自瞄/扳机暂停");
+            }
         }
-        if (g_cfg.zoneEditTarget != 0) {
-            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f),
-                               "拖动控制点调整大小/位置，编辑中自瞄/扳机暂停");
-        }
-    }
-    // 触控区：自瞄拖拽注入区域（与游戏转向/瞄准区对齐）
-    ImGui::Text("触控区(自瞄拖拽)");
-    ImGui::SliderFloat("触控左##tzL", &g_cfg.touchZoneL, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("触控上##tzT", &g_cfg.touchZoneT, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("触控右##tzR", &g_cfg.touchZoneR, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("触控下##tzB", &g_cfg.touchZoneB, 0.0f, 1.0f, "%.2f");
-    ImGui::Separator();
-    // 自瞄触发区/倍镜区：开启后需点击对应区域才触发自瞄
-    ImGui::Checkbox("自瞄触发区", &g_cfg.aimTriggerZoneEnabled);
-    ImGui::Checkbox("倍镜区", &g_cfg.adsZoneEnabled);
-    ImGui::Separator();
-
-    ImGui::Checkbox("扳机", &g_cfg.triggerEnabled);
-    ImGui::SliderFloat("扳机灵敏度", &g_cfg.triggerSensitivity, 0.1f, 1.0f);
-    ImGui::Checkbox("扳机按住", &g_cfg.triggerHold);
-    ImGui::SliderInt("点射间隔(ms)", &g_cfg.triggerCooldownMs, 0, 500);
-    // 扳机随机延迟：目标进入触发区后延迟 50~300ms 内随机值再开火（防机械感/防检）
-    ImGui::SliderInt("延迟下限(ms)", &g_cfg.triggerDelayMin, 0, 300);
-    ImGui::SliderInt("延迟上限(ms)", &g_cfg.triggerDelayMax, 0, 300);
-    if (g_cfg.triggerDelayMax < g_cfg.triggerDelayMin)
-        g_cfg.triggerDelayMax = g_cfg.triggerDelayMin;
-
-    if (ImGui::Button("应用置信度")) {
-        if (g_engine) g_engine->setConfidence(g_cfg.confidence);
+        // 触控区：自瞄拖拽注入区域（与游戏转向/瞄准区对齐）
+        ImGui::Text("触控区(自瞄拖拽)");
+        ImGui::SliderFloat("触控左##tzL", &g_cfg.touchZoneL, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("触控上##tzT", &g_cfg.touchZoneT, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("触控右##tzR", &g_cfg.touchZoneR, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("触控下##tzB", &g_cfg.touchZoneB, 0.0f, 1.0f, "%.2f");
+        // 自瞄触发区/倍镜区：开启后需点击对应区域才触发自瞄
+        ImGui::Checkbox("自瞄触发区", &g_cfg.aimTriggerZoneEnabled);
+        ImGui::Checkbox("倍镜区", &g_cfg.adsZoneEnabled);
     }
     ImGui::Separator();
-    if (ImGui::Button("退出进程", ImVec2(-1, 0))) {
-        exitImgui();
+
+    // ===== 扳机分类 =====
+    if (ImGui::CollapsingHeader("扳机")) {
+        ImGui::Checkbox("扳机", &g_cfg.triggerEnabled);
+        ImGui::SliderFloat("扳机灵敏度", &g_cfg.triggerSensitivity, 0.1f, 1.0f);
+        ImGui::Checkbox("扳机按住", &g_cfg.triggerHold);
+        ImGui::SliderInt("点射间隔(ms)", &g_cfg.triggerCooldownMs, 0, 500);
+        // 扳机随机延迟：目标进入触发区后延迟 50~300ms 内随机值再开火（防机械感/防检）
+        ImGui::SliderInt("延迟下限(ms)", &g_cfg.triggerDelayMin, 0, 300);
+        ImGui::SliderInt("延迟上限(ms)", &g_cfg.triggerDelayMax, 0, 300);
+        if (g_cfg.triggerDelayMax < g_cfg.triggerDelayMin)
+            g_cfg.triggerDelayMax = g_cfg.triggerDelayMin;
     }
     ImGui::End();
 }
@@ -1146,13 +1193,14 @@ static void drawMiniPanel() {
     ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
     ImGui::Begin("YoloTouch", nullptr,
                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize);
+    // 展开 + 退出 并列，便于折叠状态下也能快速退出
     if (ImGui::Button("展开 ▶")) g_panelCollapsed = false;
     ImGui::SameLine();
-    ImGui::Text("%s", g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "无");
-    ImGui::Text("推理: %llu FPS", (unsigned long long)g_inferFps.load());
     if (ImGui::Button("退出")) {
         exitImgui();
     }
+    ImGui::Text("后端: %s", g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "无");
+    ImGui::Text("推理: %llu FPS", (unsigned long long)g_inferFps.load());
     ImGui::End();
 }
 
@@ -1176,6 +1224,22 @@ int main(int argc, char* argv[]) {
     const char* modelPath = argv[1];
     const char* shmPath = argv[2];
     if (argc >= 4) chdir(argv[3]);
+
+    // 加载上次保存的配置（工作目录下 yolotouch_cfg.bin），失败则用默认值
+    g_cfgFile = std::string(argv[3] ? argv[3] : ".") + "/yolotouch_cfg.bin";
+    if (loadConfig()) {
+        printf("config loaded from %s\n", g_cfgFile.c_str());
+        // 加载后钳制数组索引（模型/裁剪/算法等），防止越界
+        int cropN = (int)(sizeof(CROP_OPTIONS) / sizeof(CROP_OPTIONS[0]));
+        if (g_cfg.cropIndex < 0 || g_cfg.cropIndex >= cropN) g_cfg.cropIndex = 6;
+        if (g_cfg.aimMode < 0 || g_cfg.aimMode > 2) g_cfg.aimMode = 0;
+        if (g_cfg.aimPart < 0 || g_cfg.aimPart > 2) g_cfg.aimPart = 0;
+        if (g_cfg.selectMode < 0 || g_cfg.selectMode > 2) g_cfg.selectMode = 0;
+        if (g_cfg.zoneEditTarget < 0 || g_cfg.zoneEditTarget > 4) g_cfg.zoneEditTarget = 0;
+    } else {
+        printf("no saved config, using defaults\n");
+    }
+    g_cfgLastSaved = g_cfg;
 
     // 扫描模型目录（模型文件所在目录），供面板切换
     {
@@ -1306,6 +1370,13 @@ int main(int argc, char* argv[]) {
         drawBegin();
         Layout_tick_UI();
         drawEnd();
+
+        // 配置自动保存：检测到配置变化（含区域拖拽）时写入文件，避免每次重进重新调
+        if (memcmp(&g_cfg, &g_cfgLastSaved, sizeof(g_cfg)) != 0) {
+            g_cfgLastSaved = g_cfg;
+            saveConfig();
+        }
+
         std::this_thread::sleep_for(1ms);
     }
 
