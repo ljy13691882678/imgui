@@ -26,6 +26,8 @@ public:
 
     std::string getBackendType() const override { return m_backend_type; }
     bool isInitialized() const override { return m_initialized; }
+    // 后端选择/失败诊断信息
+    std::string getDiag() const override { return m_diag; }
 
 private:
     // GPU delegate builder (universal, stays here)
@@ -41,4 +43,5 @@ private:
     TfLiteDelegate* m_delegate = nullptr;
     std::string m_backend_type = "LiteRT";
     bool m_initialized = false;
+    std::string m_diag;               // 初始化诊断信息
 };

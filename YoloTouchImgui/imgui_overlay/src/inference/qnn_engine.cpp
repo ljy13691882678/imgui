@@ -4,6 +4,8 @@
 #include <dlfcn.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdarg>
+#include <cstring>
 #include <sys/stat.h>
 
 // 逐级创建目录（QNN context binary cache 需要真实存在的可写目录）
@@ -102,19 +104,35 @@ QnnEngine::~QnnEngine() {
 //  Build Delegate
 //==============================================================================
 TfLiteDelegate* QnnEngine::buildDelegate() {
+    m_diag.clear();
+
+    // dlopen 测试关键 QNN 库：任一加载失败都会导致 HTP backend 初始化失败
+    auto appendDiag = [this](const char* fmt, ...) {
+        char buf[512];
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(buf, sizeof(buf), fmt, ap);
+        va_end(ap);
+        m_diag += buf;
+        m_diag += "\n";
+    };
+
     if (!isQualcommSnapdragon()) {
         LOGW("Non-Qualcomm CPU detected, skipping QNN HTP");
+        appendDiag("[QNN] 非高通芯片，跳过 HTP");
         return nullptr;
     }
+    appendDiag("[QNN] 检测到高通芯片");
 
+    // fastRPC 用户态库（HTP 与 DSP 通信必需）
     if (!m_preloaded) {
         void* h = dlopen("libcdsprpc.so", RTLD_NOW);
-        if (h) LOGD("libcdsprpc.so preloaded");
-        else   LOGW("libcdsprpc.so not available: %s", dlerror());
+        if (h) { LOGD("libcdsprpc.so preloaded"); appendDiag("[QNN] libcdsprpc.so 加载 OK"); }
+        else   { LOGW("libcdsprpc.so not available: %s", dlerror()); appendDiag("[QNN] libcdsprpc.so 加载失败: %s", dlerror()); }
 
         h = dlopen("libadsprpc.so", RTLD_NOW);
-        if (h) LOGD("libadsprpc.so preloaded");
-        else   LOGW("libadsprpc.so not available: %s", dlerror());
+        if (h) { LOGD("libadsprpc.so preloaded"); appendDiag("[QNN] libadsprpc.so 加载 OK"); }
+        else   { LOGW("libadsprpc.so not available: %s", dlerror()); appendDiag("[QNN] libadsprpc.so 加载失败: %s", dlerror()); }
 
         strncpy(m_native_lib_dir, getNativeLibDir(), sizeof(m_native_lib_dir) - 1);
         LOGD("Native lib dir: %s", m_native_lib_dir);
@@ -124,10 +142,36 @@ TfLiteDelegate* QnnEngine::buildDelegate() {
     // QNN HTP context binary cache 目录必须存在，否则 backend 初始化失败
     const char* cachePath = "/data/data/com.yolotouch.imgui/cache/qnn";
     ensureDir(cachePath);
+    appendDiag("[QNN] cache 目录: %s", cachePath);
+
+    const char* skelDir = getSkelLibDir();
+    appendDiag("[QNN] skel 库目录: %s", skelDir);
+
+    // 显式验证 skel/stub 库可加载（覆盖 V69~V81），确认包内库齐全
+    const char* qnnLibs[] = {
+        "libQnnHtp.so",
+        "libQnnSystem.so",
+        "libQnnTFLiteDelegate.so",
+        "libQnnHtpV69Stub.so",
+        "libQnnHtpV73Stub.so",
+        "libQnnHtpV75Stub.so",
+        "libQnnHtpV79Stub.so",
+        "libQnnHtpV81Stub.so",
+    };
+    for (const char* lib : qnnLibs) {
+        void* h = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
+        if (h) {
+            appendDiag("[QNN] %s 加载 OK", lib);
+            dlclose(h);
+        } else {
+            LOGW("%s dlopen failed: %s", lib, dlerror());
+            appendDiag("[QNN] %s 加载失败: %s", lib, dlerror());
+        }
+    }
 
     TfLiteQnnDelegateOptions qnn_options = TfLiteQnnDelegateOptionsDefault();
     qnn_options.backend_type = kHtpBackend;
-    qnn_options.skel_library_dir = getSkelLibDir();
+    qnn_options.skel_library_dir = skelDir;
     qnn_options.cache_dir = cachePath;
     qnn_options.model_token = "yolov8n_htp_v1";
     // 打开 QNN delegate/backend 日志，便于定位 HTP 初始化失败原因
@@ -140,14 +184,17 @@ TfLiteDelegate* QnnEngine::buildDelegate() {
     TfLiteQnnDelegateCapabilityStatus capFp16 = TfLiteQnnDelegateHasCapability(kCapHtpRuntimeFp16);
     TfLiteQnnDelegateCapabilityStatus capQuant = TfLiteQnnDelegateHasCapability(kCapHtpRuntimeQuant);
     LOGD("QNN HTP capability fp16=%d quant=%d (1=supported)", capFp16, capQuant);
+    appendDiag("[QNN] HTP 能力 fp16=%d quant=%d (1=支持)", capFp16, capQuant);
 
     m_delegate = TfLiteQnnDelegateCreate(&qnn_options);
     if (m_delegate) {
         LOGD("QNN HTP delegate created");
+        appendDiag("[QNN] HTP delegate 创建成功");
         // 高性能投票（默认 kHtpPerfCtrlManual 策略下立即生效）
         TfLiteQnnDelegateSetPerf(m_delegate, kPerformanceVote);
     } else {
         LOGW("QNN HTP delegate creation failed");
+        appendDiag("[QNN] HTP delegate 创建失败！(原因见 QNN backend 日志)");
     }
     return m_delegate;
 }

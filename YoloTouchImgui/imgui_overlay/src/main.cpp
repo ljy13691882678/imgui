@@ -317,6 +317,12 @@ static void drawControlPanel() {
     ImGui::SetNextWindowSize(ImVec2(360, 580), ImGuiCond_FirstUseEver);
     ImGui::Begin("YoloTouch 控制面板", nullptr, ImGuiWindowFlags_NoCollapse);
     ImGui::Text("后端: %s", g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "无");
+    if (g_engine && g_engineReady) {
+        std::string diag = g_engine->getDiag();
+        if (!diag.empty()) {
+            ImGui::TextWrapped("诊断:\n%s", diag.c_str());
+        }
+    }
     ImGui::Text("帧: %ux%u 旋转=%d", g_shmWidth, g_shmHeight, g_rotation);
     ImGui::Text("推理: %llu FPS  帧源序号: %u",
                 (unsigned long long)g_inferFps.load(),

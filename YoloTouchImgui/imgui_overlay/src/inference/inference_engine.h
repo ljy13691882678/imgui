@@ -21,6 +21,9 @@ public:
     virtual std::string getBackendType() const = 0;
     virtual bool isInitialized() const = 0;
 
+    // 初始化诊断信息（后端选择过程/失败原因），供 UI 直接显示
+    virtual std::string getDiag() const { return ""; }
+
     virtual void setConfidence(float threshold) { m_conf_thresh = threshold; }
     virtual void setInputSize(int width, int height) {
         m_input_width = width;

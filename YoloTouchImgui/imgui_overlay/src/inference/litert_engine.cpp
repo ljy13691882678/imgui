@@ -2,9 +2,20 @@
 #include <dlfcn.h>
 #include <cstdio>
 #include <cstdint>
+#include <cstdarg>
 #include <limits>
 
 namespace {
+
+// 把诊断信息写入 /data/local/tmp/imgui_qnn.log（root 进程可写，
+// 用户可用 root 文件管理器查看，无需 adb）
+void writeDiagToFile(const std::string& content) {
+    FILE* f = fopen("/data/local/tmp/imgui_qnn.log", "w");
+    if (f) {
+        fwrite(content.data(), 1, content.size(), f);
+        fclose(f);
+    }
+}
 
 struct OutputTensorData {
     std::vector<int> shape;
@@ -402,12 +413,29 @@ LiteRtEngine::~LiteRtEngine() {
 
 bool LiteRtEngine::init(const char* model_path) {
     release();
+    m_diag.clear();
+
+    auto appendDiag = [this](const char* fmt, ...) {
+        char buf[512];
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(buf, sizeof(buf), fmt, ap);
+        va_end(ap);
+        m_diag += buf;
+        m_diag += "\n";
+    };
+
+    appendDiag("模型: %s", model_path);
+    appendDiag("强制CPU: %s", m_force_cpu ? "是" : "否");
 
     m_model = TfLiteModelCreateFromFile(model_path);
     if (!m_model) {
         LOGE("Failed to load model: %s", model_path);
+        appendDiag("模型加载失败!");
+        writeDiagToFile(m_diag);
         return false;
     }
+    appendDiag("模型加载成功");
 
     // Delegate fallback chain:
     // Try platform-specific NPU first (QNN HTP / Neuron)
@@ -434,8 +462,11 @@ bool LiteRtEngine::init(const char* model_path) {
         TfLiteDelegate* del = trial.builder();
         if (!del) {
             LOGD("%s delegate not available, skipping", trial.name.c_str());
+            appendDiag("[%s] delegate 创建失败，跳过", trial.name.c_str());
+            if (trial.name == "QNN HTP") m_diag += m_qnn_engine.getDiag();
             continue;
         }
+        appendDiag("[%s] delegate 创建成功，尝试初始化解释器...", trial.name.c_str());
 
         TfLiteInterpreterOptions* trial_opts = TfLiteInterpreterOptionsCreate();
         TfLiteInterpreterOptionsAddDelegate(trial_opts, del);
@@ -449,10 +480,14 @@ bool LiteRtEngine::init(const char* model_path) {
             m_interpreter = interp;
             m_backend_type = trial.name;
             LOGD("Interpreter created with %s delegate", trial.name.c_str());
+            appendDiag("[%s] 解释器创建成功 → 后端 = %s", trial.name.c_str(), trial.name.c_str());
+            if (trial.name == "QNN HTP") m_diag += m_qnn_engine.getDiag();
             interpreter_created = true;
             break;
         } else {
             LOGW("%s delegate: interpreter creation failed", trial.name.c_str());
+            appendDiag("[%s] 解释器创建失败（HTP 初始化/模型编译失败）", trial.name.c_str());
+            if (trial.name == "QNN HTP") m_diag += m_qnn_engine.getDiag();
             // Clean up failed delegate
             if (trial.name == "QNN HTP") m_qnn_engine.deleteDelegate();
             else if (trial.name == "GPU") {
@@ -465,6 +500,7 @@ bool LiteRtEngine::init(const char* model_path) {
         m_delegate = nullptr;
         m_backend_type = "CPU";
         LOGD("Falling back to CPU");
+        appendDiag("[CPU] 加速后端全部失败，回退 CPU (线程=%d)", m_cpu_threads);
         TfLiteInterpreterOptions* cpu_opts = TfLiteInterpreterOptionsCreate();
         TfLiteInterpreterOptionsSetNumThreads(cpu_opts, m_cpu_threads);
         m_interpreter = TfLiteInterpreterCreate(m_model, cpu_opts);
@@ -472,15 +508,19 @@ bool LiteRtEngine::init(const char* model_path) {
 
         if (!m_interpreter) {
             LOGE("Failed to create interpreter with CPU");
+            appendDiag("[CPU] CPU 解释器创建失败!");
             TfLiteModelDelete(m_model);
             m_model = nullptr;
+            writeDiagToFile(m_diag);
             return false;
         }
     }
 
     if (TfLiteInterpreterAllocateTensors(m_interpreter) != kTfLiteOk) {
         LOGE("Failed to allocate tensors");
+        appendDiag("张量分配失败!");
         release();
+        writeDiagToFile(m_diag);
         return false;
     }
 
@@ -528,6 +568,8 @@ bool LiteRtEngine::init(const char* model_path) {
 
     m_initialized = true;
     LOGD("LiteRT initialized, backend: %s", m_backend_type.c_str());
+    appendDiag("最终后端: %s", m_backend_type.c_str());
+    writeDiagToFile(m_diag);
     return true;
 }
 
