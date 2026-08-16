@@ -513,7 +513,10 @@ bool touch_init(int screenW, int screenH, int rotation) {
         if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &device.absX) == 0 &&
             ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &device.absY) == 0) {
             device.fd = fd;
-            ioctl(fd, EVIOCGRAB, GRAB);
+            // 仅 uinput 模式 grab：抓取后由 reader 经 uinput 转发真实触摸，避免与注入双重投递。
+            // 内核模式不 grab——内核驱动在更低层 hook 触摸注入，真实触摸必须照常直达系统，
+            // 否则设备被独占后游戏/其他应用收不到任何触摸（只读不影响 reader 线程取坐标）。
+            if (!g_kernelMode) ioctl(fd, EVIOCGRAB, GRAB);
             g_devices.push_back(device);
             LOGD("touch device %s max=%d,%d", path, device.absX.maximum, device.absY.maximum);
         } else {
