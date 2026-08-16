@@ -3,6 +3,8 @@
 // Shared by JNI (Shizuku) and root_daemon (su)
 
 #include "touch_core.h"
+#include "time_driver_wrap.h"
+#include "time_driver.h"   // TIME_GYRO_MASK_ALL 等常量
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/input.h>
@@ -602,6 +604,30 @@ void touch_inject_close(void) {
     g_uploadedFingerDown = {};
     LOGD("touch inject closed");
 }
+
+// ─── 内核陀螺仪（TimeDriver，仅陀螺仪；触摸注入统一走 uinput） ───
+bool touch_kernel_gyro_init(void) {
+    // 惰性连接驱动 + 关闭触摸接管 + 初始化陀螺仪 hook（内部已做幂等）
+    return kdrv_gyro_init();
+}
+
+void touch_gyro_apply(bool enable, float pitch, float yaw) {
+    if (!g_initialized) return;
+    if (!kdrv_connected() && !touch_kernel_gyro_init()) return;
+    kdrv_gyro_set(enable, pitch, yaw, (uint32_t)g_rotation, 1, TIME_GYRO_MASK_ALL);
+}
+
+void touch_gyro_stop(void) {
+    kdrv_gyro_stop((uint32_t)g_rotation);
+}
+
+void touch_gyro_disable(void) {
+    kdrv_gyro_disable();
+}
+
+bool touch_kernel_connected(void) { return kdrv_connected(); }
+
+uint32_t touch_kernel_version(void) { return kdrv_version(); }
 
 void touch_start_readers(void) {
     if (g_running) return;

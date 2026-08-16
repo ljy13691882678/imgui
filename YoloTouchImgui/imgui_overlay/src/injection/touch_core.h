@@ -42,6 +42,14 @@ bool touch_inject_init(void);   // 创建 uinput 注入设备（触摸注入就�
 void touch_inject_close(void);  // 销毁 uinput 注入设备（停止触摸注入）
 bool touch_inject_ready(void);  // uinput 注入是否已就绪
 
+// 内核陀螺仪（TimeDriver，仅陀螺仪，不接管触摸；触摸注入统一走 uinput）
+bool     touch_kernel_gyro_init(void);          // 惰性连接驱动 + 关闭触摸接管 + 初始化陀螺仪 hook
+void     touch_gyro_apply(bool enable, float pitch, float yaw);  // 注入旋转（pitch/yaw 度）
+void     touch_gyro_stop(void);                 // 停止注入（enable=false）
+void     touch_gyro_disable(void);              // 关闭陀螺仪 hook
+bool     touch_kernel_connected(void);          // 驱动是否已连接
+uint32_t touch_kernel_version(void);            // 驱动版本号
+
 // Zone configuration (screen coordinates)
 void touch_set_trigger_zone(int l, int t, int r, int b);
 void touch_set_ads_zone(int l, int t, int r, int b);
