@@ -288,6 +288,15 @@ static void inferenceLoop() {
         g_lastFrameDoneMs.store(getTimeNowMs());
         frames++;
 
+        // 推理帧率上限（节流）：达到上限后等待到下一帧时隙，避免无谓的 CPU/耗电
+        if (g_cfg.fpsLimit > 0) {
+            long long elapsed = getTimeNowMs() - frameStart;
+            long long targetMs = 1000LL / g_cfg.fpsLimit;
+            if (targetMs > elapsed) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(targetMs - elapsed));
+            }
+        }
+
         // FPS 统计
         long long now = getTimeNowMs();
         if (now - lastFpsMs >= 1000) {
@@ -312,13 +321,31 @@ static void inferenceLoop() {
 // UI 绘制
 // ---------------------------------------------------------------------------
 static void drawDetectionOverlay() {
-    if (!g_cfg.showBoxes && !g_cfg.showFps) return;
+    if (!g_cfg.showBoxes && !g_cfg.showFps && !g_cfg.showCropBox) return;
 
     ImDrawList* draw = ImGui::GetBackgroundDrawList();
     if (!draw) return;
 
     float sx = native_window_screen_x;
     float sy = native_window_screen_y;
+
+    // 裁剪区域描边：在屏幕上画一个矩形框，标出当前推理输入的裁剪范围
+    if (g_cfg.showCropBox && g_shm && g_shm->valid()) {
+        auto ci = g_shm->cropInfo();
+        if (ci.size > 0) {
+            float x1 = ci.offX * sx / ci.fullW;
+            float y1 = ci.offY * sy / ci.fullH;
+            float x2 = (ci.offX + ci.size) * sx / ci.fullW;
+            float y2 = (ci.offY + ci.size) * sy / ci.fullH;
+            // 外描边（黑色，粗线） + 内描边（黄色虚线风格，实线）
+            draw->AddRect(ImVec2(x1, y1), ImVec2(x2, y2), IM_COL32(0, 0, 0, 200), 0.0f, 0, 5.0f);
+            draw->AddRect(ImVec2(x1, y1), ImVec2(x2, y2), IM_COL32(255, 255, 0, 200), 0.0f, 0, 2.0f);
+            // 角落标注尺寸文字
+            char lbl[32];
+            snprintf(lbl, sizeof(lbl), "%d×%d", ci.size, ci.size);
+            draw->AddText(ImVec2(x1 + 4, y1 + 4), IM_COL32(255, 255, 0, 220), lbl);
+        }
+    }
 
     if (g_cfg.showFps) {
         char buf[96];
@@ -372,26 +399,7 @@ static void drawControlPanel() {
     if (ImGui::Button("折叠 ▾")) g_panelCollapsed = true;
     ImGui::SameLine();
     ImGui::Text("后端: %s", g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "无");
-    if (g_engine && g_engineReady) {
-        std::string diag = g_engine->getDiag();
-        if (!diag.empty()) {
-            ImGui::TextWrapped("诊断:\n%s", diag.c_str());
-        }
-    }
-    ImGui::Text("帧: %ux%u 旋转=%d", g_shmWidth, g_shmHeight, g_rotation);
-    ImGui::Text("推理: %llu FPS  帧源序号: %u  已处理: %llu 帧",
-                (unsigned long long)g_inferFps.load(),
-                g_shm && g_shm->valid() ? g_shm->readSeq() : 0u,
-                (unsigned long long)g_frameCount.load());
-    ImGui::Text("最近推理耗时: %lld ms", (long long)g_lastFrameMs.load());
-    if (g_shm && g_shm->valid()) {
-        ImGui::Text("APK 写帧: 尝试=%llu 成功=%llu 空=%llu 失败=%llu",
-                    (unsigned long long)g_shm->writeAttempts(),
-                    (unsigned long long)g_shm->writeSuccesses(),
-                    (unsigned long long)g_shm->acquireNulls(),
-                    (unsigned long long)g_shm->writeFails());
-        ImGui::TextWrapped("共享内存: %s", g_shm->diag().c_str());
-    }
+    ImGui::Text("推理: %llu FPS", (unsigned long long)g_inferFps.load());
     ImGui::Separator();
 
     // 模型选择
@@ -414,6 +422,7 @@ static void drawControlPanel() {
     ImGui::Checkbox("启用", &g_cfg.enabled);
     ImGui::Checkbox("显示检测框", &g_cfg.showBoxes);
     ImGui::Checkbox("显示帧率", &g_cfg.showFps);
+    ImGui::Checkbox("显示裁剪框", &g_cfg.showCropBox);
     ImGui::SliderFloat("置信度阈值", &g_cfg.confidence, 0.05f, 0.95f);
     ImGui::Separator();
 
@@ -443,6 +452,26 @@ static void drawControlPanel() {
                     }
                 }
                 if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+    }
+    // 推理帧率上限（节流：0=不限，可选 60/90/120/144）
+    {
+        const int FPS_OPTIONS[] = {0, 60, 90, 120, 144};
+        char previewBuf[16];
+        if (g_cfg.fpsLimit > 0)
+            snprintf(previewBuf, sizeof(previewBuf), "%d FPS", g_cfg.fpsLimit);
+        else
+            snprintf(previewBuf, sizeof(previewBuf), "不限");
+        if (ImGui::BeginCombo("推理帧率上限", previewBuf)) {
+            for (int f : FPS_OPTIONS) {
+                char label[16];
+                if (f == 0) snprintf(label, sizeof(label), "不限");
+                else snprintf(label, sizeof(label), "%d FPS", f);
+                bool sel = (g_cfg.fpsLimit == f);
+                if (ImGui::Selectable(label, sel)) g_cfg.fpsLimit = f;
+                if (sel) ImGui::SetItemDefaultFocus();
             }
             ImGui::EndCombo();
         }

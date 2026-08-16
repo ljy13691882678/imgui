@@ -32,6 +32,10 @@ struct AimConfig {
     // 检测框描边粗细（像素）
     int   boxThickness = 2;
     bool  showBoxLabels = true;
+    // 在悬浮窗上绘制裁剪区域边框（让用户看到推理输入范围）
+    bool  showCropBox = true;
+    // 推理帧率上限（FPS，0=不限制；可选 60/90/120/144）
+    int   fpsLimit = 0;
 
     // 自瞄参数
     bool  aimEnabled = true;

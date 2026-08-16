@@ -203,6 +203,18 @@ class CaptureService : Service() {
         } catch (_: Exception) {}
     }
 
+    // 小端读取 int（共享内存头部为 little-endian）。
+    // 注意：RandomAccessFile.readInt() 按 Java DataInput 大端读，直接用于
+    // C++ 写入的字段会把 320 读成 0x40010000，导致裁剪切换永远不生效。
+    private fun readIntLE(raf: RandomAccessFile): Int {
+        val b = ByteArray(4)
+        raf.readFully(b)
+        return (b[0].toInt() and 0xFF) or
+            ((b[1].toInt() and 0xFF) shl 8) or
+            ((b[2].toInt() and 0xFF) shl 16) or
+            ((b[3].toInt() and 0xFF) shl 24)
+    }
+
     // ─── 录屏 ────────────────────────────────────────────────
     private fun startProjection(resultCode: Int, data: Intent?) {
         updateNotification("正在启动录屏...")
@@ -494,7 +506,7 @@ class CaptureService : Service() {
             // 保留 C++ 侧尚未消费的裁剪请求
             var req = 0
             raf.seek(44L)
-            if (raf.length() >= 48L) req = raf.readInt()
+            if (raf.length() >= 48L) req = readIntLE(raf)
             raf.seek(0)
             val hdr = ByteBuffer.allocate(SHM_HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN)
             hdr.putInt(SHM_MAGIC.toInt())
@@ -569,7 +581,7 @@ class CaptureService : Service() {
             var crop = activeCrop
             if (raf.length() >= 48L) {
                 raf.seek(44L)
-                val req = raf.readInt()
+                val req = readIntLE(raf)
                 if (req != 0 && req != activeCrop && CROP_OPTIONS.contains(req)) {
                     diagLog("C++ 请求切换裁剪尺寸: $req (原 ${activeCrop})")
                     activeCrop = req
