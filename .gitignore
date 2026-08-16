@@ -1,6 +1,8 @@
 # Android NDK 构建产物
 _extracted/安卓环境/obj/
 _extracted/安卓环境/libs/
+YoloTouchImgui/imgui_overlay/obj/
+YoloTouchImgui/imgui_overlay/libs/
 
 # 本地 NDK 下载
 ndk/

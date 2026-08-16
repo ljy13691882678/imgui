@@ -30,24 +30,24 @@ jobs:
           echo "NDK_HOME=${GITHUB_WORKSPACE}/android-ndk-r25c" >> "${GITHUB_ENV}"
 
       - name: Select render backend
-        working-directory: _extracted/安卓环境
+        working-directory: YoloTouchImgui/imgui_overlay
         run: |
-          sed -i "s/^OPENGL_DRAW = .*/OPENGL_DRAW = ${{ matrix.variant.opengl }}/" jni/Android.mk
-          grep -n '^OPENGL_DRAW' jni/Android.mk
+          sed -i "s/^OPENGL_DRAW = .*/OPENGL_DRAW = ${{ matrix.variant.opengl }}/" Android.mk
+          grep -n '^OPENGL_DRAW' Android.mk
 
       - name: Build with ndk-build
-        working-directory: _extracted/安卓环境
+        working-directory: YoloTouchImgui/imgui_overlay
         run: |
           export PATH="${NDK_HOME}:${PATH}"
-          ndk-build -j2
+          ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk -j2
 
       - name: Show outputs
         run: |
-          find _extracted/安卓环境/libs -type f -exec ls -lh {} \;
+          find YoloTouchImgui/imgui_overlay/libs -type f -exec ls -lh {} \;
 
       - name: Upload executable (${{ matrix.variant.name }})
         uses: actions/upload-artifact@v4
         with:
           name: imgui-${{ matrix.variant.name }}-arm64
-          path: _extracted/安卓环境/libs/arm64-v8a/
+          path: YoloTouchImgui/imgui_overlay/libs/arm64-v8a/
           if-no-files-found: error
