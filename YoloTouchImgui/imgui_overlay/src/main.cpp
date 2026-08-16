@@ -1201,7 +1201,7 @@ static void drawControlPanel() {
                 }
                 ImGui::EndCombo();
             }
-            if (g_cfg.injectMode == 1) ImGui::TextDisabled("内核驱动需已加载 TimeDriver，重启生效");
+            if (g_cfg.injectMode == 1) ImGui::TextDisabled("触摸走 uinput，内核驱动仅用于陀螺仪自瞄（需已加载 TimeDriver）");
         }
         // 注入状态：内核驱动连接成功则显示"驱动已连接"
         if (g_cfg.injectMode == 1) {

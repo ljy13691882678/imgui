@@ -35,7 +35,6 @@
 static constexpr int maxE = 5;
 static constexpr int maxF = 10;
 static constexpr int UNGRAB = 0;
-static constexpr int GRAB = 1;
 
 // ─── Data structures ────────────────────────────────────────────────
 
@@ -75,19 +74,13 @@ struct InputBuffer {
 
 static std::vector<Device> g_devices;
 static std::array<std::array<bool, maxF>, maxE> g_uploadedFingerDown{};
-// 内核模式：当前已通过驱动转发的真实手指（按 hwId 去重，记录上次转发位置）
-// 驱动会把注入事件回读进物理设备 evdev，位置未变则不再转发，风暴自终止；上限防级联。
-static std::array<int, maxE * maxF>  g_fwdIds{};
-static std::array<bool, maxE * maxF> g_fwdDown{};
-static std::array<int, maxE * maxF>  g_fwdPx{};
-static std::array<int, maxE * maxF>  g_fwdPy{};
 static InputBuffer g_inputBuffer{};
 static Vec2 g_touchScale{1.0f, 1.0f};
 static Vec2 g_screenSize{};
 static std::mutex g_mutex;
 static int g_outputFd = 0;
 static bool g_initialized = false;
-static bool g_kernelMode = false;   // 内核触摸注入模式（触摸走内核驱动，uinput 不再创建）
+static bool g_kernelMode = false;   // 内核驱动模式（触摸走 uinput，驱动仅用于陀螺仪）
 
 // Screen params
 static int g_screen_w = 0, g_screen_h = 0;
@@ -281,79 +274,6 @@ static void upload() {
     write(g_outputFd, g_inputBuffer.event, sizeof(input_event) * count);
 }
 
-// ─── 内核转发状态（按 hwId 去重 + 位置门控） ──────────────────────
-static int fwdIndex(int id) {
-    for (int i = 0; i < maxE * maxF; ++i)
-        if (g_fwdDown[i] && g_fwdIds[i] == id) return i;
-    return -1;
-}
-static int fwdAlloc(int id) {
-    for (int i = 0; i < maxE * maxF; ++i)
-        if (!g_fwdDown[i]) { g_fwdIds[i] = id; g_fwdDown[i] = true; return i; }
-    return -1;  // 已满
-}
-static void fwdFree(int id) {
-    int i = fwdIndex(id);
-    if (i >= 0) g_fwdDown[i] = false;
-}
-
-// 内核模式：释放一个已转发手指（发送 up + 清理转发状态 + 清理同 hwId 的回读槽位，
-// 避免真实手指抬起后驱动回读残留的 echo 槽位仍在 down，导致误触发重新 down）
-static void kernelReleaseFinger(int fwdId) {
-    kdrv_touch_up(fwdId);
-    fwdFree(fwdId);
-    for (size_t d2 = 0; d2 < g_devices.size(); ++d2)
-        for (int f2 = 0; f2 < maxF; ++f2)
-            if (g_devices[d2].fingers[f2].hwId == fwdId)
-                g_devices[d2].fingers[f2].isDown = false;
-}
-
-// 内核模式透传：把真实物理手指经内核驱动转发给系统（对齐 uinput 模式的 upload() 透传）。
-// 设备被 grab 独占后，真实触摸若不转发，游戏/系统收不到任何触摸；这里用驱动
-// Touch_Down/Move/Up 按真实手指原始 tracking id（hwId）重放，本进程注入的
-// 虚拟/扳机手指（1000/2000）跳过。驱动会把注入事件回读进 evdev，故按下/移动只
-// 在“状态变化”时转发（按下未转发才 down、位置变化才 move、抬起才 up），
-// 回读的同位置事件被抑制，避免 reader 陷入死循环卡死 ImGui。
-static void syncRealFingersKernel() {
-    if (!g_kernelMode || !kdrv_connected()) return;
-    if (g_devices.empty()) return;
-    const int touchMaxX = std::max(1, g_devices[0].absX.maximum);
-    const int touchMaxY = std::max(1, g_devices[0].absY.maximum);
-
-    for (size_t di = 0; di < g_devices.size(); ++di) {
-        for (int fi = 0; fi < maxF; ++fi) {
-            const TouchObj& finger = g_devices[di].fingers[fi];
-            // 跳过本进程注入的虚拟/扳机手指（无论槽位还是 id）
-            bool slotInjected = (di == 0 && (fi == TOUCH_VIRTUAL_SLOT || fi == TOUCH_TRIGGER_SLOT));
-            bool idInjected = (finger.hwId == TOUCH_VIRTUAL_ID || finger.hwId == TOUCH_TRIGGER_ID);
-            if (slotInjected || idInjected) continue;
-
-            int fwdId = (finger.hwId >= 0) ? finger.hwId : finger.id;
-            int idx = fwdIndex(fwdId);
-            if (finger.isDown) {
-                int sx = 0, sy = 0;
-                touchToScreen(finger.pos.x, finger.pos.y, touchMaxX, touchMaxY, sx, sy);
-                if (idx >= 0) {
-                    if (g_fwdPx[idx] != sx || g_fwdPy[idx] != sy) {
-                        kdrv_touch_move(fwdId, sx, sy);
-                        g_fwdPx[idx] = sx;
-                        g_fwdPy[idx] = sy;
-                    }
-                } else {
-                    int ni = fwdAlloc(fwdId);
-                    if (ni >= 0) {
-                        kdrv_touch_down(fwdId, sx, sy);
-                        g_fwdPx[ni] = sx;
-                        g_fwdPy[ni] = sy;
-                    }
-                }
-            } else if (idx >= 0) {
-                kernelReleaseFinger(fwdId);
-            }
-        }
-    }
-}
-
 // ─── Zone detection ─────────────────────────────────────────────────
 
 // ─── Device scanning ────────────────────────────────────────────────
@@ -485,10 +405,6 @@ static void closeTouchLocked() {
     }
     memset(g_inputBuffer.event, 0, sizeof(g_inputBuffer.event));
     g_uploadedFingerDown = {};
-    g_fwdIds = {};
-    g_fwdDown = {};
-    g_fwdPx = {};
-    g_fwdPy = {};
     g_initialized = false;
     g_devices.clear();
 }
@@ -547,7 +463,6 @@ static void* deviceReader(void* arg) {
 
             if (ie.type == EV_SYN && ie.code == SYN_REPORT) {
                 upload();
-                syncRealFingersKernel();
             }
         }
     }
@@ -600,9 +515,9 @@ bool touch_init(int screenW, int screenH, int rotation) {
         if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &device.absX) == 0 &&
             ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &device.absY) == 0) {
             device.fd = fd;
-            // 两种模式都 grab（独占）：uinput 模式经 uinput 转发，内核模式经驱动转发，
-            // 避免真实事件与注入事件对系统双重投递。grab 后 reader 线程仍能从自身 fd 读到事件。
-            ioctl(fd, EVIOCGRAB, GRAB);
+            // 不 grab：让真实触摸照常送达系统（游戏/其他应用）。
+            // reader 线程从自身 fd 只读坐标，供 ImGui 交互与区域判断，不影响系统分发。
+            // uinput 模式无需 grab——注入走独立 uinput 设备；内核模式同理。
             g_devices.push_back(device);
             LOGD("touch device %s max=%d,%d", path, device.absX.maximum, device.absY.maximum);
         } else {
@@ -616,19 +531,12 @@ bool touch_init(int screenW, int screenH, int rotation) {
     int touchMaxX = g_devices[0].absX.maximum;
     int touchMaxY = g_devices[0].absY.maximum;
 
-    // 内核触摸模式：注入走内核驱动，不创建 uinput；仍需设备 abs 信息做坐标换算
-    if (g_kernelMode) {
-        if (!kdrv_touch_init(screenW, screenH, g_rotation)) {
-            LOGE("kernel touch init failed");
-            closeTouchLocked();
-            return false;
-        }
-        g_outputFd = 0;
-    } else {
-        if (!createUinputDevice(touchMaxX, touchMaxY, g_devices[0].fd)) {
-            closeTouchLocked();
-            return false;
-        }
+    // 触摸注入统一走 uinput：内核驱动 Touch_Init 会接管/拦截真实触摸
+    // （驱动接管后系统/游戏收不到物理手指），因此内核模式也不再调用驱动触摸接口；
+    // 内核驱动仅保留陀螺仪（自瞄旋转注入）。
+    if (!createUinputDevice(touchMaxX, touchMaxY, g_devices[0].fd)) {
+        closeTouchLocked();
+        return false;
     }
 
     for (auto& device : g_devices) {
@@ -650,8 +558,7 @@ void touch_close(void) {
     touch_stop_readers();
     std::lock_guard<std::mutex> guard(g_mutex);
     if (g_kernelMode) {
-        kdrv_touch_cleanup();
-        kdrv_gyro_disable();
+        kdrv_gyro_disable();  // 触摸注入走 uinput，驱动仅用于陀螺仪
     }
     closeTouchLocked();
 }
@@ -693,7 +600,6 @@ void touch_set_screen_params(int w, int h, int rotation) {
 }
 
 void touch_down(int slot, int id, int screenX, int screenY) {
-    if (g_kernelMode) { kdrv_touch_down(id, screenX, screenY); return; }
     std::lock_guard<std::mutex> guard(g_mutex);
     if (!g_initialized || g_devices.empty()) return;
     float tx, ty;
@@ -705,12 +611,6 @@ void touch_down(int slot, int id, int screenX, int screenY) {
 }
 
 void touch_move(int slot, int screenX, int screenY) {
-    if (g_kernelMode) {
-        // 内核驱动用 finger id 标识触点，从 slot 映射回注入 id
-        int id = (slot == TOUCH_TRIGGER_SLOT) ? TOUCH_TRIGGER_ID : TOUCH_VIRTUAL_ID;
-        kdrv_touch_move(id, screenX, screenY);
-        return;
-    }
     std::lock_guard<std::mutex> guard(g_mutex);
     if (!g_initialized || g_devices.empty()) return;
     float tx, ty;
@@ -720,11 +620,6 @@ void touch_move(int slot, int screenX, int screenY) {
 }
 
 void touch_up(int slot) {
-    if (g_kernelMode) {
-        int id = (slot == TOUCH_TRIGGER_SLOT) ? TOUCH_TRIGGER_ID : TOUCH_VIRTUAL_ID;
-        kdrv_touch_up(id);
-        return;
-    }
     std::lock_guard<std::mutex> guard(g_mutex);
     if (!g_initialized || g_devices.empty()) return;
     g_devices[0].fingers[slot].isDown = false;
@@ -793,13 +688,6 @@ bool touch_lift_joystick_finger(void) {
 
             if (pointInZone(g_joystick_zone, sx, sy)) {
                 g_devices[d].fingers[f].isDown = false;
-                // 内核模式：同步向驱动发送抬起，避免游戏里该手指一直按住
-                if (g_kernelMode && kdrv_connected()) {
-                    int fwdId = (g_devices[d].fingers[f].hwId >= 0)
-                                    ? g_devices[d].fingers[f].hwId
-                                    : g_devices[d].fingers[f].id;
-                    if (fwdIndex(fwdId) >= 0) kernelReleaseFinger(fwdId);
-                }
                 lifted = true;
                 LOGD("liftJoystickFinger: dev%zu finger%d at (%d,%d)", d, f, sx, sy);
             }

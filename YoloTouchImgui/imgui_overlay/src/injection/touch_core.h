@@ -16,8 +16,9 @@ extern "C" {
 #define TOUCH_TRIGGER_ID    2000
 
 // Lifecycle
-// 内核触摸模式：触摸注入走内核驱动（TimeDriver），仅保留物理手指读取用于区域判断。
-// 默认 false=uinput 注入；置 true 后 touch_init 将不再创建 uinput，注入函数路由到内核驱动。
+// 触摸注入始终走 uinput（真实手指自然透传系统，合成手指经 uinput 注入）。
+// 内核驱动（TimeDriver）仅用于陀螺仪自瞄与连接状态查询——驱动 Touch_Init
+// 会接管/拦截真实触摸，故触摸注入不再调用驱动触摸接口。
 void touch_set_kernel_mode(bool en);
 bool touch_kernel_mode(void);
 bool touch_kernel_connected(void);  // 内核驱动是否已连接（仅内核模式有效）
