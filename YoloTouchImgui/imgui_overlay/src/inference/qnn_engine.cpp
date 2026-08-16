@@ -124,15 +124,38 @@ TfLiteDelegate* QnnEngine::buildDelegate() {
     }
     appendDiag("[QNN] 检测到高通芯片");
 
-    // fastRPC 用户态库（HTP 与 DSP 通信必需）
+    // fastRPC 用户态库（HTP 与 DSP 通信必需，系统库）
     if (!m_preloaded) {
-        void* h = dlopen("libcdsprpc.so", RTLD_NOW);
-        if (h) { LOGD("libcdsprpc.so preloaded"); appendDiag("[QNN] libcdsprpc.so 加载 OK"); }
-        else   { LOGW("libcdsprpc.so not available: %s", dlerror()); appendDiag("[QNN] libcdsprpc.so 加载失败: %s", dlerror()); }
-
-        h = dlopen("libadsprpc.so", RTLD_NOW);
-        if (h) { LOGD("libadsprpc.so preloaded"); appendDiag("[QNN] libadsprpc.so 加载 OK"); }
-        else   { LOGW("libadsprpc.so not available: %s", dlerror()); appendDiag("[QNN] libadsprpc.so 加载失败: %s", dlerror()); }
+        // libcdsprpc/libadsprpc 为系统库：先按名（LD_LIBRARY_PATH），
+        // 再按常见系统绝对路径加载。成功后保持加载（不 dlclose），
+        // 供后续 stub 库依赖解析使用。
+        auto preloadSystemLib = [&](const char* name) {
+            void* h = dlopen(name, RTLD_NOW | RTLD_LOCAL);
+            if (h) {
+                LOGD("%s preloaded", name);
+                appendDiag("[QNN] %s 加载 OK（按名）", name);
+                return;
+            }
+            const char* e1 = dlerror();
+            const char* dirs[] = {
+                "/vendor/lib64/", "/system/lib64/",
+                "/vendor/lib64/cdsp/", "/system/lib64/cdsp/", "/lib64/",
+            };
+            for (const char* d : dirs) {
+                std::string full = std::string(d) + name;
+                h = dlopen(full.c_str(), RTLD_NOW | RTLD_LOCAL);
+                if (h) {
+                    LOGD("%s preloaded (%s)", name, full.c_str());
+                    appendDiag("[QNN] %s 加载 OK（%s）", name, full.c_str());
+                    return;
+                }
+                const char* e = dlerror();
+                appendDiag("[QNN] %s 尝试 %s 失败: %s", name, full.c_str(), e ? e : "(null)");
+            }
+            appendDiag("[QNN] %s 按名失败: %s", name, e1 ? e1 : "(null)");
+        };
+        preloadSystemLib("libcdsprpc.so");
+        preloadSystemLib("libadsprpc.so");
 
         strncpy(m_native_lib_dir, getNativeLibDir(), sizeof(m_native_lib_dir) - 1);
         LOGD("Native lib dir: %s", m_native_lib_dir);
@@ -147,16 +170,34 @@ TfLiteDelegate* QnnEngine::buildDelegate() {
     const char* skelDir = getSkelLibDir();
     appendDiag("[QNN] skel 库目录: %s", skelDir);
 
-    // 显式验证 skel/stub 库可加载（覆盖 V69~V81），确认包内库齐全
+    // 用绝对路径预加载本包内的 stub/skel 库并保持加载（不 dlclose）：
+    // QNN 内部按名 dlopen stub 时能命中已加载句柄，避免因按名查找
+    // 或依赖解析失败导致 HTP backend 初始化失败。
+    const char* stubLibs[] = {
+        "libQnnHtpV69Stub.so", "libQnnHtpV69Skel.so",
+        "libQnnHtpV73Stub.so", "libQnnHtpV73Skel.so",
+        "libQnnHtpV75Stub.so", "libQnnHtpV75Skel.so",
+        "libQnnHtpV79Stub.so", "libQnnHtpV79Skel.so",
+        "libQnnHtpV81Stub.so", "libQnnHtpV81Skel.so",
+    };
+    for (const char* lib : stubLibs) {
+        std::string full = std::string(skelDir) + "/" + lib;
+        void* h = dlopen(full.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (h) {
+            LOGD("%s preloaded", lib);
+            appendDiag("[QNN] %s 预加载 OK", lib);
+        } else {
+            const char* e = dlerror();
+            LOGW("%s dlopen failed: %s", full.c_str(), e ? e : "(null)");
+            appendDiag("[QNN] %s 预加载失败: %s", lib, e ? e : "(null)");
+        }
+    }
+
+    // 基础 QNN 库按名确认可加载
     const char* qnnLibs[] = {
         "libQnnHtp.so",
         "libQnnSystem.so",
         "libQnnTFLiteDelegate.so",
-        "libQnnHtpV69Stub.so",
-        "libQnnHtpV73Stub.so",
-        "libQnnHtpV75Stub.so",
-        "libQnnHtpV79Stub.so",
-        "libQnnHtpV81Stub.so",
     };
     for (const char* lib : qnnLibs) {
         void* h = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
@@ -164,8 +205,9 @@ TfLiteDelegate* QnnEngine::buildDelegate() {
             appendDiag("[QNN] %s 加载 OK", lib);
             dlclose(h);
         } else {
-            LOGW("%s dlopen failed: %s", lib, dlerror());
-            appendDiag("[QNN] %s 加载失败: %s", lib, dlerror());
+            const char* e = dlerror();
+            LOGW("%s dlopen failed: %s", lib, e ? e : "(null)");
+            appendDiag("[QNN] %s 加载失败: %s", lib, e ? e : "(null)");
         }
     }
 

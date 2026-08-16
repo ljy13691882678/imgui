@@ -66,6 +66,9 @@ static AimConfig g_cfg;
 static bool g_aimActive = false;
 static float g_aimX = 0.5f, g_aimY = 0.5f;
 
+// 控制面板折叠：true 时只显示一个小状态框
+static bool g_panelCollapsed = false;
+
 // 自瞄/触发控制器
 static KalmanTracker g_tracker;
 static AimController g_aim;
@@ -316,6 +319,8 @@ static void drawControlPanel() {
     ImGui::SetNextWindowPos(ImVec2(20, 80), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(360, 580), ImGuiCond_FirstUseEver);
     ImGui::Begin("YoloTouch 控制面板", nullptr, ImGuiWindowFlags_NoCollapse);
+    if (ImGui::Button("折叠 ▾")) g_panelCollapsed = true;
+    ImGui::SameLine();
     ImGui::Text("后端: %s", g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "无");
     if (g_engine && g_engineReady) {
         std::string diag = g_engine->getDiag();
@@ -370,9 +375,22 @@ static void drawControlPanel() {
     ImGui::End();
 }
 
+// 折叠后的小状态框：可拖动，点击/按钮展开回控制面板
+static void drawMiniPanel() {
+    ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
+    ImGui::Begin("YoloTouch", nullptr,
+                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize);
+    if (ImGui::Button("展开 ▶")) g_panelCollapsed = false;
+    ImGui::SameLine();
+    ImGui::Text("%s", g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "无");
+    ImGui::Text("推理: %llu FPS", (unsigned long long)g_inferFps.load());
+    ImGui::End();
+}
+
 // 模板要求的 UI 回调
 void Layout_tick_UI() {
-    drawControlPanel();
+    if (g_panelCollapsed) drawMiniPanel();
+    else drawControlPanel();
     drawDetectionOverlay();
 }
 
