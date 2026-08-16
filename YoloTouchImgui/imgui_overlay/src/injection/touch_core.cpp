@@ -75,9 +75,12 @@ struct InputBuffer {
 
 static std::vector<Device> g_devices;
 static std::array<std::array<bool, maxF>, maxE> g_uploadedFingerDown{};
-// 内核模式：当前已通过驱动转发的真实手指 id 集合（按 hwId 去重，防止驱动注入回读导致重复/级联转发）
+// 内核模式：当前已通过驱动转发的真实手指（按 hwId 去重，记录上次转发位置）
+// 驱动会把注入事件回读进物理设备 evdev，位置未变则不再转发，风暴自终止；上限防级联。
 static std::array<int, maxE * maxF>  g_fwdIds{};
 static std::array<bool, maxE * maxF> g_fwdDown{};
+static std::array<int, maxE * maxF>  g_fwdPx{};
+static std::array<int, maxE * maxF>  g_fwdPy{};
 static InputBuffer g_inputBuffer{};
 static Vec2 g_touchScale{1.0f, 1.0f};
 static Vec2 g_screenSize{};
@@ -278,27 +281,39 @@ static void upload() {
     write(g_outputFd, g_inputBuffer.event, sizeof(input_event) * count);
 }
 
-// ─── 内核转发状态（按 hwId 去重） ──────────────────────────────────
-static bool fwdIsDown(int id) {
+// ─── 内核转发状态（按 hwId 去重 + 位置门控） ──────────────────────
+static int fwdIndex(int id) {
     for (int i = 0; i < maxE * maxF; ++i)
-        if (g_fwdDown[i] && g_fwdIds[i] == id) return true;
-    return false;
+        if (g_fwdDown[i] && g_fwdIds[i] == id) return i;
+    return -1;
 }
-static void fwdMark(int id) {
-    for (int i = 0; i < maxE * maxF; ++i) {
-        if (!g_fwdDown[i]) { g_fwdIds[i] = id; g_fwdDown[i] = true; return; }
-    }
+static int fwdAlloc(int id) {
+    for (int i = 0; i < maxE * maxF; ++i)
+        if (!g_fwdDown[i]) { g_fwdIds[i] = id; g_fwdDown[i] = true; return i; }
+    return -1;  // 已满
 }
-static void fwdUnmark(int id) {
-    for (int i = 0; i < maxE * maxF; ++i) {
-        if (g_fwdDown[i] && g_fwdIds[i] == id) { g_fwdDown[i] = false; return; }
-    }
+static void fwdFree(int id) {
+    int i = fwdIndex(id);
+    if (i >= 0) g_fwdDown[i] = false;
+}
+
+// 内核模式：释放一个已转发手指（发送 up + 清理转发状态 + 清理同 hwId 的回读槽位，
+// 避免真实手指抬起后驱动回读残留的 echo 槽位仍在 down，导致误触发重新 down）
+static void kernelReleaseFinger(int fwdId) {
+    kdrv_touch_up(fwdId);
+    fwdFree(fwdId);
+    for (size_t d2 = 0; d2 < g_devices.size(); ++d2)
+        for (int f2 = 0; f2 < maxF; ++f2)
+            if (g_devices[d2].fingers[f2].hwId == fwdId)
+                g_devices[d2].fingers[f2].isDown = false;
 }
 
 // 内核模式透传：把真实物理手指经内核驱动转发给系统（对齐 uinput 模式的 upload() 透传）。
 // 设备被 grab 独占后，真实触摸若不转发，游戏/系统收不到任何触摸；这里用驱动
 // Touch_Down/Move/Up 按真实手指原始 tracking id（hwId）重放，本进程注入的
-// 虚拟/扳机手指（1000/2000）跳过，驱动注入的回读事件按 hwId 去重避免级联。
+// 虚拟/扳机手指（1000/2000）跳过。驱动会把注入事件回读进 evdev，故按下/移动只
+// 在“状态变化”时转发（按下未转发才 down、位置变化才 move、抬起才 up），
+// 回读的同位置事件被抑制，避免 reader 陷入死循环卡死 ImGui。
 static void syncRealFingersKernel() {
     if (!g_kernelMode || !kdrv_connected()) return;
     if (g_devices.empty()) return;
@@ -314,14 +329,26 @@ static void syncRealFingersKernel() {
             if (slotInjected || idInjected) continue;
 
             int fwdId = (finger.hwId >= 0) ? finger.hwId : finger.id;
+            int idx = fwdIndex(fwdId);
             if (finger.isDown) {
                 int sx = 0, sy = 0;
                 touchToScreen(finger.pos.x, finger.pos.y, touchMaxX, touchMaxY, sx, sy);
-                if (fwdIsDown(fwdId)) kdrv_touch_move(fwdId, sx, sy);
-                else { kdrv_touch_down(fwdId, sx, sy); fwdMark(fwdId); }
-            } else if (fwdIsDown(fwdId)) {
-                kdrv_touch_up(fwdId);
-                fwdUnmark(fwdId);
+                if (idx >= 0) {
+                    if (g_fwdPx[idx] != sx || g_fwdPy[idx] != sy) {
+                        kdrv_touch_move(fwdId, sx, sy);
+                        g_fwdPx[idx] = sx;
+                        g_fwdPy[idx] = sy;
+                    }
+                } else {
+                    int ni = fwdAlloc(fwdId);
+                    if (ni >= 0) {
+                        kdrv_touch_down(fwdId, sx, sy);
+                        g_fwdPx[ni] = sx;
+                        g_fwdPy[ni] = sy;
+                    }
+                }
+            } else if (idx >= 0) {
+                kernelReleaseFinger(fwdId);
             }
         }
     }
@@ -460,6 +487,8 @@ static void closeTouchLocked() {
     g_uploadedFingerDown = {};
     g_fwdIds = {};
     g_fwdDown = {};
+    g_fwdPx = {};
+    g_fwdPy = {};
     g_initialized = false;
     g_devices.clear();
 }
@@ -769,7 +798,7 @@ bool touch_lift_joystick_finger(void) {
                     int fwdId = (g_devices[d].fingers[f].hwId >= 0)
                                     ? g_devices[d].fingers[f].hwId
                                     : g_devices[d].fingers[f].id;
-                    if (fwdIsDown(fwdId)) { kdrv_touch_up(fwdId); fwdUnmark(fwdId); }
+                    if (fwdIndex(fwdId) >= 0) kernelReleaseFinger(fwdId);
                 }
                 lifted = true;
                 LOGD("liftJoystickFinger: dev%zu finger%d at (%d,%d)", d, f, sx, sy);
