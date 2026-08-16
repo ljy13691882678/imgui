@@ -285,12 +285,31 @@ static void inferenceLoop() {
     long long lastNoFrameLog = getTimeNowMs();
     long long lastStuckLog = getTimeNowMs();
     bool everGotFrame = false;
+    bool wasEnabled = true;
 
     while (g_inferRunning.load()) {
         if (!g_shm || !g_shm->valid()) {
             std::this_thread::sleep_for(10ms);
             continue;
         }
+
+        // 推理启动开关：关闭时完全停止推理（不再 detect），并清空显示结果，
+        // 让 FPS 归零、检测框消失，而不是只停自瞄
+        if (!g_cfg.enabled) {
+            if (wasEnabled) {
+                wasEnabled = false;
+                std::lock_guard<std::mutex> lock(g_detMutex);
+                g_detections.clear();
+                g_tracks.clear();
+                g_frameCount.store(0);
+                g_inferFps.store(0);
+                printf("[infer] 推理已停止\n");
+            }
+            std::this_thread::sleep_for(10ms);
+            continue;
+        }
+        wasEnabled = true;
+
         const uint8_t* frame = g_shm->readFrame();
         if (!frame) {
             // 诊断：长时间没有新帧（APK 未写帧 / 共享内存未通）
