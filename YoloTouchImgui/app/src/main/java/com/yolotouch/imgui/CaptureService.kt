@@ -53,8 +53,8 @@ class CaptureService : Service() {
         private const val SHM_HEADER_SIZE = 80
         private const val SHM_BUFFER_COUNT = 2
 
-        // 居中裁剪可选边长（与 C++ CROP_OPTIONS 一致），默认 416
-        private val CROP_OPTIONS = intArrayOf(620, 416, 320, 256)
+        // 居中裁剪可选边长（与 C++ CROP_OPTIONS 一致），0=全屏（最大正方形），默认 416
+        private val CROP_OPTIONS = intArrayOf(0, 960, 720, 620, 416, 320, 256)
         private const val CROP_DEFAULT = 416
 
         private const val ASSET_NATIVE_DIR = "native"
@@ -103,7 +103,7 @@ class CaptureService : Service() {
     // 帧线程复用的共享内存文件句柄与裁剪缓冲：避免每帧 open/close 文件、
     // 以及逐行多次 write() 系统调用（推理仅 ~1ms，帧率瓶颈在文件 I/O）。
     private var shmRaf: RandomAccessFile? = null
-    private var cropBuffer = ByteArray(620 * 620 * 4)  // 最大裁剪 620×620×RGBA
+    private var cropBuffer = ByteArray(960 * 960 * 4)  // 最大裁剪 960×960×RGBA
 
     // 最近一帧的尺寸/stride（flushDiagnostics 无新帧时写头部用，避免写 0）
     @Volatile private var lastW = 0
@@ -421,9 +421,13 @@ class CaptureService : Service() {
         try {
             if (file.exists()) file.delete()
         } catch (_: Exception) {}
-        val crop = activeCrop.coerceAtMost(minOf(captureW, captureH))
-        activeCropOffsetX = (captureW - crop) / 2
-        activeCropOffsetY = (captureH - crop) / 2
+        // 0 = 全屏：不裁剪。为让 C++ 侧 open() 校验通过（sizePerFrame>0），
+        // 初始头部用最短边做占位，写帧后立即覆写为真实整屏数据（stride×高度）。
+        val minSide = minOf(captureW, captureH)
+        val crop = if (activeCrop == 0) minSide
+                   else activeCrop.coerceAtMost(minSide)
+        activeCropOffsetX = if (activeCrop == 0) 0 else (captureW - crop) / 2
+        activeCropOffsetY = if (activeCrop == 0) 0 else (captureH - crop) / 2
         val sizePerFrame = crop * crop * 4
         val total = SHM_HEADER_SIZE + sizePerFrame * SHM_BUFFER_COUNT
         RandomAccessFile(file, "rw").use { raf ->
@@ -440,7 +444,7 @@ class CaptureService : Service() {
             hdr.putInt(crop)              // cropSize
             hdr.putInt(activeCropOffsetX) // cropOffsetX
             hdr.putInt(activeCropOffsetY) // cropOffsetY
-            hdr.putInt(0)                 // cropRequest
+            hdr.putInt(-1)                // cropRequest: -1(0xFFFFFFFF)=无请求，0=请求全屏，其他=请求边长
             hdr.putLong(0)                // writeAttempts
             hdr.putLong(0)                // writeSuccesses
             hdr.putLong(0)                // acquireNulls
@@ -498,11 +502,13 @@ class CaptureService : Service() {
         try {
             val w = if (lastW > 0) lastW else captureW
             val h = if (lastH > 0) lastH else captureH
-            val crop = activeCrop.coerceAtMost(minOf(w, h))
+            val minSide = minOf(w, h)
+            val fullScreen = activeCrop == 0
+            val crop = if (fullScreen) minSide else activeCrop.coerceAtMost(minSide)
             val rs = if (lastRowStride > 0) lastRowStride else crop * 4
             val spf = if (lastSizePerFrame > 0) lastSizePerFrame else crop * crop * 4
-            val offX = (w - crop) / 2
-            val offY = (h - crop) / 2
+            val offX = if (fullScreen) 0 else (w - crop) / 2
+            val offY = if (fullScreen) 0 else (h - crop) / 2
             // 保留 C++ 侧尚未消费的裁剪请求
             var req = 0
             raf.seek(44L)
@@ -517,7 +523,7 @@ class CaptureService : Service() {
             hdr.putInt(rotation)
             hdr.putInt(spf)
             hdr.putInt(lastSeq.get().toInt())
-            hdr.putInt(crop)
+            hdr.putInt(if (fullScreen) 0 else crop)  // cropSize: 0=全屏
             hdr.putInt(offX)
             hdr.putInt(offY)
             hdr.putInt(req)          // 保留 C++ 的裁剪请求
@@ -582,17 +588,19 @@ class CaptureService : Service() {
             if (raf.length() >= 48L) {
                 raf.seek(44L)
                 val req = readIntLE(raf)
-                if (req != 0 && req != activeCrop && CROP_OPTIONS.contains(req)) {
+                if (req != -1 && req != activeCrop && CROP_OPTIONS.contains(req)) {
                     diagLog("C++ 请求切换裁剪尺寸: $req (原 ${activeCrop})")
                     activeCrop = req
                     crop = req
                 }
             }
-            crop = crop.coerceAtMost(minOf(imgW, imgH))
-            val offX = (imgW - crop) / 2
-            val offY = (imgH - crop) / 2
-            val cropStride = crop * ps
-            val sizePerFrame = crop * crop * ps
+            // 全屏模式 (crop==0)：不裁剪，整帧写入（rows=imgH，stride=srcRowStride）
+            val fullScreen = crop == 0
+            val rows = if (fullScreen) imgH else crop.coerceAtMost(minOf(imgW, imgH))
+            val offX = if (fullScreen) 0 else (imgW - rows) / 2
+            val offY = if (fullScreen) 0 else (imgH - rows) / 2
+            val cropStride = if (fullScreen) srcRowStride else rows * ps
+            val sizePerFrame = cropStride * rows
 
             // 裁剪尺寸变大时扩展文件（C++ 侧也会自动扩展）
             val need = SHM_HEADER_SIZE + sizePerFrame * SHM_BUFFER_COUNT
@@ -616,7 +624,7 @@ class CaptureService : Service() {
             val pos = buf.position()
             buf.rewind()
             val dst = cropBuffer
-            for (r in 0 until crop) {
+            for (r in 0 until rows) {
                 buf.position((offY + r) * srcRowStride + offX * ps)
                 buf.get(dst, r * cropStride, cropStride)
             }
@@ -638,10 +646,10 @@ class CaptureService : Service() {
             hdr.putInt(rotation)
             hdr.putInt(sizePerFrame)
             hdr.putInt(seq.toInt())
-            hdr.putInt(crop)
+            hdr.putInt(if (fullScreen) 0 else rows)  // cropSize: 0=全屏
             hdr.putInt(offX)
             hdr.putInt(offY)
-            hdr.putInt(0) // cropRequest 每帧已消费，回写 0
+            hdr.putInt(-1) // cropRequest 已消费，回写 -1(0xFFFFFFFF)=无请求
             hdr.putLong(writeAttempts.get())
             hdr.putLong(writeSuccesses.get())
             hdr.putLong(acquireNulls.get())

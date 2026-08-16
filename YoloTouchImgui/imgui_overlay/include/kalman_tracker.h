@@ -16,6 +16,8 @@ public:
         int   classId = 0;
         int   lost = 0;         // 连续丢失帧数
         float lastScore = 0.0f;
+        float w = 0.0f;         // 检测框宽（归一化，EMA 平滑）
+        float h = 0.0f;         // 检测框高（归一化，EMA 平滑）
         bool  active = false;
     };
 
@@ -43,6 +45,11 @@ public:
                 t.classId = detections[bestIdx].classId;
                 t.lastScore = detections[bestIdx].score;
                 t.kf.update(detections[bestIdx].cx, detections[bestIdx].cy, dt);
+                // 保存原始检测框尺寸（EMA 平滑，避免框大小跳动）
+                float nw = detections[bestIdx].x2 - detections[bestIdx].x1;
+                float nh = detections[bestIdx].y2 - detections[bestIdx].y1;
+                if (t.w <= 0.0f) { t.w = nw; t.h = nh; }
+                else { t.w = t.w * 0.7f + nw * 0.3f; t.h = t.h * 0.7f + nh * 0.3f; }
                 t.active = true;
             }
         }
@@ -55,6 +62,8 @@ public:
             tr.classId = detections[i].classId;
             tr.lastScore = detections[i].score;
             tr.kf.init(detections[i].cx, detections[i].cy);
+            tr.w = detections[i].x2 - detections[i].x1;
+            tr.h = detections[i].y2 - detections[i].y1;
             tr.active = true;
             m_tracks.push_back(tr);
         }
@@ -77,9 +86,10 @@ public:
             a.cy = t.kf.y();
             a.vx = t.kf.vx();
             a.vy = t.kf.vy();
-            // 用速度预测扩展框（供绘制/瞄准）
-            a.x1 = t.kf.x() - 0.03f; a.y1 = t.kf.y() - 0.03f;
-            a.x2 = t.kf.x() + 0.03f; a.y2 = t.kf.y() + 0.03f;
+            // 用跟踪器保存的原始检测框尺寸（而非固定 0.03），保证框大小与目标一致
+            float hw = t.w * 0.5f, hh = t.h * 0.5f;
+            a.x1 = t.kf.x() - hw; a.y1 = t.kf.y() - hh;
+            a.x2 = t.kf.x() + hw; a.y2 = t.kf.y() + hh;
             out.push_back(a);
         }
         return out;

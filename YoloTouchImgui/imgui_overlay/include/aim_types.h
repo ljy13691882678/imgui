@@ -28,10 +28,12 @@ struct AimConfig {
     float nmsIoU = 0.45f;
 
     // 居中裁剪尺寸索引（CROP_OPTIONS 数组下标）
-    int   cropIndex = 1;           // 默认 416（CROP_OPTIONS[1]）
+    int   cropIndex = 4;           // 默认 416（CROP_OPTIONS[4]）
     // 检测框描边粗细（像素）
     int   boxThickness = 2;
     bool  showBoxLabels = true;
+    // 检测框显示预判（秒）：用目标速度把框前移，补偿“捕获→绘制”延迟，快速转动不掉框
+    float boxPredictTime = 0.02f;
     // 在悬浮窗上绘制裁剪区域边框（让用户看到推理输入范围）
     bool  showCropBox = true;
     // 推理帧率上限（FPS，0=不限制；可选 60/90/120/144）
@@ -83,6 +85,7 @@ struct ShmFrameHeader {
 constexpr uint32_t SHM_MAGIC = 0xA1B2C3D4u;
 constexpr int      SHM_HEADER_SIZE = 80;
 constexpr int      SHM_BUFFER_COUNT = 2;   // 双缓冲
-// 可选的居中裁剪边长（面板下拉选择，均 ≥ 模型输入 256，避免放大失真）
-constexpr int      CROP_OPTIONS[] = {620, 416, 320, 256};
+// 可选的居中裁剪边长（面板下拉选择，0=全屏不裁剪，其他 ≥ 模型输入 256，避免放大失真）
+// 与 APK 侧 CaptureService.CROP_OPTIONS 严格一致
+constexpr int      CROP_OPTIONS[] = {0, 960, 720, 620, 416, 320, 256};
 constexpr int      CROP_DEFAULT = 416;

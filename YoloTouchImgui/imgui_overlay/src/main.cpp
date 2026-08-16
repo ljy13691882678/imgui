@@ -154,11 +154,18 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     int cropSize = (int)h->cropSize;
     int cropOffX = (int)h->cropOffsetX;
     int cropOffY = (int)h->cropOffsetY;
-    if (cropSize <= 0 || cropSize > w || cropSize > hh) {
-        // 兼容旧头（未裁剪全屏）：cropSize 为 0 时退化为整帧
+    int regionW = cropSize, regionH = cropSize;
+    if (cropSize <= 0) {
+        // 全屏模式：共享内存帧为整屏（rowStride 为真实 stride），推理区域=整屏
+        cropOffX = 0;
+        cropOffY = 0;
+        regionW = w;
+        regionH = hh;
+    } else if (cropSize > w || cropSize > hh) {
+        // 兜底：尺寸非法时退化为最大居中正方形
         cropSize = std::min(w, hh);
-        cropOffX = (w - cropSize) / 2;
-        cropOffY = (hh - cropSize) / 2;
+        regionW = cropSize;
+        regionH = cropSize;
     }
 
     // 读锁保护引擎（切换模型时会取写锁等待）
@@ -166,7 +173,7 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     if (!g_engine) return;
 
     auto dets = g_engine->detect(
-        const_cast<uint8_t*>(frame), cropOffX, cropOffY, cropSize, cropSize,
+        const_cast<uint8_t*>(frame), cropOffX, cropOffY, regionW, regionH,
         w, hh,
         (int)h->rowStride, (int)h->pixelStride);
 
@@ -416,26 +423,34 @@ static void drawDetectionOverlay() {
     }
 
     std::lock_guard<std::mutex> lock(g_detMutex);
-    for (const auto& d : g_detections) {
-        if (!g_cfg.showBoxes) break;
-        ImVec2 p1(d.x1 * sx, d.y1 * sy);
-        ImVec2 p2(d.x2 * sx, d.y2 * sy);
-        // 描边：先画一圈黑色粗边框，再画亮色内框，保证任何背景下都清晰可见
-        int thick = std::max(1, g_cfg.boxThickness);
-        int outline = thick + 3;
-        draw->AddRect(p1, p2, IM_COL32(0, 0, 0, 200), 0.0f, 0, (float)outline);
-        draw->AddRect(p1, p2, IM_COL32(0, 255, 0, 255), 0.0f, 0, (float)thick);
-        if (g_cfg.showBoxLabels) {
-            char lbl[64];
-            const char* cname = g_engine ? g_engine->getClassName((int)d.classId) : nullptr;
-            if (cname && cname[0])
-                snprintf(lbl, sizeof(lbl), "%s %.2f", cname, d.score);
-            else
-                snprintf(lbl, sizeof(lbl), "%.2f", d.score);
-            // 标签带黑色描边，避免浅色背景下看不清
-            draw->AddText(ImVec2(p1.x - 1, p1.y - 1), IM_COL32(0, 0, 0, 220), lbl);
-            draw->AddText(ImVec2(p1.x + 1, p1.y + 1), IM_COL32(0, 0, 0, 220), lbl);
-            draw->AddText(p1, IM_COL32(0, 255, 0, 255), lbl);
+    // 用跟踪结果绘制：真实框尺寸 + 速度预判，消除快速转动时的脱框。
+    // 原始 g_detections 是最新检测快照，但不含跨帧平滑/预判，绘制会滞后。
+    if (g_cfg.showBoxes) {
+        for (const auto& t : g_tracks) {
+            // 预判位置：用目标速度把框前移 boxPredictTime，补偿“捕获→推理→绘制”延迟
+            float pcx = t.cx + t.vx * g_cfg.boxPredictTime;
+            float pcy = t.cy + t.vy * g_cfg.boxPredictTime;
+            float hw = (t.x2 - t.x1) * 0.5f;
+            float hh = (t.y2 - t.y1) * 0.5f;
+            ImVec2 p1((pcx - hw) * sx, (pcy - hh) * sy);
+            ImVec2 p2((pcx + hw) * sx, (pcy + hh) * sy);
+            // 描边：先画一圈黑色粗边框，再画亮色内框，保证任何背景下都清晰可见
+            int thick = std::max(1, g_cfg.boxThickness);
+            int outline = thick + 3;
+            draw->AddRect(p1, p2, IM_COL32(0, 0, 0, 200), 0.0f, 0, (float)outline);
+            draw->AddRect(p1, p2, IM_COL32(0, 255, 0, 255), 0.0f, 0, (float)thick);
+            if (g_cfg.showBoxLabels) {
+                char lbl[64];
+                const char* cname = g_engine ? g_engine->getClassName(t.classId) : nullptr;
+                if (cname && cname[0])
+                    snprintf(lbl, sizeof(lbl), "%s %.2f", cname, t.score);
+                else
+                    snprintf(lbl, sizeof(lbl), "%.2f", t.score);
+                // 标签带黑色描边，避免浅色背景下看不清
+                draw->AddText(ImVec2(p1.x - 1, p1.y - 1), IM_COL32(0, 0, 0, 220), lbl);
+                draw->AddText(ImVec2(p1.x + 1, p1.y + 1), IM_COL32(0, 0, 0, 220), lbl);
+                draw->AddText(p1, IM_COL32(0, 255, 0, 255), lbl);
+            }
         }
     }
 
@@ -495,17 +510,24 @@ static void drawControlPanel() {
     // 居中裁剪尺寸选择（面板切换后，传给 APK 重建共享内存）
     {
         char previewBuf[32];
-        snprintf(previewBuf, sizeof(previewBuf), "%d", CROP_OPTIONS[g_cfg.cropIndex]);
+        if (CROP_OPTIONS[g_cfg.cropIndex] == 0)
+            snprintf(previewBuf, sizeof(previewBuf), "全屏");
+        else
+            snprintf(previewBuf, sizeof(previewBuf), "%d", CROP_OPTIONS[g_cfg.cropIndex]);
         if (g_shm && g_shm->valid()) {
             auto ci = g_shm->cropInfo();
-            if (ci.size > 0) {
+            if (ci.size == 0)
+                snprintf(previewBuf, sizeof(previewBuf), "全屏 (当前)");
+            else if (ci.size > 0)
                 snprintf(previewBuf, sizeof(previewBuf), "%d (当前)", ci.size);
-            }
         }
         if (ImGui::BeginCombo("裁剪尺寸", previewBuf)) {
             for (int i = 0; i < (int)(sizeof(CROP_OPTIONS)/sizeof(CROP_OPTIONS[0])); ++i) {
                 char label[32];
-                snprintf(label, sizeof(label), "%d×%d", CROP_OPTIONS[i], CROP_OPTIONS[i]);
+                if (CROP_OPTIONS[i] == 0)
+                    snprintf(label, sizeof(label), "全屏");
+                else
+                    snprintf(label, sizeof(label), "%d×%d", CROP_OPTIONS[i], CROP_OPTIONS[i]);
                 bool selected = (i == g_cfg.cropIndex);
                 if (ImGui::Selectable(label, selected)) {
                     if (i != g_cfg.cropIndex) {
@@ -545,6 +567,10 @@ static void drawControlPanel() {
     // 检测框描边粗细
     ImGui::SliderInt("框描边", &g_cfg.boxThickness, 1, 4);
     ImGui::Checkbox("框标签", &g_cfg.showBoxLabels);
+    // 检测框速度预判（毫秒）：调大让框更超前，补偿快速转动时的捕获→绘制延迟
+    float boxPredictMs = g_cfg.boxPredictTime * 1000.0f;
+    if (ImGui::SliderFloat("框预判(ms)", &boxPredictMs, 0.0f, 80.0f, "%.0f"))
+        g_cfg.boxPredictTime = boxPredictMs / 1000.0f;
     ImGui::Separator();
 
     // 类别显示过滤（类名来自模型同目录 labels 文件，如 head/body）
