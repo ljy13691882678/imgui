@@ -147,6 +147,11 @@ static TriggerController g_trigger;
 // 自瞄虚拟手指状态（拖动视角式：手指保持按下，逐帧按增量移动，目标进入死区时抬起）
 static bool   g_aimFingerDown = false;
 static float  g_aimFingerX = 0.0f, g_aimFingerY = 0.0f;
+// 自瞄虚拟手指周期性轻抬：长时间保持按下会被游戏判定为“卡触摸”，
+// 导致物理按钮/摇杆全部失灵；每隔 kAimLiftIntervalMs 快速抬手→回中心→再按下，
+// 既避免卡触摸判定，又保持连续拖拽转向。
+static constexpr long long kAimLiftIntervalMs = 300;
+static long long g_aimDownSinceMs = 0;
 // 扳机虚拟手指状态（按住模式需保持按下，并在目标离开/停用时抬起）
 static bool   g_triggerDown = false;
 // 压枪状态：按住开火计时 + 下拉补偿
