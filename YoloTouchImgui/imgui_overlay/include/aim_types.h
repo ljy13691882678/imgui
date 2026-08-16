@@ -132,6 +132,11 @@ struct AimConfig {
     int   triggerDelayMin = 50;    // 扳机随机延迟最小值（ms）
     int   triggerDelayMax = 150;   // 扳机随机延迟最大值（ms）
 
+    // 压枪（开火按住时视角自动下拉补偿后坐力；需扳机按住模式 triggerHold=true）
+    bool  recoilEnabled = false;   // 压枪总开关
+    int   recoilStartMs = 250;     // 压枪开始时间：开火按住后延迟多久开始下拉（ms）
+    int   recoilStrength = 300;    // 压枪力度：下拉速度（px/s），0=关闭
+
     // 目标选择
     int   selectMode = 0;          // 0=最近中心 1=最大框 2=最接近准星
 };

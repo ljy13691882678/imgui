@@ -143,6 +143,9 @@ static bool   g_aimFingerDown = false;
 static float  g_aimFingerX = 0.0f, g_aimFingerY = 0.0f;
 // 扳机虚拟手指状态（按住模式需保持按下，并在目标离开/停用时抬起）
 static bool   g_triggerDown = false;
+// 压枪状态：按住开火计时 + 下拉补偿
+static bool      g_recoilFiring = false;   // 按住开火中（用于开始时间计时）
+static long long g_recoilStartMs = 0;      // 本次按住开火的起始时刻
 
 // 瞄准点时间平滑（EMA）：抑制检测框抖动传导，尤其锁头部/身体时 Y 轴上下甩
 static float  g_aimSmoothX = -1.0f, g_aimSmoothY = -1.0f;
@@ -412,110 +415,11 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             aimGateOk = false;
     }
 
-    // ── 自瞄 ──
-    // 三种算法：0=原版(拖拽+平滑) 1=PID 2=贝塞尔，均由控制器输出每帧增量。
-    // 输出方式二选一：
-    //   - 触摸拖拽（默认）：虚拟手指按下逐帧移动，模拟人手拖屏转向，手指被 clamp 在触控区。
-    //   - 内核陀螺仪（injectMode==1 且 gyroAim）：把增量换算成 pitch/yaw 角度注入陀螺仪 hook，
-    //     替代触摸拖拽（此时触控区不参与，触控/扳机仍走触摸注入）。
-    const bool gyroMode = (g_cfg.injectMode == 1 && g_cfg.gyroAim);
-    if (g_touchReady && g_cfg.aimEnabled && g_cfg.enabled && !zoneEditing && aimGateOk) {
-        AimOutput out;
-        switch (g_cfg.aimMode) {
-        case 1:
-            out = g_pidAim.compute(aimTarget, g_cfg, screenCx, screenCy, dt,
-                                   (float)scrW, (float)scrH);
-            break;
-        case 2:
-            out = g_bezierAim.compute(aimTarget, g_cfg, screenCx, screenCy, dt,
-                                      (float)scrW, (float)scrH);
-            break;
-        default:
-            out = g_aim.compute(aimTarget, g_cfg, screenCx, screenCy, dt);
-            break;
-        }
-        if (out.active) {
-            // 原版模式应用拖拽灵敏度（dragSens）；PID/贝塞尔内部已含增益，直接使用
-            float dragFactor = (g_cfg.aimMode == 0) ? g_cfg.dragSens : 1.0f;
-            float dpx = out.deltaX * scrW * dragFactor;
-            float dpy = out.deltaY * scrH * dragFactor;
-            // 原版模式限制单帧最大拖拽像素，避免目标偏离过大时瞬移/抖动
-            if (g_cfg.aimMode == 0) {
-                float maxStep = (float)g_cfg.aimMaxStepPx;
-                float step = std::sqrt(dpx*dpx + dpy*dpy);
-                if (step > maxStep) { dpx *= maxStep / step; dpy *= maxStep / step; }
-            }
-            // 自瞄回正速度限制：归一化每帧最大瞄准点移动距离。目标在裁剪框边缘时
-            // 距离准星很远，若直接一帧甩过去准星会被甩飞；用该值限制每帧最大移动量，
-            // 让准星平滑地回正（0=关闭限制）
-            if (g_cfg.aimApproachSpeed > 0.0f) {
-                float maxPx = g_cfg.aimApproachSpeed * (float)std::min(scrW, scrH);
-                float step = std::sqrt(dpx*dpx + dpy*dpy);
-                if (step > maxPx) { dpx *= maxPx / step; dpy *= maxPx / step; }
-            }
-
-            if (gyroMode) {
-                // 陀螺仪自瞄：像素增量 → 角度（度），pitch 对应屏幕 Y（纵向），yaw 对应 X（横向）
-                float pitch = dpy * g_cfg.gyroSens;
-                float yaw   = dpx * g_cfg.gyroSens;
-                if (g_cfg.gyroInvertPitch) pitch = -pitch;
-                if (g_cfg.gyroInvertYaw)   yaw   = -yaw;
-                float maxDeg = std::max(0.1f, g_cfg.gyroMaxDeg);
-                pitch = std::clamp(pitch, -maxDeg, maxDeg);
-                yaw   = std::clamp(yaw,   -maxDeg, maxDeg);
-                touch_gyro_apply(true, pitch, yaw);
-                g_aimActive = true;
-                g_aimX = out.targetX;
-                g_aimY = out.targetY;
-            } else {
-                if (!g_aimFingerDown) {
-                    // 手指从触控区中心按下
-                    g_aimFingerX = tzCx;
-                    g_aimFingerY = tzCy;
-                    touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
-                               (int)g_aimFingerX, (int)g_aimFingerY);
-                    g_aimFingerDown = true;
-                }
-                g_aimFingerX = std::clamp(g_aimFingerX + dpx, tzLpx, tzRpx);
-                g_aimFingerY = std::clamp(g_aimFingerY + dpy, tzTpx, tzBpx);
-                touch_move(TOUCH_VIRTUAL_SLOT, (int)g_aimFingerX, (int)g_aimFingerY);
-                // 拖到远离触控区中心时抬手回中心再按下，模拟人手重新起指，
-                // 保证目标在屏幕边缘也能持续转向（游戏累积每段拖拽的旋转量）
-                float drift = std::sqrt((g_aimFingerX - tzCx) * (g_aimFingerX - tzCx) +
-                                        (g_aimFingerY - tzCy) * (g_aimFingerY - tzCy));
-                if (drift > std::max(tzRpx - tzLpx, tzBpx - tzTpx) * 0.5f) {
-                    touch_up(TOUCH_VIRTUAL_SLOT);
-                    g_aimFingerX = tzCx;
-                    g_aimFingerY = tzCy;
-                    touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
-                               (int)g_aimFingerX, (int)g_aimFingerY);
-                }
-                g_aimActive = true;
-                g_aimX = out.targetX;
-                g_aimY = out.targetY;
-            }
-        } else {
-            g_aimActive = false;
-            if (gyroMode) {
-                touch_gyro_stop();
-            } else if (g_aimFingerDown) {
-                touch_up(TOUCH_VIRTUAL_SLOT);
-                g_aimFingerDown = false;
-            }
-        }
-    } else {
-        if (gyroMode) {
-            touch_gyro_stop();
-        } else if (g_aimFingerDown) {
-            touch_up(TOUCH_VIRTUAL_SLOT);
-            g_aimFingerDown = false;
-        }
-        g_aimActive = false;
-    }
-
     // ── 扳机（点射/按住可切换）──
     // 触发区（fire zone）：玩家物理手指在此区域内时，暂停自动开火，避免与手动开火冲突。
     // 先按配置同步触发区到 touch_core，再让 reader 线程做硬件手指检测。
+    // 提前执行以取得 hold（按住开火/扫射）状态，供压枪使用。
+    bool trigHold = false;
     if (g_touchReady && g_cfg.triggerEnabled && g_cfg.enabled) {
         int fzL = (int)(g_cfg.fireZoneL * scrW), fzT = (int)(g_cfg.fireZoneT * scrH);
         int fzR = (int)(g_cfg.fireZoneR * scrW), fzB = (int)(g_cfg.fireZoneB * scrH);
@@ -525,6 +429,7 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         bool fingerDown = touch_is_finger_in_fire_zone();
         g_trigger.update(aimTarget, g_cfg, screenCx, screenCy, fingerDown,
                          fireOnce, hold, holdRelease);
+        trigHold = hold;
         // 扳机注入落点 = 触发区中心（开火按钮位置）
         int trigX = (int)((g_cfg.fireZoneL + g_cfg.fireZoneR) * 0.5f * scrW);
         int trigY = (int)((g_cfg.fireZoneT + g_cfg.fireZoneB) * 0.5f * scrH);
@@ -544,6 +449,123 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     } else if (g_triggerDown) {
         touch_up(TOUCH_TRIGGER_SLOT);
         g_triggerDown = false;
+    }
+
+    // ── 自瞄 ──
+    // 三种算法：0=原版(拖拽+平滑) 1=PID 2=贝塞尔，均由控制器输出每帧增量。
+    // 输出方式二选一：
+    //   - 触摸拖拽（默认）：虚拟手指按下逐帧移动，模拟人手拖屏转向，手指被 clamp 在触控区。
+    //   - 内核陀螺仪（injectMode==1 且 gyroAim）：把增量换算成 pitch/yaw 角度注入陀螺仪 hook，
+    //     替代触摸拖拽（此时触控区不参与，触控/扳机仍走触摸注入）。
+    const bool gyroMode = (g_cfg.injectMode == 1 && g_cfg.gyroAim);
+    AimOutput out;
+    bool  aimActiveNow = false;
+    float dpx = 0.0f, dpy = 0.0f;
+    if (g_touchReady && g_cfg.aimEnabled && g_cfg.enabled && !zoneEditing && aimGateOk) {
+        switch (g_cfg.aimMode) {
+        case 1:
+            out = g_pidAim.compute(aimTarget, g_cfg, screenCx, screenCy, dt,
+                                   (float)scrW, (float)scrH);
+            break;
+        case 2:
+            out = g_bezierAim.compute(aimTarget, g_cfg, screenCx, screenCy, dt,
+                                      (float)scrW, (float)scrH);
+            break;
+        default:
+            out = g_aim.compute(aimTarget, g_cfg, screenCx, screenCy, dt);
+            break;
+        }
+        if (out.active) {
+            // 原版模式应用拖拽灵敏度（dragSens）；PID/贝塞尔内部已含增益，直接使用
+            float dragFactor = (g_cfg.aimMode == 0) ? g_cfg.dragSens : 1.0f;
+            dpx = out.deltaX * scrW * dragFactor;
+            dpy = out.deltaY * scrH * dragFactor;
+            // 原版模式限制单帧最大拖拽像素，避免目标偏离过大时瞬移/抖动
+            if (g_cfg.aimMode == 0) {
+                float maxStep = (float)g_cfg.aimMaxStepPx;
+                float step = std::sqrt(dpx*dpx + dpy*dpy);
+                if (step > maxStep) { dpx *= maxStep / step; dpy *= maxStep / step; }
+            }
+            // 自瞄回正速度限制：归一化每帧最大瞄准点移动距离。目标在裁剪框边缘时
+            // 距离准星很远，若直接一帧甩过去准星会被甩飞；用该值限制每帧最大移动量，
+            // 让准星平滑地回正（0=关闭限制）
+            if (g_cfg.aimApproachSpeed > 0.0f) {
+                float maxPx = g_cfg.aimApproachSpeed * (float)std::min(scrW, scrH);
+                float step = std::sqrt(dpx*dpx + dpy*dpy);
+                if (step > maxPx) { dpx *= maxPx / step; dpy *= maxPx / step; }
+            }
+            aimActiveNow = true;
+        }
+    }
+
+    // ── 压枪（开火按住时视角自动下拉补偿后坐力）──
+    // 触发条件：触摸输出模式（陀螺仪自瞄时禁用，避免互相干扰）+ 扳机按住开火（hold）。
+    // 开始时间：按住开火持续到 recoilStartMs 后开始下拉；
+    // 力度：每帧下拉 recoilStrength(px/s) × dt 像素，模拟人手持续下拉压枪。
+    const bool recoilArmed = g_touchReady && g_cfg.enabled && !zoneEditing &&
+                             g_cfg.recoilEnabled && !gyroMode && g_cfg.recoilStrength > 0;
+    if (recoilArmed && trigHold) {
+        if (!g_recoilFiring) { g_recoilFiring = true; g_recoilStartMs = now; }
+    } else {
+        g_recoilFiring = false;
+    }
+    const bool recoilPulling = g_recoilFiring &&
+                               (now - g_recoilStartMs >= (long long)g_cfg.recoilStartMs);
+
+    // ── 自瞄/压枪统一输出（陀螺仪 or 触摸视角手指，共用 TOUCH_VIRTUAL_SLOT）──
+    if (aimActiveNow && gyroMode) {
+        // 陀螺仪自瞄：像素增量 → 角度（度），pitch 对应屏幕 Y（纵向），yaw 对应 X（横向）
+        float pitch = dpy * g_cfg.gyroSens;
+        float yaw   = dpx * g_cfg.gyroSens;
+        if (g_cfg.gyroInvertPitch) pitch = -pitch;
+        if (g_cfg.gyroInvertYaw)   yaw   = -yaw;
+        float maxDeg = std::max(0.1f, g_cfg.gyroMaxDeg);
+        pitch = std::clamp(pitch, -maxDeg, maxDeg);
+        yaw   = std::clamp(yaw,   -maxDeg, maxDeg);
+        touch_gyro_apply(true, pitch, yaw);
+        g_aimActive = true;
+        g_aimX = out.targetX;
+        g_aimY = out.targetY;
+    } else if (aimActiveNow || recoilPulling) {
+        if (gyroMode) touch_gyro_stop();
+        // 视角手指：自瞄增量 + 压枪下拉合并移动
+        float dx = dpx;
+        float dy = dpy;
+        if (recoilPulling) dy += g_cfg.recoilStrength * dt;  // 压枪下拉（px/s × s）
+        if (!g_aimFingerDown) {
+            // 手指从触控区中心按下
+            g_aimFingerX = tzCx;
+            g_aimFingerY = tzCy;
+            touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
+                       (int)g_aimFingerX, (int)g_aimFingerY);
+            g_aimFingerDown = true;
+        }
+        g_aimFingerX = std::clamp(g_aimFingerX + dx, tzLpx, tzRpx);
+        g_aimFingerY = std::clamp(g_aimFingerY + dy, tzTpx, tzBpx);
+        touch_move(TOUCH_VIRTUAL_SLOT, (int)g_aimFingerX, (int)g_aimFingerY);
+        // 拖到远离触控区中心时抬手回中心再按下，模拟人手重新起指，
+        // 保证目标在屏幕边缘也能持续转向（游戏累积每段拖拽的旋转量）
+        float drift = std::sqrt((g_aimFingerX - tzCx) * (g_aimFingerX - tzCx) +
+                                (g_aimFingerY - tzCy) * (g_aimFingerY - tzCy));
+        if (drift > std::max(tzRpx - tzLpx, tzBpx - tzTpx) * 0.5f) {
+            touch_up(TOUCH_VIRTUAL_SLOT);
+            g_aimFingerX = tzCx;
+            g_aimFingerY = tzCy;
+            touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
+                       (int)g_aimFingerX, (int)g_aimFingerY);
+        }
+        g_aimActive = aimActiveNow;
+        if (aimActiveNow) {
+            g_aimX = out.targetX;
+            g_aimY = out.targetY;
+        }
+    } else {
+        if (gyroMode) touch_gyro_stop();
+        if (g_aimFingerDown) {
+            touch_up(TOUCH_VIRTUAL_SLOT);
+            g_aimFingerDown = false;
+        }
+        g_aimActive = false;
     }
 }
 
@@ -1255,6 +1277,22 @@ static void drawControlPanel() {
         ImGui::SliderInt("延迟上限(ms)", &g_cfg.triggerDelayMax, 0, 300);
         if (g_cfg.triggerDelayMax < g_cfg.triggerDelayMin)
             g_cfg.triggerDelayMax = g_cfg.triggerDelayMin;
+    }
+
+    // ===== 压枪分类（独立折叠页） =====
+    if (ImGui::CollapsingHeader("压枪")) {
+        ImGui::Checkbox("压枪", &g_cfg.recoilEnabled);
+        ImGui::TextDisabled("开火按住时视角自动下拉补偿后坐力，需配合“扳机按住”使用");
+        ImGui::SliderInt("开始时间(ms)", &g_cfg.recoilStartMs, 0, 2000,
+                         "%d");
+        ImGui::SliderInt("压枪力度(px/s)", &g_cfg.recoilStrength, 0, 2000,
+                         "%d");
+        if (g_cfg.recoilStrength < 0) g_cfg.recoilStrength = 0;
+        if (!g_cfg.triggerHold) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
+                               "需要开启扳机按住");
+        }
     }
     ImGui::End();
 }
