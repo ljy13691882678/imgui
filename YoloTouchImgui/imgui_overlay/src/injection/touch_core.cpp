@@ -3,6 +3,8 @@
 // Shared by JNI (Shizuku) and root_daemon (su)
 
 #include "touch_core.h"
+#include "time_driver_wrap.h"
+#include "time_driver.h"   // TIME_GYRO_MASK_ALL 等常量
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/input.h>
@@ -78,6 +80,7 @@ static Vec2 g_screenSize{};
 static std::mutex g_mutex;
 static int g_outputFd = 0;
 static bool g_initialized = false;
+static bool g_kernelMode = false;   // 内核触摸注入模式（触摸走内核驱动，uinput 不再创建）
 
 // Screen params
 static int g_screen_w = 0, g_screen_h = 0;
@@ -466,17 +469,24 @@ static void* deviceReader(void* arg) {
     return nullptr;
 }
 
-// ═════════════════════════════════════════════════════════════════════
-//  Public API (touch_core.h)
-// ═════════════════════════════════════════════════════════════════════
+// ─── Kernel mode selection ─────────────────────────────────────────
 
-bool touch_init(int screenW, int screenH) {
+void touch_set_kernel_mode(bool en) {
+    g_kernelMode = en;
+}
+
+bool touch_kernel_mode(void) { return g_kernelMode; }
+
+// ─── Public API (touch_core.h) ─────────────────────────────────────
+
+bool touch_init(int screenW, int screenH, int rotation) {
     if (screenW <= 0 || screenH <= 0) {
         LOGE("touch_init: invalid screen size %dx%d", screenW, screenH);
         return false;
     }
     std::lock_guard<std::mutex> guard(g_mutex);
     closeTouchLocked();
+    g_rotation = normalizeRotation(rotation);
 
     Vec2 size(static_cast<float>(screenW), static_cast<float>(screenH));
     g_screenSize = size.x > size.y ? size : Vec2(size.y, size.x);
@@ -512,9 +522,20 @@ bool touch_init(int screenW, int screenH) {
 
     int touchMaxX = g_devices[0].absX.maximum;
     int touchMaxY = g_devices[0].absY.maximum;
-    if (!createUinputDevice(touchMaxX, touchMaxY, g_devices[0].fd)) {
-        closeTouchLocked();
-        return false;
+
+    // 内核触摸模式：注入走内核驱动，不创建 uinput；仍需设备 abs 信息做坐标换算
+    if (g_kernelMode) {
+        if (!kdrv_touch_init(screenW, screenH, g_rotation)) {
+            LOGE("kernel touch init failed");
+            closeTouchLocked();
+            return false;
+        }
+        g_outputFd = 0;
+    } else {
+        if (!createUinputDevice(touchMaxX, touchMaxY, g_devices[0].fd)) {
+            closeTouchLocked();
+            return false;
+        }
     }
 
     for (auto& device : g_devices) {
@@ -527,13 +548,18 @@ bool touch_init(int screenW, int screenH) {
     g_touchScale.x = static_cast<float>(touchMaxX) / std::max(1.0f, logical.x);
     g_touchScale.y = static_cast<float>(touchMaxY) / std::max(1.0f, logical.y);
     g_initialized = true;
-    LOGD("touch ready scale=%.3f,%.3f", g_touchScale.x, g_touchScale.y);
+    LOGD("touch ready mode=%s scale=%.3f,%.3f",
+         g_kernelMode ? "kernel" : "uinput", g_touchScale.x, g_touchScale.y);
     return true;
 }
 
 void touch_close(void) {
     touch_stop_readers();
     std::lock_guard<std::mutex> guard(g_mutex);
+    if (g_kernelMode) {
+        kdrv_touch_cleanup();
+        kdrv_gyro_disable();
+    }
     closeTouchLocked();
 }
 
@@ -574,6 +600,7 @@ void touch_set_screen_params(int w, int h, int rotation) {
 }
 
 void touch_down(int slot, int id, int screenX, int screenY) {
+    if (g_kernelMode) { kdrv_touch_down(id, screenX, screenY); return; }
     std::lock_guard<std::mutex> guard(g_mutex);
     if (!g_initialized || g_devices.empty()) return;
     float tx, ty;
@@ -585,6 +612,12 @@ void touch_down(int slot, int id, int screenX, int screenY) {
 }
 
 void touch_move(int slot, int screenX, int screenY) {
+    if (g_kernelMode) {
+        // 内核驱动用 finger id 标识触点，从 slot 映射回注入 id
+        int id = (slot == TOUCH_TRIGGER_SLOT) ? TOUCH_TRIGGER_ID : TOUCH_VIRTUAL_ID;
+        kdrv_touch_move(id, screenX, screenY);
+        return;
+    }
     std::lock_guard<std::mutex> guard(g_mutex);
     if (!g_initialized || g_devices.empty()) return;
     float tx, ty;
@@ -594,10 +627,32 @@ void touch_move(int slot, int screenX, int screenY) {
 }
 
 void touch_up(int slot) {
+    if (g_kernelMode) {
+        int id = (slot == TOUCH_TRIGGER_SLOT) ? TOUCH_TRIGGER_ID : TOUCH_VIRTUAL_ID;
+        kdrv_touch_up(id);
+        return;
+    }
     std::lock_guard<std::mutex> guard(g_mutex);
     if (!g_initialized || g_devices.empty()) return;
     g_devices[0].fingers[slot].isDown = false;
     upload();
+}
+
+// ─── 内核陀螺仪 ────────────────────────────────────────────────────
+
+bool touch_kernel_gyro_init(void) {
+    if (!g_kernelMode) return false;
+    return kdrv_gyro_init();
+}
+
+void touch_gyro_apply(bool enable, float pitch, float yaw) {
+    if (!g_kernelMode) return;
+    kdrv_gyro_set(enable, pitch, yaw, (uint32_t)g_rotation, 1, TIME_GYRO_MASK_ALL);
+}
+
+void touch_gyro_stop(void) {
+    if (!g_kernelMode) return;
+    kdrv_gyro_stop((uint32_t)g_rotation);
 }
 
 void touch_set_trigger_zone(int l, int t, int r, int b)  { g_trigger_zone = {l, t, r, b, 0}; }

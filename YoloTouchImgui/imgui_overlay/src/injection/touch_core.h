@@ -16,7 +16,11 @@ extern "C" {
 #define TOUCH_TRIGGER_ID    2000
 
 // Lifecycle
-bool touch_init(int screenW, int screenH);
+// 内核触摸模式：触摸注入走内核驱动（TimeDriver），仅保留物理手指读取用于区域判断。
+// 默认 false=uinput 注入；置 true 后 touch_init 将不再创建 uinput，注入函数路由到内核驱动。
+void touch_set_kernel_mode(bool en);
+bool touch_kernel_mode(void);
+bool touch_init(int screenW, int screenH, int rotation);
 void touch_close(void);
 bool touch_is_initialized(void);
 int  touch_get_output_fd(void);
@@ -32,6 +36,12 @@ void touch_set_screen_params(int w, int h, int rotation);
 void touch_down(int slot, int id, int screenX, int screenY);
 void touch_move(int slot, int screenX, int screenY);
 void touch_up(int slot);
+
+// 内核陀螺仪：自瞄旋转注入（仅内核模式可用；uinput 模式下调用无效果）。
+// pitch/yaw 单位为度，rotation 为屏幕方向（0/1/2/3）。
+bool touch_kernel_gyro_init(void);
+void touch_gyro_apply(bool enable, float pitch, float yaw);
+void touch_gyro_stop(void);
 
 // Zone configuration (screen coordinates)
 void touch_set_trigger_zone(int l, int t, int r, int b);

@@ -28,6 +28,7 @@ LOCAL_C_INCLUDES += $(LOCAL_PATH)/include/qnn
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/src
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/src/inference
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/src/injection
+LOCAL_C_INCLUDES += $(LOCAL_PATH)/driver
 
 # 源码
 LOCAL_SRC_FILES := \
@@ -43,7 +44,9 @@ LOCAL_SRC_FILES := \
     src/My_Utils/stb_image.cpp \
     src/inference/litert_engine.cpp \
     src/inference/qnn_engine.cpp \
-    src/injection/touch_core.cpp
+    src/injection/touch_core.cpp \
+    src/injection/time_driver_wrap.cpp \
+    src/injection/stderr_shim.cpp
 
 ifeq ($(OPENGL_DRAW), 1)
     LOCAL_SRC_FILES += src/ImGui/backends/imgui_impl_opengl3.cpp
@@ -61,5 +64,9 @@ LOCAL_LDLIBS := -llog -landroid -lEGL -lGLESv3 -ldl
 LOCAL_LDLIBS += -L$(LOCAL_PATH)/lib/arm64-v8a
 LOCAL_LDLIBS += -ltensorflowlite_jni
 LOCAL_LDLIBS += -lQnnTFLiteDelegate -lQnnHtp -lQnnSystem
+
+# 内核驱动（TimeDriver）静态库：arm64-v8a 预编译 .a，提供内核触摸 + 陀螺仪 hook
+LOCAL_LDLIBS += -L$(LOCAL_PATH)/driver/arm64-v8a
+LOCAL_LDLIBS += -ltime_driver
 
 include $(BUILD_EXECUTABLE)

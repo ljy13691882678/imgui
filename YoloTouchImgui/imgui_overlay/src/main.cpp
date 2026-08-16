@@ -410,10 +410,13 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             aimGateOk = false;
     }
 
-    // ── 自瞄（拖动视角式）──
-    // 三种算法：0=原版(拖拽+平滑) 1=PID 2=贝塞尔，均由控制器输出每帧增量，
-    // 这里保持虚拟手指按下并逐帧移动，模拟人手拖屏转向；目标进入死区后抬起手指。
-    // 手指被 clamp 在触控区内。
+    // ── 自瞄 ──
+    // 三种算法：0=原版(拖拽+平滑) 1=PID 2=贝塞尔，均由控制器输出每帧增量。
+    // 输出方式二选一：
+    //   - 触摸拖拽（默认）：虚拟手指按下逐帧移动，模拟人手拖屏转向，手指被 clamp 在触控区。
+    //   - 内核陀螺仪（injectMode==1 且 gyroAim）：把增量换算成 pitch/yaw 角度注入陀螺仪 hook，
+    //     替代触摸拖拽（此时触控区不参与，触控/扳机仍走触摸注入）。
+    const bool gyroMode = (g_cfg.injectMode == 1 && g_cfg.gyroAim);
     if (g_touchReady && g_cfg.aimEnabled && g_cfg.enabled && !zoneEditing && aimGateOk) {
         AimOutput out;
         switch (g_cfg.aimMode) {
@@ -449,40 +452,59 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
                 if (step > maxPx) { dpx *= maxPx / step; dpy *= maxPx / step; }
             }
 
-            if (!g_aimFingerDown) {
-                // 手指从触控区中心按下
-                g_aimFingerX = tzCx;
-                g_aimFingerY = tzCy;
-                touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
-                           (int)g_aimFingerX, (int)g_aimFingerY);
-                g_aimFingerDown = true;
+            if (gyroMode) {
+                // 陀螺仪自瞄：像素增量 → 角度（度），pitch 对应屏幕 Y（纵向），yaw 对应 X（横向）
+                float pitch = dpy * g_cfg.gyroSens;
+                float yaw   = dpx * g_cfg.gyroSens;
+                if (g_cfg.gyroInvertPitch) pitch = -pitch;
+                if (g_cfg.gyroInvertYaw)   yaw   = -yaw;
+                float maxDeg = std::max(0.1f, g_cfg.gyroMaxDeg);
+                pitch = std::clamp(pitch, -maxDeg, maxDeg);
+                yaw   = std::clamp(yaw,   -maxDeg, maxDeg);
+                touch_gyro_apply(true, pitch, yaw);
+                g_aimActive = true;
+                g_aimX = out.targetX;
+                g_aimY = out.targetY;
+            } else {
+                if (!g_aimFingerDown) {
+                    // 手指从触控区中心按下
+                    g_aimFingerX = tzCx;
+                    g_aimFingerY = tzCy;
+                    touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
+                               (int)g_aimFingerX, (int)g_aimFingerY);
+                    g_aimFingerDown = true;
+                }
+                g_aimFingerX = std::clamp(g_aimFingerX + dpx, tzLpx, tzRpx);
+                g_aimFingerY = std::clamp(g_aimFingerY + dpy, tzTpx, tzBpx);
+                touch_move(TOUCH_VIRTUAL_SLOT, (int)g_aimFingerX, (int)g_aimFingerY);
+                // 拖到远离触控区中心时抬手回中心再按下，模拟人手重新起指，
+                // 保证目标在屏幕边缘也能持续转向（游戏累积每段拖拽的旋转量）
+                float drift = std::sqrt((g_aimFingerX - tzCx) * (g_aimFingerX - tzCx) +
+                                        (g_aimFingerY - tzCy) * (g_aimFingerY - tzCy));
+                if (drift > std::max(tzRpx - tzLpx, tzBpx - tzTpx) * 0.5f) {
+                    touch_up(TOUCH_VIRTUAL_SLOT);
+                    g_aimFingerX = tzCx;
+                    g_aimFingerY = tzCy;
+                    touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
+                               (int)g_aimFingerX, (int)g_aimFingerY);
+                }
+                g_aimActive = true;
+                g_aimX = out.targetX;
+                g_aimY = out.targetY;
             }
-            g_aimFingerX = std::clamp(g_aimFingerX + dpx, tzLpx, tzRpx);
-            g_aimFingerY = std::clamp(g_aimFingerY + dpy, tzTpx, tzBpx);
-            touch_move(TOUCH_VIRTUAL_SLOT, (int)g_aimFingerX, (int)g_aimFingerY);
-            // 拖到远离触控区中心时抬手回中心再按下，模拟人手重新起指，
-            // 保证目标在屏幕边缘也能持续转向（游戏累积每段拖拽的旋转量）
-            float drift = std::sqrt((g_aimFingerX - tzCx) * (g_aimFingerX - tzCx) +
-                                    (g_aimFingerY - tzCy) * (g_aimFingerY - tzCy));
-            if (drift > std::max(tzRpx - tzLpx, tzBpx - tzTpx) * 0.5f) {
-                touch_up(TOUCH_VIRTUAL_SLOT);
-                g_aimFingerX = tzCx;
-                g_aimFingerY = tzCy;
-                touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
-                           (int)g_aimFingerX, (int)g_aimFingerY);
-            }
-            g_aimActive = true;
-            g_aimX = out.targetX;
-            g_aimY = out.targetY;
         } else {
             g_aimActive = false;
-            if (g_aimFingerDown) {
+            if (gyroMode) {
+                touch_gyro_stop();
+            } else if (g_aimFingerDown) {
                 touch_up(TOUCH_VIRTUAL_SLOT);
                 g_aimFingerDown = false;
             }
         }
     } else {
-        if (g_aimFingerDown) {
+        if (gyroMode) {
+            touch_gyro_stop();
+        } else if (g_aimFingerDown) {
             touch_up(TOUCH_VIRTUAL_SLOT);
             g_aimFingerDown = false;
         }
@@ -1141,6 +1163,32 @@ static void drawControlPanel() {
     }
     ImGui::Separator();
 
+    // ===== 注入方式 / 内核陀螺仪 =====
+    if (ImGui::CollapsingHeader("注入", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // 注入后端：0=uinput 1=内核驱动触摸（重启生效）
+        {
+            const char* modes[] = {"uinput", "内核驱动"};
+            int cur = g_cfg.injectMode;
+            if (cur < 0 || cur > 1) cur = 0;
+            if (ImGui::BeginCombo("注入方式", modes[cur])) {
+                for (int i = 0; i < 2; ++i) {
+                    if (ImGui::Selectable(modes[i], i == cur)) g_cfg.injectMode = i;
+                    if (i == cur) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            if (g_cfg.injectMode == 1) ImGui::TextDisabled("内核驱动需已加载 TimeDriver，重启生效");
+        }
+        ImGui::Checkbox("陀螺仪自瞄", &g_cfg.gyroAim);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(仅内核驱动)");
+        ImGui::SliderFloat("陀螺仪灵敏度", &g_cfg.gyroSens, 0.0005f, 0.05f, "%.4f");
+        ImGui::SliderFloat("最大角度(°)", &g_cfg.gyroMaxDeg, 1.0f, 60.0f);
+        ImGui::Checkbox("反转 Pitch", &g_cfg.gyroInvertPitch);
+        ImGui::Checkbox("反转 Yaw", &g_cfg.gyroInvertYaw);
+    }
+    ImGui::Separator();
+
     // ===== 区域分类 =====
     if (ImGui::CollapsingHeader("区域")) {
         // 区域拖拽编辑：在悬浮窗上直接拖动控制点调整区域大小和位置（扳机区改为拖拽调整）
@@ -1263,10 +1311,13 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    // 初始化触摸注入（uinput）
-    g_touchReady = touch_init(native_window_screen_x, native_window_screen_y);
+    // 初始化触摸注入（injectMode：0=uinput，1=内核驱动触摸 TimeDriver）
+    touch_set_kernel_mode(g_cfg.injectMode == 1);
+    g_touchReady = touch_init(native_window_screen_x, native_window_screen_y, g_rotation);
     if (g_touchReady) {
         touch_set_screen_params(native_window_screen_x, native_window_screen_y, g_rotation);
+        // 内核模式：预初始化陀螺仪 hook，面板随时可切 gyroAim 生效
+        if (touch_kernel_mode()) touch_kernel_gyro_init();
         // 初始同步触发区（默认右下角区域）
         int fzL = (int)(g_cfg.fireZoneL * native_window_screen_x);
         int fzT = (int)(g_cfg.fireZoneT * native_window_screen_y);
