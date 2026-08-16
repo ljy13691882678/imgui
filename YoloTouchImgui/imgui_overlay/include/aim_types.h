@@ -85,18 +85,6 @@ struct AimConfig {
     // 自瞄类别锁定：-1=所有启用类别；>=0=仅锁定该类（模型类别索引，面板按类别名选择）
     int   aimClass = -1;
 
-    // 注入后端：0=uinput（旧，需 root+uinput） 1=内核驱动触摸（TimeDriver）
-    int   injectMode = 0;
-    // 内核陀螺仪自瞄：开启后自瞄转向走陀螺仪 hook（替代触摸拖拽），仅 injectMode==1 生效
-    bool  gyroAim = false;
-    // 陀螺仪转向灵敏度：像素误差 → 注入角度(度) 的换算系数
-    float gyroSens = 0.01f;
-    // 陀螺仪单帧最大注入角度（度），防止瞬时甩视角
-    float gyroMaxDeg = 15.0f;
-    // 陀螺仪注入方向：pitch/yaw 正负号调整（部分设备/游戏方向相反）
-    bool  gyroInvertPitch = false;
-    bool  gyroInvertYaw = false;
-
     // 触控区（自瞄拖拽注入区域，归一化 [0,1]）：虚拟手指只在该区域内拖动视角。
     // 游戏通常只在特定区域响应拖屏转向，此区域应与游戏的转向/瞄准区域对齐。
     float touchZoneL = 0.40f, touchZoneT = 0.10f, touchZoneR = 1.0f, touchZoneB = 0.90f;

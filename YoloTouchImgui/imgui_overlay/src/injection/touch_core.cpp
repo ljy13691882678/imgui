@@ -3,8 +3,6 @@
 // Shared by JNI (Shizuku) and root_daemon (su)
 
 #include "touch_core.h"
-#include "time_driver_wrap.h"
-#include "time_driver.h"   // TIME_GYRO_MASK_ALL 等常量
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/input.h>
@@ -80,7 +78,6 @@ static Vec2 g_screenSize{};
 static std::mutex g_mutex;
 static int g_outputFd = 0;
 static bool g_initialized = false;
-static bool g_kernelMode = false;   // 内核驱动模式（触摸走 uinput，驱动仅用于陀螺仪）
 
 // Screen params
 static int g_screen_w = 0, g_screen_h = 0;
@@ -499,18 +496,6 @@ static void* deviceReader(void* arg) {
     return nullptr;
 }
 
-// ─── Kernel mode selection ─────────────────────────────────────────
-
-void touch_set_kernel_mode(bool en) {
-    g_kernelMode = en;
-}
-
-bool touch_kernel_mode(void) { return g_kernelMode; }
-
-bool touch_kernel_connected(void) {
-    return g_kernelMode && kdrv_connected();
-}
-
 // ─── Public API (touch_core.h) ─────────────────────────────────────
 
 bool touch_init(int screenW, int screenH, int rotation) {
@@ -575,17 +560,13 @@ bool touch_init(int screenW, int screenH, int rotation) {
     g_touchScale.x = static_cast<float>(touchMaxX) / std::max(1.0f, logical.x);
     g_touchScale.y = static_cast<float>(touchMaxY) / std::max(1.0f, logical.y);
     g_initialized = true;
-    LOGD("touch ready mode=%s scale=%.3f,%.3f",
-         g_kernelMode ? "kernel" : "uinput", g_touchScale.x, g_touchScale.y);
+    LOGD("touch ready scale=%.3f,%.3f", g_touchScale.x, g_touchScale.y);
     return true;
 }
 
 void touch_close(void) {
     touch_stop_readers();
     std::lock_guard<std::mutex> guard(g_mutex);
-    if (g_kernelMode) {
-        kdrv_gyro_disable();  // 触摸注入走 uinput，驱动仅用于陀螺仪
-    }
     closeTouchLocked();
 }
 
@@ -682,27 +663,6 @@ void touch_up(int slot) {
     if (!g_initialized || g_devices.empty()) return;
     g_devices[0].fingers[slot].isDown = false;
     upload();
-}
-
-// ─── 内核陀螺仪 ────────────────────────────────────────────────────
-
-bool touch_kernel_gyro_init(void) {
-    if (!g_kernelMode) return false;
-    return kdrv_gyro_init();
-}
-
-void touch_gyro_apply(bool enable, float pitch, float yaw) {
-    if (!g_kernelMode) return;
-    // 惰性连接驱动：仅在真正需要陀螺仪自瞄时才初始化驱动。启动即初始化驱动，
-    // 若驱动会接管/拦截真实触摸，会导致游戏和 ImGui 都收不到触摸（本次无法触控
-    // 问题的首要嫌疑）。未连接则先尝试连接，失败则本次注入无效。
-    if (!kdrv_connected() && !touch_kernel_gyro_init()) return;
-    kdrv_gyro_set(enable, pitch, yaw, (uint32_t)g_rotation, 1, TIME_GYRO_MASK_ALL);
-}
-
-void touch_gyro_stop(void) {
-    if (!g_kernelMode) return;
-    kdrv_gyro_stop((uint32_t)g_rotation);
 }
 
 void touch_set_trigger_zone(int l, int t, int r, int b)  { g_trigger_zone = {l, t, r, b, 0}; }
