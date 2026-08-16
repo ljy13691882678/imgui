@@ -10,3 +10,9 @@ ndk/
 # 本地编译产物
 /imgui_chain_1_3_vk
 /imgui_chain_1_3_op
+
+# APK 构建产物
+YoloTouchImgui/app/build/
+YoloTouchImgui/app/src/main/assets/native/
+YoloTouchImgui/.gradle/
+YoloTouchImgui/local.properties

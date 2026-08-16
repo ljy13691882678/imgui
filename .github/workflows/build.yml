@@ -1,4 +1,4 @@
-name: Build Android ImGui Executable
+name: Build Android APK + ImGui Executable
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    name: Build (${{ matrix.variant.name }})
+    name: Build APK (${{ matrix.variant.name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -29,27 +29,53 @@ jobs:
           unzip -q ndk.zip
           echo "NDK_HOME=${GITHUB_WORKSPACE}/android-ndk-r25c" >> "${GITHUB_ENV}"
 
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - name: Select render backend
         working-directory: YoloTouchImgui/imgui_overlay
         run: |
           sed -i "s/^OPENGL_DRAW = .*/OPENGL_DRAW = ${{ matrix.variant.opengl }}/" Android.mk
           grep -n '^OPENGL_DRAW' Android.mk
 
-      - name: Build with ndk-build
+      - name: Build imgui native executable
         working-directory: YoloTouchImgui/imgui_overlay
         run: |
           export PATH="${NDK_HOME}:${PATH}"
-          # 注意：Application.mk 位于工程根目录，ndk-build 只在 $(NDK_PROJECT_PATH)/jni/ 下查找，
+          # Application.mk 位于工程根目录，ndk-build 只在 $(NDK_PROJECT_PATH)/jni/ 下查找，
           # 因此 APP_STL / APP_ABI / APP_PLATFORM 需显式传入，否则 libc++ 不会链接导致 STL 符号未定义。
           ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk APP_STL=c++_static APP_ABI=arm64-v8a APP_PLATFORM=android-21 -j2
 
-      - name: Show outputs
+      - name: Stage native files into APK assets
+        working-directory: YoloTouchImgui
         run: |
-          find YoloTouchImgui/imgui_overlay/libs -type f -exec ls -lh {} \;
+          ASSETS="app/src/main/assets/native"
+          mkdir -p "$ASSETS/lib"
+          # imgui 可执行文件
+          cp imgui_overlay/libs/arm64-v8a/imgui "$ASSETS/imgui"
+          # 模型
+          cp models/valorant_256_v26n.tflite "$ASSETS/valorant_256_v26n.tflite"
+          # 预编译 .so（TFLite / QNN）
+          cp imgui_overlay/lib/arm64-v8a/*.so "$ASSETS/lib/"
+          echo "=== staged assets ==="
+          find "$ASSETS" -type f -exec ls -lh {} \;
 
-      - name: Upload executable (${{ matrix.variant.name }})
+      - name: Build APK with Gradle
+        working-directory: YoloTouchImgui
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Show APK
+        run: |
+          find YoloTouchImgui/app/build -name '*.apk' -exec ls -lh {} \;
+
+      - name: Upload APK (${{ matrix.variant.name }})
         uses: actions/upload-artifact@v4
         with:
-          name: imgui-${{ matrix.variant.name }}-arm64
-          path: YoloTouchImgui/imgui_overlay/libs/arm64-v8a/
+          name: YoloTouchImgui-${{ matrix.variant.name }}.apk
+          path: YoloTouchImgui/app/build/outputs/apk/release/*.apk
           if-no-files-found: error

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">YoloTouchImgui</string>
+    <string name="app_title">YoloTouchImgui</string>
+    <string name="status_idle">未运行，点击下方按钮开始录屏</string>
+    <string name="status_running">录屏中，imgui 悬浮窗已拉起</string>
+    <string name="start_capture">开始录屏并启动</string>
+    <string name="stop_service">停止服务</string>
+    <string name="hint_root">需要 root 权限：imgui 将通过 su 以 root 运行（SurfaceFlinger 悬浮窗 + uinput 注入）</string>
+    <string name="hint_model">模型：valorant_256_v26n.tflite（YOLOv26n 256 INT8）</string>
+</resources>
