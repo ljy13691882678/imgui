@@ -19,12 +19,19 @@ static bool g_connected = false;
 
 bool kdrv_init(void) {
     if (g_connected) return true;
-    if (!TIME_Driver) return false;
+    if (!TIME_Driver) {
+        LOGE("kdrv init FAILED: TIME_Driver is null (linker error)");
+        return false;
+    }
     bool ok = TIME_Driver->Init();
     g_inited = true;
     g_connected = ok && TIME_Driver->IsConnected();
-    LOGD("kdrv init ok=%d connected=%d version=%u",
-         ok, (int)g_connected, TIME_Driver->Get_Version());
+    uint32_t ver = TIME_Driver->Get_Version();
+    LOGD("kdrv init ok=%d connected=%d version=%u (sdk_expected=%u)",
+         ok, (int)g_connected, ver, TIME_SDK_EXPECTED_DRIVER_VERSION);
+    if (!ok) {
+        LOGE("kdrv init FAILED: Init() returned false — version mismatch or driver not loaded");
+    }
     return g_connected;
 }
 

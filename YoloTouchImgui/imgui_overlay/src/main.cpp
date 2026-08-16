@@ -9,6 +9,8 @@
 #include "inference/inference_engine.h"
 #include "inference/litert_engine.h"
 #include "injection/touch_core.h"
+#include "injection/time_driver_wrap.h"   // kdrv_version() 驱动版本查询
+#include "time_driver.h"                  // TIME_SDK_EXPECTED_DRIVER_VERSION
 
 #include <atomic>
 #include <mutex>
@@ -1185,6 +1187,16 @@ static void drawControlPanel() {
                 ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.3f, 1.0f), "驱动已连接");
             else
                 ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "驱动未连接");
+            // 版本信息：对比驱动实际版本与 SDK 期望版本（不匹配会连接失败）
+            uint32_t ver = kdrv_version();
+            if (ver == 0)
+                ImGui::TextDisabled("驱动版本: 读取失败");
+            else if (ver != TIME_SDK_EXPECTED_DRIVER_VERSION)
+                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
+                                   "驱动版本: %u (期望 %u，不匹配)", ver,
+                                   (unsigned)TIME_SDK_EXPECTED_DRIVER_VERSION);
+            else
+                ImGui::TextDisabled("驱动版本: %u", ver);
         } else {
             ImGui::TextColored(g_touchReady ? ImVec4(0.2f, 1.0f, 0.3f, 1.0f)
                                             : ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
