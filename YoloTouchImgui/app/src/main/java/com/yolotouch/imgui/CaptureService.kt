@@ -97,6 +97,13 @@ class CaptureService : Service() {
     private var captureH = 0
     private var rotation = 0
 
+    // 最近一帧的尺寸/stride（flushDiagnostics 无新帧时写头部用，避免写 0）
+    @Volatile private var lastW = 0
+    @Volatile private var lastH = 0
+    @Volatile private var lastRowStride = 0
+    @Volatile private var lastSizePerFrame = 0
+    private var lastDiagFlushMs = 0L
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -422,6 +429,14 @@ class CaptureService : Service() {
                     val image = reader.acquireLatestImage()
                     if (image == null) {
                         acquireNulls.incrementAndGet()
+                        // 无新帧时也定期把诊断计数刷到头部（不动 lastSeq），
+                        // 让 C++ 面板能看到实时的 acquireNulls/writeAttempts 增长，
+                        // 从而区分“帧线程存活但虚拟屏未产帧(屏幕静止)”与“帧线程已死”。
+                        val now = System.currentTimeMillis()
+                        if (now - lastDiagFlushMs >= 500) {
+                            lastDiagFlushMs = now
+                            flushDiagnostics()
+                        }
                         Thread.sleep(10) // 避免 CPU 空转
                         continue
                     }
@@ -434,6 +449,35 @@ class CaptureService : Service() {
                 }
             }
         }.apply { start() }
+    }
+
+    // 把当前诊断计数写入共享内存头部（保持 lastSeq 不变，C++ 不会误判为新帧）。
+    // 在无新帧时由帧线程每 500ms 调用一次，让面板能看到实时的写帧/取帧计数变化。
+    private fun flushDiagnostics() {
+        val shm = shmFile ?: return
+        try {
+            val w = if (lastW > 0) lastW else captureW
+            val h = if (lastH > 0) lastH else captureH
+            val rs = if (lastRowStride > 0) lastRowStride else captureW * 4
+            val spf = if (lastSizePerFrame > 0) lastSizePerFrame else captureW * captureH * 4
+            RandomAccessFile(shm, "rw").use { raf ->
+                raf.seek(0)
+                val hdr = ByteBuffer.allocate(SHM_HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+                hdr.putInt(SHM_MAGIC.toInt())
+                hdr.putInt(w)
+                hdr.putInt(h)
+                hdr.putInt(rs)
+                hdr.putInt(4)            // pixelStride
+                hdr.putInt(rotation)
+                hdr.putInt(spf)
+                hdr.putInt(lastSeq.get().toInt())
+                hdr.putLong(writeAttempts.get())
+                hdr.putLong(writeSuccesses.get())
+                hdr.putLong(acquireNulls.get())
+                hdr.putLong(writeFails.get())
+                raf.write(hdr.array())
+            }
+        } catch (_: Exception) {}
     }
 
     // 帧写入看门狗：周期性检查共享内存序号是否在增长。
@@ -481,6 +525,12 @@ class CaptureService : Service() {
             val seq = lastSeq.incrementAndGet()
             val bufIdx = ((seq % SHM_BUFFER_COUNT).toInt()) * sizePerFrame
             val offset = SHM_HEADER_SIZE + bufIdx
+
+            // 保存最近一帧尺寸供 flushDiagnostics 用
+            lastW = w
+            lastH = h
+            lastRowStride = rowStride
+            lastSizePerFrame = sizePerFrame
 
             RandomAccessFile(shm, "rw").use { raf ->
                 // 写入帧数据
