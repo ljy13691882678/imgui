@@ -107,86 +107,145 @@ class CaptureService : Service() {
     }
 
     private fun startForegroundCompat() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIF_ID, buildNotification("录屏中，悬浮窗运行中"),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        } else {
+            startForeground(NOTIF_ID, buildNotification("录屏中，悬浮窗运行中"))
+        }
+    }
+
+    private fun buildNotification(text: String): Notification {
         val pi = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE
         )
-        val notif: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("YoloTouch 自瞄")
-            .setContentText("录屏中，悬浮窗运行中")
+            .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentIntent(pi)
             .setOngoing(true)
             .build()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-        } else {
-            startForeground(NOTIF_ID, notif)
-        }
+    }
+
+    /** 实时更新前台通知文本（启动进度 / 错误原因，用户可直接看到卡在哪一步） */
+    private fun updateNotification(text: String) {
+        try {
+            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                .notify(NOTIF_ID, buildNotification(text))
+        } catch (_: Exception) {}
+    }
+
+    /** 把最新状态持久化，MainActivity 打开时读取显示（服务退出/通知被移除后仍可见） */
+    private fun writeStatus(text: String) {
+        try {
+            File(filesDir, "yolotouch_status.txt").writeText(text)
+        } catch (_: Exception) {}
+    }
+
+    /**
+     * 记录失败并停止服务。
+     * 用独立的普通通知（ID=NOTIF_ID+1）+ 状态文件，避免 stopForeground 把
+     * 错误信息一起移除，保证用户无需 adb 也能看到失败原因。
+     */
+    private fun showError(msg: String) {
+        diagLog("ERROR: $msg")
+        writeStatus("启动失败：$msg")
+        try {
+            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                .notify(NOTIF_ID + 1, buildNotification("启动失败：$msg"))
+        } catch (_: Exception) {}
+        stopAll()
+    }
+
+    /** 追加诊断日志到 /data/local/tmp/yolotouch_service.log（root 文件管理器可读） */
+    private fun diagLog(msg: String) {
+        Log.d(TAG, msg)
+        try {
+            val line = "[${android.text.format.DateFormat.format("HH:mm:ss", System.currentTimeMillis())}] $msg\n"
+            FileOutputStream("/data/local/tmp/yolotouch_service.log", true).use {
+                it.write(line.toByteArray())
+            }
+        } catch (_: Exception) {}
     }
 
     // ─── 录屏 ────────────────────────────────────────────────
     private fun startProjection(resultCode: Int, data: Intent?) {
-        if (data == null) {
-            Log.e(TAG, "no projection data")
-            stopSelf()
-            return
-        }
-        val projection = mediaProjectionManager.getMediaProjection(resultCode, data)
-        if (projection == null) {
-            Log.e(TAG, "getMediaProjection failed")
-            stopSelf()
-            return
-        }
-        mediaProjection = projection
-        projection.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() {
-                Log.d(TAG, "MediaProjection stopped")
-                stopAll()
+        updateNotification("正在启动录屏...")
+        diagLog("startProjection begin")
+        try {
+            if (data == null) {
+                showError("无录屏授权数据，请重新点击开始")
+                return
             }
-        }, mainHandler)
-
-        val metrics = DisplayMetrics()
-        (getSystemService(Context.WINDOW_SERVICE) as WindowManager)
-            .defaultDisplay.getRealMetrics(metrics)
-        captureW = metrics.widthPixels
-        captureH = metrics.heightPixels
-        rotation = try {
-            (getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.rotation
-        } catch (e: Exception) {
-            0
-        }
-        val density = metrics.densityDpi
-        Log.d(TAG, "screen=${captureW}x${captureH} rotation=$rotation")
-
-        // MediaProjection 的 ImageReader 必须注册 OnImageAvailableListener，
-        // 否则部分设备/系统上 producer 不持续产帧，acquireLatestImage() 一直返回 null，
-        // 导致共享内存无新帧、imgui 推理 FPS 显示为 0。
-        imageReader = ImageReader.newInstance(captureW, captureH, PixelFormat.RGBA_8888, 2)
-            .also { it.setOnImageAvailableListener({ reader -> onFrameAvailable(reader) }, mainHandler) }
-        virtualDisplay = projection.createVirtualDisplay(
-            "YoloTouchCapture",
-            captureW, captureH, density,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader!!.surface, null, null
-        )
-        if (virtualDisplay == null) {
-            Log.e(TAG, "createVirtualDisplay failed")
-            stopSelf()
-            return
-        }
-        Log.d(TAG, "virtualDisplay created, capture started")
-
-        ioExecutor.execute {
-            try {
-                if (!prepareNativeAndRun()) {
-                    Log.e(TAG, "prepare native failed")
-                    mainHandler.post { stopAll() }
+            val projection = mediaProjectionManager.getMediaProjection(resultCode, data)
+            if (projection == null) {
+                showError("getMediaProjection=null，请重新授权录屏")
+                return
+            }
+            mediaProjection = projection
+            projection.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    Log.d(TAG, "MediaProjection stopped")
+                    stopAll()
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "setup error", e)
-                mainHandler.post { stopAll() }
+            }, mainHandler)
+
+            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val bounds = wm.currentWindowMetrics.bounds
+                captureW = bounds.width()
+                captureH = bounds.height()
+            } else {
+                val metrics = DisplayMetrics()
+                wm.defaultDisplay.getRealMetrics(metrics)
+                captureW = metrics.widthPixels
+                captureH = metrics.heightPixels
             }
+            rotation = try {
+                wm.defaultDisplay.rotation
+            } catch (e: Exception) {
+                0
+            }
+            if (captureW <= 0 || captureH <= 0) {
+                showError("屏幕尺寸无效 ${captureW}x${captureH}")
+                return
+            }
+            val density = resources.displayMetrics.densityDpi
+            diagLog("screen=${captureW}x${captureH} rotation=$rotation density=$density")
+
+            // MediaProjection 的 ImageReader 必须注册 OnImageAvailableListener，
+            // 否则部分设备/系统上 producer 不持续产帧，acquireLatestImage() 一直返回 null，
+            // 导致共享内存无新帧、imgui 推理 FPS 显示为 0。
+            imageReader = ImageReader.newInstance(captureW, captureH, PixelFormat.RGBA_8888, 2)
+                .also { it.setOnImageAvailableListener({ reader -> onFrameAvailable(reader) }, mainHandler) }
+            virtualDisplay = projection.createVirtualDisplay(
+                "YoloTouchCapture",
+                captureW, captureH, density,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader!!.surface, null, null
+            )
+            if (virtualDisplay == null) {
+                showError("虚拟显示创建失败")
+                return
+            }
+            diagLog("virtualDisplay created, capture started")
+            updateNotification("录屏中，正在准备悬浮窗...")
+
+            ioExecutor.execute {
+                try {
+                    if (!prepareNativeAndRun()) {
+                        // prepareNativeAndRun 内部失败时已 showError 并 stopAll，这里兜底
+                        mainHandler.post { stopAll() }
+                    }
+                } catch (e: Exception) {
+                    diagLog("ERROR: setup error: $e")
+                    mainHandler.post { showError("解压/启动原生失败：${e.message}") }
+                }
+            }
+        } catch (e: Exception) {
+            showError("录屏启动异常：${e.javaClass.simpleName} ${e.message}")
         }
     }
 
@@ -194,14 +253,15 @@ class CaptureService : Service() {
     private fun prepareNativeAndRun(): Boolean {
         // 0. 检查 root 环境与授权（KernelSU/Magisk）
         if (!RootHelper.isAvailable()) {
-            Log.e(TAG, "未检测到 su，请确认已安装 KernelSU/Magisk 并授予本应用 root 权限")
+            showError("未检测到 su，请确认已安装 KernelSU/Magisk")
             return false
         }
         if (!RootHelper.hasRootAccess()) {
-            Log.e(TAG, "尚未获得 root 授权，请在 KernelSU/Magisk 中允许本应用获取 root 权限")
+            showError("尚未获得 root 授权，请在 KernelSU/Magisk 中允许本应用")
             return false
         }
-        Log.d(TAG, "root 环境正常，已获得 root 授权")
+        diagLog("root 环境正常，已获得 root 授权")
+        updateNotification("录屏中，root 已就绪，正在准备悬浮窗...")
 
         val dir = File(filesDir, "native").apply { mkdirs() }
         val binDir = File(filesDir, "bin").apply { mkdirs() }
@@ -259,16 +319,38 @@ class CaptureService : Service() {
 
         // 5. 以 root 拉起 imgui（使用 RootHelper 封装）
         val ldPath = libDir.absolutePath
+        diagLog("launching imgui from ${binDir.absolutePath}")
+        updateNotification("录屏中，正在启动悬浮窗进程...")
         val result = RootHelper.launchBackground(
             workDir = binDir.absolutePath,
             env = mapOf("LD_LIBRARY_PATH" to ldPath),
             executable = imgui.absolutePath,
             model.absolutePath, shm.absolutePath, binDir.absolutePath
         )
-        Log.d(TAG, "root launch: rc=${result.exitCode} out=${result.output} err=${result.error}")
+        diagLog("root launch: rc=${result.exitCode} out=${result.output} err=${result.error}")
 
         // 帧写入由 ImageReader 的 OnImageAvailableListener 驱动（见 onFrameAvailable）
+        // 拉起后延迟 3s 检查 imgui 是否存活；若崩溃，把 /data/local/tmp/imgui.log 的关键
+        // 错误带到通知栏，用户无需 adb 即可看到失败原因。
+        mainHandler.postDelayed({ checkImguiAlive() }, 3000)
         return true
+    }
+
+    private fun checkImguiAlive() {
+        if (!running.get()) return
+        val alive = RootHelper.exec("pgrep -f 'bin/imgui'", timeoutSec = 3).success
+        if (alive) {
+            diagLog("imgui process alive")
+            writeStatus("运行中：录屏正常，悬浮窗已启动")
+            updateNotification("录屏中，悬浮窗运行中")
+        } else {
+            val log = try {
+                File("/data/local/tmp/imgui.log").takeIf { it.exists() }?.readText() ?: ""
+            } catch (_: Exception) { "" }
+            val brief = log.replace("\n", " | ").takeLast(400)
+            diagLog("imgui NOT alive! log=$brief")
+            showError("悬浮窗进程启动失败：$brief")
+        }
     }
 
     private fun initShm(file: File) {

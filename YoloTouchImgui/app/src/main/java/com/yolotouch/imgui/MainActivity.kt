@@ -11,6 +11,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import java.io.File
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
@@ -42,6 +43,18 @@ class MainActivity : AppCompatActivity() {
         }
 
         checkRootStatus()
+        showLastStatus()
+    }
+
+    /** 显示上次 CaptureService 写入的运行状态（失败原因在服务退出后仍可见） */
+    private fun showLastStatus() {
+        try {
+            val f = File(filesDir, "yolotouch_status.txt")
+            if (f.exists()) {
+                val s = f.readText().trim()
+                if (s.isNotEmpty()) statusText.text = s
+            }
+        } catch (_: Exception) {}
     }
 
     override fun onDestroy() {
