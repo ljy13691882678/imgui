@@ -4,17 +4,9 @@
 #include <algorithm>
 #include <cmath>
 
-// PID 风格自瞄控制器：结合死区、平滑、预判
+// PID 风格自瞄控制器：结合死区、平滑、预判（原版算法）
 class AimController {
 public:
-    struct Output {
-        bool   active = false;
-        float  deltaX = 0.0f;   // 归一化移动量（相对屏幕）
-        float  deltaY = 0.0f;
-        float  targetX = 0.0f;
-        float  targetY = 0.0f;
-    };
-
     void reset() {
         m_lastX = -1.0f;
         m_lastY = -1.0f;
@@ -22,9 +14,9 @@ public:
     }
 
     // screenCx/screenCy：准星位置（归一化），默认屏幕中心 0.5,0.5
-    Output compute(const AimTarget& target, const AimConfig& cfg,
+    AimOutput compute(const AimTarget& target, const AimConfig& cfg,
                    float screenCx, float screenCy, float dt) {
-        Output out;
+        AimOutput out;
         if (!cfg.aimEnabled || !cfg.enabled) return out;
 
         // 预判目标位置

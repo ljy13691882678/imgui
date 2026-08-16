@@ -3,6 +3,7 @@
 #include "aim_types.h"
 #include "kalman_tracker.h"
 #include "aim_controller.h"
+#include "aim_modes.h"
 #include "trigger_controller.h"
 #include "shared_mem_client.h"
 #include "inference/inference_engine.h"
@@ -86,7 +87,9 @@ static bool g_panelCollapsed = false;
 
 // 自瞄/触发控制器
 static KalmanTracker g_tracker;
-static AimController g_aim;
+static AimController g_aim;        // 原版（拖拽+平滑）
+static PidAimController g_pidAim;  // PID（移植自 YoloTouchHelp）
+static BezierAimController g_bezierAim; // 贝塞尔（移植自 YoloTouchHelp）
 static TriggerController g_trigger;
 
 // 自瞄虚拟手指状态（拖动视角式：手指保持按下，逐帧按增量移动，目标进入死区时抬起）
@@ -330,18 +333,35 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     float tzCx = (tzLpx + tzRpx) * 0.5f, tzCy = (tzTpx + tzBpx) * 0.5f;
 
     // ── 自瞄（拖动视角式）──
-    // 用 AimController 计算每帧增量，保持虚拟手指按下并逐帧移动，模拟人手拖屏转向。
-    // 目标进入死区后抬起手指停止转向。手指被 clamp 在触控区内。
+    // 三种算法：0=原版(拖拽+平滑) 1=PID 2=贝塞尔，均由控制器输出每帧增量，
+    // 这里保持虚拟手指按下并逐帧移动，模拟人手拖屏转向；目标进入死区后抬起手指。
+    // 手指被 clamp 在触控区内。
     if (g_touchReady && g_cfg.aimEnabled && g_cfg.enabled) {
-        auto out = g_aim.compute(aimTarget, g_cfg, screenCx, screenCy, dt);
+        AimOutput out;
+        switch (g_cfg.aimMode) {
+        case 1:
+            out = g_pidAim.compute(aimTarget, g_cfg, screenCx, screenCy, dt,
+                                   (float)scrW, (float)scrH);
+            break;
+        case 2:
+            out = g_bezierAim.compute(aimTarget, g_cfg, screenCx, screenCy, dt,
+                                      (float)scrW, (float)scrH);
+            break;
+        default:
+            out = g_aim.compute(aimTarget, g_cfg, screenCx, screenCy, dt);
+            break;
+        }
         if (out.active) {
-            // 归一化增量 → 像素拖拽量（× 拖拽灵敏度）
-            float dpx = out.deltaX * scrW * g_cfg.dragSens;
-            float dpy = out.deltaY * scrH * g_cfg.dragSens;
-            // 限制单帧最大拖拽像素，避免目标偏离过大时瞬移/抖动
-            float maxStep = (float)g_cfg.aimMaxStepPx;
-            float step = std::sqrt(dpx*dpx + dpy*dpy);
-            if (step > maxStep) { dpx *= maxStep / step; dpy *= maxStep / step; }
+            // 原版模式应用拖拽灵敏度（dragSens）；PID/贝塞尔内部已含增益，直接使用
+            float dragFactor = (g_cfg.aimMode == 0) ? g_cfg.dragSens : 1.0f;
+            float dpx = out.deltaX * scrW * dragFactor;
+            float dpy = out.deltaY * scrH * dragFactor;
+            // 原版模式限制单帧最大拖拽像素，避免目标偏离过大时瞬移/抖动
+            if (g_cfg.aimMode == 0) {
+                float maxStep = (float)g_cfg.aimMaxStepPx;
+                float step = std::sqrt(dpx*dpx + dpy*dpy);
+                if (step > maxStep) { dpx *= maxStep / step; dpy *= maxStep / step; }
+            }
 
             if (!g_aimFingerDown) {
                 // 手指从触控区中心按下
@@ -759,6 +779,27 @@ static void drawControlPanel() {
     }
 
     ImGui::Checkbox("自瞄", &g_cfg.aimEnabled);
+    // 自瞄算法切换：0=原版(拖拽+平滑) 1=PID 2=贝塞尔
+    {
+        static int lastMode = -1;
+        const char* modes[] = {"原版(拖拽+平滑)", "PID", "贝塞尔"};
+        int cur = g_cfg.aimMode;
+        if (cur < 0 || cur > 2) cur = 0;
+        if (ImGui::BeginCombo("自瞄算法", modes[cur])) {
+            for (int i = 0; i < 3; ++i) {
+                if (ImGui::Selectable(modes[i], i == cur)) g_cfg.aimMode = i;
+                if (i == cur) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        // 切换算法时重置对应控制器内部状态，避免跨算法串扰
+        if (g_cfg.aimMode != lastMode) {
+            if (g_cfg.aimMode == 1) g_pidAim.reset();
+            else if (g_cfg.aimMode == 2) g_bezierAim.reset();
+            else g_aim.reset();
+            lastMode = g_cfg.aimMode;
+        }
+    }
     // 自瞄锁定部位（按模型类别名 head/body 识别头部/身体框）
     {
         const char* parts[] = {"锁中心", "锁头部", "锁身体"};
@@ -818,6 +859,23 @@ static void drawControlPanel() {
     ImGui::SliderFloat("拖拽灵敏度", &g_cfg.dragSens, 0.1f, 2.0f);
     ImGui::SliderInt("最大步长(px)", &g_cfg.aimMaxStepPx, 4, 160);
     ImGui::SliderFloat("预判", &g_cfg.predictGain, 0.0f, 0.2f);
+    // 算法相关参数：仅在对应模式激活时显示
+    if (g_cfg.aimMode == 1) {
+        ImGui::Text("PID 参数");
+        ImGui::SliderFloat("P##pidKp", &g_cfg.pidKp, 0.01f, 2.0f);
+        ImGui::SliderFloat("I##pidKi", &g_cfg.pidKi, 0.0f, 0.2f);
+        ImGui::SliderFloat("D##pidKd", &g_cfg.pidKd, 0.0f, 0.5f);
+        ImGui::SliderFloat("采样周期(ms)", &g_cfg.pidSamplePeriodMs, 1.0f, 50.0f);
+    }
+    if (g_cfg.aimMode == 2) {
+        ImGui::Text("贝塞尔参数");
+        ImGui::SliderFloat("时长系数", &g_cfg.bezierDuration, 5.0f, 100.0f);
+    }
+    // PID/贝塞尔共用参数
+    if (g_cfg.aimMode == 1 || g_cfg.aimMode == 2) {
+        ImGui::SliderFloat("收敛阈值(px)", &g_cfg.convergeThresh, 1.0f, 60.0f);
+        ImGui::SliderFloat("移动平滑", &g_cfg.aimMoveSmooth, 0.0f, 0.95f);
+    }
     ImGui::Separator();
     // 触控区：自瞄拖拽注入区域（与游戏转向/瞄准区对齐）
     ImGui::Text("触控区(自瞄拖拽)");

@@ -17,6 +17,15 @@ struct AimTarget {
     int   lostCount = 0;    // 丢失帧数
 };
 
+// 自瞄控制器输出（归一化增量，相对屏幕；deltaX/deltaY 为屏幕占比）
+struct AimOutput {
+    bool   active = false;
+    float  deltaX = 0.0f;   // 归一化移动量（相对屏幕）
+    float  deltaY = 0.0f;
+    float  targetX = 0.0f;
+    float  targetY = 0.0f;
+};
+
 // 自瞄配置
 struct AimConfig {
     bool  enabled = true;
@@ -56,6 +65,19 @@ struct AimConfig {
     // 瞄准点时间平滑（EMA，0~1）：同一跟踪目标对瞄准点做指数移动平均，
     // 压掉检测框抖动/拖视角反馈振荡（越大越平滑，0=关闭）
     float aimPointSmooth = 0.75f;
+    // 自瞄算法：0=原版(拖拽+平滑) 1=PID 2=贝塞尔（移植自 YoloTouchHelp）
+    int   aimMode = 0;
+    // PID 参数（executeAimingPid 移植）
+    float pidKp = 0.30f;          // 比例系数
+    float pidKi = 0.02f;          // 积分系数
+    float pidKd = 0.08f;          // 微分系数
+    float pidSamplePeriodMs = 8.0f; // PID 采样周期（固定值，ms）
+    // 贝塞尔参数（executeAimingBezier 移植，slow-fast-slow smoothstep 计时）
+    float bezierDuration = 30.0f; // 贝塞尔移动时长基准（ms 系数，最终随距离调整）
+    // 收敛阈值（像素）：|误差| 小于该值认为已对准，停止拖拽（PID/贝塞尔共用）
+    float convergeThresh = 10.0f;
+    // 输出移动平滑（PID/贝塞尔共用，0~0.95，越大越平滑）
+    float aimMoveSmooth = 0.35f;
     // 自瞄类别锁定：-1=所有启用类别；>=0=仅锁定该类（模型类别索引，面板按类别名选择）
     int   aimClass = -1;
 
