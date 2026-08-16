@@ -531,13 +531,11 @@ bool touch_init(int screenW, int screenH, int rotation) {
     int touchMaxX = g_devices[0].absX.maximum;
     int touchMaxY = g_devices[0].absY.maximum;
 
+    // touch_init 只做设备扫描与坐标准备（供 ImGui 交互/区域判断），默认不创建
+    // uinput 注入设备——需要自瞄/扳机/压枪时由面板“初始化触摸”调用 touch_inject_init。
     // 触摸注入统一走 uinput：内核驱动 Touch_Init 会接管/拦截真实触摸
     // （驱动接管后系统/游戏收不到物理手指），因此内核模式也不再调用驱动触摸接口；
     // 内核驱动仅保留陀螺仪（自瞄旋转注入）。
-    if (!createUinputDevice(touchMaxX, touchMaxY, g_devices[0].fd)) {
-        closeTouchLocked();
-        return false;
-    }
 
     for (auto& device : g_devices) {
         device.s2tx = static_cast<float>(touchMaxX) / std::max(1, device.absX.maximum);
@@ -565,6 +563,37 @@ void touch_close(void) {
 
 bool touch_is_initialized(void) { return g_initialized; }
 int  touch_get_output_fd(void)   { return g_outputFd; }
+
+// uinput 注入设备是否已就绪（触摸注入可用）
+bool touch_inject_ready(void) { return g_initialized && g_outputFd > 0; }
+
+// 按需创建 uinput 注入设备（触摸注入就绪）。
+// touch_init 默认不创建；自瞄/扳机/压枪需要注入时由面板“初始化触摸”调用。
+bool touch_inject_init(void) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    if (!g_initialized || g_devices.empty()) return false;
+    if (g_outputFd > 0) return true;  // 已就绪
+    const int touchMaxX = std::max(1, g_devices[0].absX.maximum);
+    const int touchMaxY = std::max(1, g_devices[0].absY.maximum);
+    if (!createUinputDevice(touchMaxX, touchMaxY, g_devices[0].fd)) {
+        LOGE("touch inject init failed (need root + /dev/uinput)");
+        return false;
+    }
+    LOGD("touch inject ready (uinput)");
+    return true;
+}
+
+// 销毁 uinput 注入设备（停止触摸注入）
+void touch_inject_close(void) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    if (g_outputFd > 0) {
+        ioctl(g_outputFd, UI_DEV_DESTROY);
+        close(g_outputFd);
+        g_outputFd = 0;
+    }
+    g_uploadedFingerDown = {};
+    LOGD("touch inject closed");
+}
 
 void touch_start_readers(void) {
     if (g_running) return;

@@ -39,6 +39,14 @@ void touch_down(int slot, int id, int screenX, int screenY);
 void touch_move(int slot, int screenX, int screenY);
 void touch_up(int slot);
 
+// 触摸注入（uinput）按需初始化：touch_init 只做设备扫描/坐标准备并启动 reader
+// （供 ImGui 交互与区域判断），默认不创建 uinput 注入设备。
+// 需要自瞄/扳机/压枪注入时，先调用 touch_inject_init()；陀螺仪自瞄走内核驱动，
+// 不依赖此初始化。
+bool touch_inject_init(void);   // 创建 uinput 注入设备（触摸注入就绪）
+void touch_inject_close(void);  // 销毁 uinput 注入设备（停止触摸注入）
+bool touch_inject_ready(void);  // uinput 注入是否已就绪
+
 // 内核陀螺仪：自瞄旋转注入（仅内核模式可用；uinput 模式下调用无效果）。
 // pitch/yaw 单位为度，rotation 为屏幕方向（0/1/2/3）。
 bool touch_kernel_gyro_init(void);

@@ -53,6 +53,9 @@ static int g_rotation = 0;
 
 // 触摸注入
 static bool g_touchReady = false;
+// 触摸注入（uinput）是否已就绪：未初始化时触摸自瞄/扳机/压枪不注入；
+// 陀螺仪自瞄走内核驱动，不依赖此状态。
+static bool injectReady() { return g_touchReady && touch_inject_ready(); }
 
 // 共享内存
 static ShmFrameReader* g_shm = nullptr;
@@ -420,7 +423,7 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     // 先按配置同步触发区到 touch_core，再让 reader 线程做硬件手指检测。
     // 提前执行以取得 hold（按住开火/扫射）状态，供压枪使用。
     bool trigHold = false;
-    if (g_touchReady && g_cfg.triggerEnabled && g_cfg.enabled) {
+    if (injectReady() && g_cfg.triggerEnabled && g_cfg.enabled) {
         int fzL = (int)(g_cfg.fireZoneL * scrW), fzT = (int)(g_cfg.fireZoneT * scrH);
         int fzR = (int)(g_cfg.fireZoneR * scrW), fzB = (int)(g_cfg.fireZoneB * scrH);
         touch_set_fire_zone(fzL, fzT, fzR, fzB);
@@ -502,7 +505,7 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     // 触发条件：触摸输出模式（陀螺仪自瞄时禁用，避免互相干扰）+ 扳机按住开火（hold）。
     // 开始时间：按住开火持续到 recoilStartMs 后开始下拉；
     // 力度：每帧下拉 recoilStrength(px/s) × dt 像素，模拟人手持续下拉压枪。
-    const bool recoilArmed = g_touchReady && g_cfg.enabled && !zoneEditing &&
+    const bool recoilArmed = injectReady() && g_cfg.enabled && !zoneEditing &&
                              g_cfg.recoilEnabled && !gyroMode && g_cfg.recoilStrength > 0;
     if (recoilArmed && trigHold) {
         if (!g_recoilFiring) { g_recoilFiring = true; g_recoilStartMs = now; }
@@ -526,7 +529,7 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         g_aimActive = true;
         g_aimX = out.targetX;
         g_aimY = out.targetY;
-    } else if (aimActiveNow || recoilPulling) {
+    } else if (injectReady() && (aimActiveNow || recoilPulling)) {
         if (gyroMode) touch_gyro_stop();
         // 视角手指：自瞄增量 + 压枪下拉合并移动
         float dx = dpx;
@@ -1203,6 +1206,32 @@ static void drawControlPanel() {
             }
             if (g_cfg.injectMode == 1) ImGui::TextDisabled("触摸走 uinput，内核驱动仅用于陀螺仪自瞄（需已加载 TimeDriver）");
         }
+        // 触摸注入（uinput）初始化状态：默认未初始化，需要自瞄/扳机/压枪时点击初始化
+        {
+            bool injReady = touch_inject_ready();
+            if (injReady)
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.3f, 1.0f), "触摸已初始化");
+            else
+                ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "触摸未初始化");
+            if (!injReady) {
+                if (ImGui::Button("初始化触摸")) {
+                    if (touch_inject_init())
+                        printf("touch injection initialized\n");
+                    else
+                        fprintf(stderr, "touch injection init failed\n");
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("需要自瞄/扳机/压枪");
+            } else {
+                if (ImGui::Button("停止触摸")) {
+                    g_aimFingerDown = false;
+                    g_triggerDown = false;
+                    touch_inject_close();
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("已注入合成触摸");
+            }
+        }
         // 注入状态：内核驱动连接成功则显示"驱动已连接"
         if (g_cfg.injectMode == 1) {
             if (touch_kernel_connected())
@@ -1219,10 +1248,6 @@ static void drawControlPanel() {
                                    (unsigned)TIME_SDK_EXPECTED_DRIVER_VERSION);
             else
                 ImGui::TextDisabled("驱动版本: %u", ver);
-        } else {
-            ImGui::TextColored(g_touchReady ? ImVec4(0.2f, 1.0f, 0.3f, 1.0f)
-                                            : ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
-                               g_touchReady ? "uinput 已就绪" : "uinput 未就绪");
         }
         ImGui::Checkbox("陀螺仪自瞄", &g_cfg.gyroAim);
         ImGui::SameLine();
@@ -1372,13 +1397,13 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    // 初始化触摸注入（injectMode：0=uinput，1=内核驱动触摸 TimeDriver）
+    // 初始化触摸（injectMode：0=uinput，1=内核驱动 TimeDriver）。
+    // 默认不初始化 uinput 注入设备（面板“初始化触摸”按需开启）；
+    // touch_init 仅扫描设备、准备坐标系并启动 reader，供 ImGui 交互与区域判断。
     touch_set_kernel_mode(g_cfg.injectMode == 1);
     g_touchReady = touch_init(native_window_screen_x, native_window_screen_y, g_rotation);
     if (g_touchReady) {
         touch_set_screen_params(native_window_screen_x, native_window_screen_y, g_rotation);
-        // 内核模式：预初始化陀螺仪 hook，面板随时可切 gyroAim 生效
-        if (touch_kernel_mode()) touch_kernel_gyro_init();
         // 初始同步触发区（默认右下角区域）
         int fzL = (int)(g_cfg.fireZoneL * native_window_screen_x);
         int fzT = (int)(g_cfg.fireZoneT * native_window_screen_y);
@@ -1386,10 +1411,12 @@ int main(int argc, char* argv[]) {
         int fzB = (int)(g_cfg.fireZoneB * native_window_screen_y);
         touch_set_fire_zone(fzL, fzT, fzR, fzB);
         touch_start_readers();
-        printf("touch injection ready\n");
+        printf("touch reader ready\n");
     } else {
-        fprintf(stderr, "touch_init failed (need root + uinput)\n");
+        fprintf(stderr, "touch_init failed (need root)\n");
     }
+    // 内核驱动连接与陀螺仪 hook：与 uinput 注入无关，内核模式下启动即初始化
+    if (touch_kernel_mode()) touch_kernel_gyro_init();
 
     // 初始化推理引擎
     auto engine = std::make_unique<LiteRtEngine>();
