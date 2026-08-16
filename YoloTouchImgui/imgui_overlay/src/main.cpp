@@ -60,6 +60,8 @@ static std::vector<Detection> g_detections;
 static std::vector<AimTarget> g_tracks;
 static std::atomic<uint64_t> g_inferFps{0};
 static std::atomic<uint64_t> g_frameCount{0};
+// 最近一帧处理耗时（ms，含推理），供面板/日志诊断 QNN 是否过慢
+static std::atomic<long long> g_lastFrameMs{0};
 
 // 控制配置
 static AimConfig g_cfg;
@@ -237,10 +239,14 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
 // ---------------------------------------------------------------------------
 static std::atomic<bool> g_inferRunning{false};
 
+// 最近一次 processFrame 完成时刻（ms），用于主循环诊断推理是否卡死
+static std::atomic<long long> g_lastFrameDoneMs{0};
+
 static void inferenceLoop() {
     uint64_t frames = 0;
     long long lastFpsMs = getTimeNowMs();
     long long lastNoFrameLog = getTimeNowMs();
+    long long lastStuckLog = getTimeNowMs();
     bool everGotFrame = false;
 
     while (g_inferRunning.load()) {
@@ -255,14 +261,17 @@ static void inferenceLoop() {
             if (now - lastNoFrameLog >= 5000) {
                 lastNoFrameLog = now;
                 printf("[infer] no new frame for 5s, everGotFrame=%d, shmSeq=%u\n",
-                       everGotFrame ? 1 : 0,
-                       g_shm->header() ? g_shm->header()->lastSeq : 0u);
+                       everGotFrame ? 1 : 0, g_shm->readSeq());
             }
             std::this_thread::sleep_for(5ms);
             continue;
         }
         everGotFrame = true;
-        processFrame(frame, g_shm->header());
+
+        long long frameStart = getTimeNowMs();
+        processFrame(frame, g_shm->freshHeader());
+        g_lastFrameMs.store(getTimeNowMs() - frameStart);
+        g_lastFrameDoneMs.store(getTimeNowMs());
         frames++;
 
         // FPS 统计
@@ -271,6 +280,16 @@ static void inferenceLoop() {
             g_inferFps.store(frames * 1000 / (now - lastFpsMs));
             frames = 0;
             lastFpsMs = now;
+        }
+
+        // 诊断：帧源在产帧但单帧处理超时（大概率 QNN invoke 卡死）
+        if (g_lastFrameMs.load() > 3000 && now - lastStuckLog >= 5000) {
+            lastStuckLog = now;
+            printf("[infer] frame took %lld ms (>=3000ms)! backend=%s, "
+                   "shmSeq=%u, processed=%llu\n",
+                   g_lastFrameMs.load(),
+                   g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "?",
+                   g_shm->readSeq(), (unsigned long long)g_frameCount.load());
         }
     }
 }
@@ -315,6 +334,14 @@ static void drawDetectionOverlay() {
     }
 }
 
+// 退出进程：立即终止本进程。
+// 用 _exit 而不走主循环退出+join，避免推理线程卡在 QNN invoke 时 join 阻塞导致无法退出。
+static void exitImgui() {
+    main_thread_flag = false;
+    fflush(stdout);
+    _exit(0);
+}
+
 static void drawControlPanel() {
     ImGui::SetNextWindowPos(ImVec2(20, 80), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(360, 580), ImGuiCond_FirstUseEver);
@@ -329,9 +356,11 @@ static void drawControlPanel() {
         }
     }
     ImGui::Text("帧: %ux%u 旋转=%d", g_shmWidth, g_shmHeight, g_rotation);
-    ImGui::Text("推理: %llu FPS  帧源序号: %u",
+    ImGui::Text("推理: %llu FPS  帧源序号: %u  已处理: %llu 帧",
                 (unsigned long long)g_inferFps.load(),
-                g_shm && g_shm->valid() ? g_shm->header()->lastSeq : 0u);
+                g_shm && g_shm->valid() ? g_shm->readSeq() : 0u,
+                (unsigned long long)g_frameCount.load());
+    ImGui::Text("最近推理耗时: %lld ms", (long long)g_lastFrameMs.load());
     ImGui::Separator();
 
     // 模型选择
@@ -372,6 +401,10 @@ static void drawControlPanel() {
     if (ImGui::Button("应用置信度")) {
         if (g_engine) g_engine->setConfidence(g_cfg.confidence);
     }
+    ImGui::Separator();
+    if (ImGui::Button("退出进程", ImVec2(-1, 0))) {
+        exitImgui();
+    }
     ImGui::End();
 }
 
@@ -384,6 +417,9 @@ static void drawMiniPanel() {
     ImGui::SameLine();
     ImGui::Text("%s", g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "无");
     ImGui::Text("推理: %llu FPS", (unsigned long long)g_inferFps.load());
+    if (ImGui::Button("退出")) {
+        exitImgui();
+    }
     ImGui::End();
 }
 
@@ -475,6 +511,7 @@ int main(int argc, char* argv[]) {
 
     // 主循环
     bool lastFingerDown = false;
+    long long lastWatchdogLog = getTimeNowMs();
     while (main_thread_flag) {
         // 喂入触摸输入：把真实物理手指坐标转成 ImGui 鼠标输入，
         // 使悬浮窗（SurfaceFlinger 直接创建，不经系统 InputDispatcher）可交互。
@@ -493,6 +530,19 @@ int main(int argc, char* argv[]) {
                 io.AddMouseButtonEvent(0, false);
             }
             lastFingerDown = down;
+        }
+
+        // 看门狗：推理线程连续 10s 未完成一帧 → 写入日志
+        long long now = getTimeNowMs();
+        long long lastDone = g_lastFrameDoneMs.load();
+        if (lastDone > 0 && now - lastDone > 10000 && now - lastWatchdogLog > 10000) {
+            lastWatchdogLog = now;
+            fprintf(stderr, "[WATCHDOG] inference thread no frame for 10s! "
+                    "engine=%s shmSeq=%u processed=%llu lastFrameMs=%lld\n",
+                    g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "?",
+                    g_shm ? g_shm->readSeq() : 0u,
+                    (unsigned long long)g_frameCount.load(),
+                    (long long)g_lastFrameMs.load());
         }
 
         drawBegin();
