@@ -585,11 +585,13 @@ class CaptureService : Service() {
             // 读取 C++ 面板请求的裁剪尺寸（cropRequest，offset 44）。每帧都读，
             // 读到合法新值立即应用（不做 delete+重建，C++ 侧持有旧文件 fd 会失效）。
             var crop = activeCrop
+            var consumedReq = -1  // 本帧已消费的裁剪请求（-1=无）
             if (raf.length() >= 48L) {
                 raf.seek(44L)
                 val req = readIntLE(raf)
                 if (req != -1 && req != activeCrop && CROP_OPTIONS.contains(req)) {
                     diagLog("C++ 请求切换裁剪尺寸: $req (原 ${activeCrop})")
+                    consumedReq = req
                     activeCrop = req
                     crop = req
                 }
@@ -636,6 +638,10 @@ class CaptureService : Service() {
 
             // 更新 header（全屏尺寸 + 裁剪信息 + 序号 + 写帧诊断计数）
             writeSuccesses.incrementAndGet()
+            // 写头部前复查 cropRequest：若 C++ 在本帧写帧期间又发了新请求，保留它
+            // 不覆盖。否则请求会被 -1 回写覆盖丢失，导致“切到全屏后无法切回其他尺寸”。
+            raf.seek(44L)
+            val currentReq = if (raf.length() >= 48L) readIntLE(raf) else -1
             raf.seek(0)
             val hdr = ByteBuffer.allocate(SHM_HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN)
             hdr.putInt(SHM_MAGIC.toInt())
@@ -649,7 +655,8 @@ class CaptureService : Service() {
             hdr.putInt(if (fullScreen) 0 else rows)  // cropSize: 0=全屏
             hdr.putInt(offX)
             hdr.putInt(offY)
-            hdr.putInt(-1) // cropRequest 已消费，回写 -1(0xFFFFFFFF)=无请求
+            // 已消费的请求回写 -1(0xFFFFFFFF)=无请求；期间新到的请求原样保留
+            hdr.putInt(if (consumedReq != -1 && currentReq == consumedReq) -1 else currentReq)
             hdr.putLong(writeAttempts.get())
             hdr.putLong(writeSuccesses.get())
             hdr.putLong(acquireNulls.get())

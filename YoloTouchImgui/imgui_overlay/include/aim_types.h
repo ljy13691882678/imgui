@@ -47,10 +47,15 @@ struct AimConfig {
     float aimSpeed = 1.0f;         // 速度增益
     float predictGain = 0.05f;     // 预判增益（秒）
     int   aimLockTimeMs = 300;     // 锁定时间
+    // 自瞄锁定部位：0=中心 1=头部 2=身体（按目标框计算瞄准点，头部/身体按类别名 head/body 识别）
+    int   aimPart = 0;
+    // 自瞄拖拽灵敏度（拖动视角式）：归一化增量 × 屏幕 × dragSens → 每帧拖拽像素
+    float dragSens = 0.5f;
 
     // 触发参数
     float triggerSensitivity = 0.5f;
     bool  triggerHold = false;
+    int   triggerCooldownMs = 150; // 点射模式两次开火最小间隔（毫秒）
 
     // 目标选择
     int   selectMode = 0;          // 0=最近中心 1=最大框 2=最接近准星

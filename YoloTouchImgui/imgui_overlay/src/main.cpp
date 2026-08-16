@@ -87,6 +87,46 @@ static KalmanTracker g_tracker;
 static AimController g_aim;
 static TriggerController g_trigger;
 
+// 自瞄虚拟手指状态（拖动视角式：手指保持按下，逐帧按增量移动，目标进入死区时抬起）
+static bool   g_aimFingerDown = false;
+static float  g_aimFingerX = 0.0f, g_aimFingerY = 0.0f;
+// 扳机虚拟手指状态（按住模式需保持按下，并在目标离开/停用时抬起）
+static bool   g_triggerDown = false;
+
+// 根据锁定部位计算瞄准点（归一化坐标）。
+// part: 0=中心 1=头部 2=身体。头部/身体按模型类别名 head/body 识别：
+//   - 锁头部：head 类框直接用框中心，全身框用上部 12% 高度处
+//   - 锁身体：body 类框用框中心，其他框用中上部（胸口）45% 高度处
+static void computeAimPoint(const AimTarget& t, int part, float* ax, float* ay) {
+    float x = t.cx;
+    float y = t.cy;
+    float h = t.y2 - t.y1;
+    if (part == 1 || part == 2) {
+        const char* cn = g_engine ? g_engine->getClassName(t.classId) : nullptr;
+        bool isHead = cn && (strstr(cn, "head") || strstr(cn, "Head"));
+        bool isBody = cn && (strstr(cn, "body") || strstr(cn, "Body"));
+        if (part == 1) {
+            y = t.y1 + h * (isHead ? 0.5f : 0.12f);
+        } else {
+            y = t.y1 + h * (isBody ? 0.5f : 0.45f);
+        }
+    }
+    *ax = x;
+    *ay = y;
+}
+
+// 释放自瞄/扳机的虚拟手指（目标丢失/功能停用时调用，避免手指卡在屏幕上）
+static void releaseAimFingers() {
+    if (g_aimFingerDown) {
+        if (g_touchReady) touch_up(TOUCH_VIRTUAL_SLOT);
+        g_aimFingerDown = false;
+    }
+    if (g_triggerDown) {
+        if (g_touchReady) touch_up(TOUCH_TRIGGER_SLOT);
+        g_triggerDown = false;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 时间工具
 // ---------------------------------------------------------------------------
@@ -222,7 +262,9 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     }
 
     if (tracks.empty()) {
+        // 目标全部丢失：释放自瞄/扳机虚拟手指，避免卡在屏幕上
         g_aimActive = false;
+        releaseAimFingers();
         return;
     }
 
@@ -241,41 +283,108 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         }
         if (score > bestScore) { bestScore = score; pick = &t; }
     }
-    if (!pick) { g_aimActive = false; return; }
-
-    // 触摸注入（uinput）
-    if (g_touchReady && g_cfg.aimEnabled && g_cfg.enabled) {
-        int screenW = g_shmWidth > 0 ? g_shmWidth : native_window_screen_x;
-        int screenH = g_shmHeight > 0 ? g_shmHeight : native_window_screen_y;
-
-        float aimX = (float)native_window_screen_x / 2.0f;
-        float aimY = (float)native_window_screen_y / 2.0f;
-        float tx = pick->cx * screenW;
-        float ty = pick->cy * screenH;
-
-        // 相对移动：移动到目标位置（模拟拖动视角）
-        // 通过 touch_move 平滑移动
-        touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID, (int)aimX, (int)aimY);
-        touch_move(TOUCH_VIRTUAL_SLOT, (int)tx, (int)ty);
-        touch_up(TOUCH_VIRTUAL_SLOT);
-        g_aimActive = true;
-        g_aimX = pick->cx;
-        g_aimY = pick->cy;
+    if (!pick) {
+        g_aimActive = false;
+        releaseAimFingers();
+        return;
     }
 
-    // 触发
+    // 按锁定部位调整瞄准点（复制目标，把中心替换为 head/body/center 点）
+    AimTarget aimTarget = *pick;
+    {
+        float ax, ay;
+        computeAimPoint(*pick, g_cfg.aimPart, &ax, &ay);
+        aimTarget.cx = ax;
+        aimTarget.cy = ay;
+    }
+
+    // ── 自瞄（拖动视角式）──
+    // 用 AimController 计算每帧增量，保持虚拟手指按下并逐帧移动，模拟人手拖屏转向。
+    // 目标进入死区后抬起手指停止转向。
+    if (g_touchReady && g_cfg.aimEnabled && g_cfg.enabled) {
+        auto out = g_aim.compute(aimTarget, g_cfg, screenCx, screenCy, dt);
+        if (out.active) {
+            int scrW = native_window_screen_x;
+            int scrH = native_window_screen_y;
+            // 归一化增量 → 像素拖拽量（× 拖拽灵敏度）
+            float dpx = out.deltaX * scrW * g_cfg.dragSens;
+            float dpy = out.deltaY * scrH * g_cfg.dragSens;
+            // 限制单帧最大拖拽像素，避免目标偏离过大时瞬移/抖动
+            const float maxStep = 40.0f;
+            float step = std::sqrt(dpx*dpx + dpy*dpy);
+            if (step > maxStep) { dpx *= maxStep / step; dpy *= maxStep / step; }
+
+            if (!g_aimFingerDown) {
+                // 手指从屏幕中心按下
+                g_aimFingerX = scrW * 0.5f;
+                g_aimFingerY = scrH * 0.5f;
+                touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
+                           (int)g_aimFingerX, (int)g_aimFingerY);
+                g_aimFingerDown = true;
+            }
+            g_aimFingerX = std::clamp(g_aimFingerX + dpx, 0.0f, (float)scrW);
+            g_aimFingerY = std::clamp(g_aimFingerY + dpy, 0.0f, (float)scrH);
+            touch_move(TOUCH_VIRTUAL_SLOT, (int)g_aimFingerX, (int)g_aimFingerY);
+            // 拖到远离起点（或触到屏幕边缘）时抬手回中心再按下，模拟人手重新起指，
+            // 保证目标在屏幕边缘也能持续转向（游戏累积每段拖拽的旋转量）
+            float cx = scrW * 0.5f, cy = scrH * 0.5f;
+            float drift = std::sqrt((g_aimFingerX - cx) * (g_aimFingerX - cx) +
+                                    (g_aimFingerY - cy) * (g_aimFingerY - cy));
+            if (drift > std::max(scrW, scrH) * 0.3f) {
+                touch_up(TOUCH_VIRTUAL_SLOT);
+                g_aimFingerX = cx;
+                g_aimFingerY = cy;
+                touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
+                           (int)g_aimFingerX, (int)g_aimFingerY);
+            }
+            g_aimActive = true;
+            g_aimX = out.targetX;
+            g_aimY = out.targetY;
+        } else {
+            // 目标已进入死区：抬起手指，停止转向
+            if (g_aimFingerDown) {
+                touch_up(TOUCH_VIRTUAL_SLOT);
+                g_aimFingerDown = false;
+            }
+            g_aimActive = false;
+        }
+    } else {
+        // 自瞄未启用：确保虚拟手指抬起
+        if (g_aimFingerDown) {
+            touch_up(TOUCH_VIRTUAL_SLOT);
+            g_aimFingerDown = false;
+        }
+        g_aimActive = false;
+    }
+
+    // ── 扳机（点射/按住可切换）──
     if (g_touchReady && g_cfg.triggerEnabled && g_cfg.enabled) {
-        bool fire = false, hold = false;
+        bool fireOnce = false, hold = false, holdRelease = false;
         bool fingerDown = touch_is_finger_in_fire_zone();
-        g_trigger.update(*pick, g_cfg, 0.5f, 0.5f, fingerDown, fire, hold);
-        if (fire) {
+        g_trigger.update(aimTarget, g_cfg, screenCx, screenCy, fingerDown,
+                         fireOnce, hold, holdRelease);
+        if (fireOnce) {
+            // 点射：一次 touch_down + touch_up 点击
+            if (g_triggerDown) { touch_up(TOUCH_TRIGGER_SLOT); g_triggerDown = false; }
             touch_down(TOUCH_TRIGGER_SLOT, TOUCH_TRIGGER_ID,
                        native_window_screen_x / 2, native_window_screen_y / 2);
             touch_up(TOUCH_TRIGGER_SLOT);
         } else if (hold) {
-            touch_down(TOUCH_TRIGGER_SLOT, TOUCH_TRIGGER_ID,
-                       native_window_screen_x / 2, native_window_screen_y / 2);
+            // 按住：保持按下
+            if (!g_triggerDown) {
+                touch_down(TOUCH_TRIGGER_SLOT, TOUCH_TRIGGER_ID,
+                           native_window_screen_x / 2, native_window_screen_y / 2);
+                g_triggerDown = true;
+            }
+        } else if (holdRelease || g_triggerDown) {
+            // 目标离开触发区/切回点射：抬起虚拟手指
+            touch_up(TOUCH_TRIGGER_SLOT);
+            g_triggerDown = false;
         }
+    } else if (g_triggerDown) {
+        // 扳机未启用：确保抬起
+        touch_up(TOUCH_TRIGGER_SLOT);
+        g_triggerDown = false;
     }
 }
 
@@ -330,6 +439,8 @@ static void inferenceLoop() {
                 g_inferFps.store(0);
                 printf("[infer] 推理已停止\n");
             }
+            // 推理停止后不再有 processFrame 来释放虚拟手指，这里主动抬起
+            releaseAimFingers();
             std::this_thread::sleep_for(10ms);
             continue;
         }
@@ -590,16 +701,31 @@ static void drawControlPanel() {
     }
 
     ImGui::Checkbox("自瞄", &g_cfg.aimEnabled);
+    // 自瞄锁定部位（按模型类别名 head/body 识别头部/身体框）
+    {
+        const char* parts[] = {"锁中心", "锁头部", "锁身体"};
+        const char* preview = parts[g_cfg.aimPart];
+        if (g_cfg.aimPart < 0 || g_cfg.aimPart > 2) preview = parts[0];
+        if (ImGui::BeginCombo("锁定部位", preview)) {
+            for (int i = 0; i < 3; ++i) {
+                if (ImGui::Selectable(parts[i], i == g_cfg.aimPart)) g_cfg.aimPart = i;
+                if (i == g_cfg.aimPart) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+    }
     ImGui::SliderFloat("死区", &g_cfg.deadZone, 0.005f, 0.1f);
     ImGui::SliderFloat("X 平滑", &g_cfg.smoothX, 0.0f, 0.95f);
     ImGui::SliderFloat("Y 平滑", &g_cfg.smoothY, 0.0f, 0.95f);
     ImGui::SliderFloat("自瞄速度", &g_cfg.aimSpeed, 0.1f, 3.0f);
+    ImGui::SliderFloat("拖拽灵敏度", &g_cfg.dragSens, 0.1f, 2.0f);
     ImGui::SliderFloat("预判", &g_cfg.predictGain, 0.0f, 0.2f);
     ImGui::Separator();
 
     ImGui::Checkbox("扳机", &g_cfg.triggerEnabled);
     ImGui::SliderFloat("扳机灵敏度", &g_cfg.triggerSensitivity, 0.1f, 1.0f);
     ImGui::Checkbox("扳机按住", &g_cfg.triggerHold);
+    ImGui::SliderInt("点射间隔(ms)", &g_cfg.triggerCooldownMs, 0, 500);
 
     if (ImGui::Button("应用置信度")) {
         if (g_engine) g_engine->setConfidence(g_cfg.confidence);
@@ -716,6 +842,7 @@ int main(int argc, char* argv[]) {
     // 主循环
     bool lastFingerDown = false;
     long long lastWatchdogLog = getTimeNowMs();
+    long long lastCropResendMs = getTimeNowMs();
     while (main_thread_flag) {
         // 喂入触摸输入：把真实物理手指坐标转成 ImGui 鼠标输入，
         // 使悬浮窗（SurfaceFlinger 直接创建，不经系统 InputDispatcher）可交互。
@@ -747,6 +874,22 @@ int main(int argc, char* argv[]) {
                     (unsigned long long)g_frameCount.load(),
                     (long long)g_lastFrameMs.load(),
                     g_shm && g_shm->valid() ? g_shm->diag().c_str() : "no-shm");
+        }
+
+        // 裁剪尺寸自愈：面板选定的目标与 APK 实际应用值不一致时，每 200ms 重发
+        // 裁剪请求。修复“切到全屏后无法切回其他尺寸”的锁死——cropRequest 是一次性
+        // 消息，可能被 APK 写头部覆盖丢失；这里周期性对账并自动补发，直到 APK
+        // 应用为止，不依赖用户再次点击同一项。
+        if (g_shm && g_shm->valid()) {
+            long long now = getTimeNowMs();
+            if (now - lastCropResendMs >= 200) {
+                lastCropResendMs = now;
+                int target = CROP_OPTIONS[g_cfg.cropIndex];
+                int actual = (int)g_shm->readHeader().cropSize;
+                if (actual != target) {
+                    g_shm->requestCrop(target);
+                }
+            }
         }
 
         drawBegin();
