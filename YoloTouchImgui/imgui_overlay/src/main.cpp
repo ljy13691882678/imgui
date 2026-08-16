@@ -500,13 +500,14 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         }
     }
 
-    // ── 压枪（开火按住时视角自动下拉补偿后坐力）──
-    // 触发条件：扳机按住开火（hold）。
-    // 开始时间：按住开火持续到 recoilStartMs 后开始下拉；
+    // ── 压枪（检测物理触摸开枪键，视角自动下拉补偿后坐力）──
+    // 独立功能：不依赖扳机（自动开火）。当检测到物理手指按在“开枪区域”
+    // （fire zone）时启动压枪计时。
+    // 开始时间：开枪键按住持续到 recoilStartMs 后开始下拉；
     // 力度：每帧下拉 recoilStrength(px/s) × dt 像素，模拟人手持续下拉压枪。
     const bool recoilArmed = injectReady() && g_cfg.enabled && !zoneEditing &&
                              g_cfg.recoilEnabled && g_cfg.recoilStrength > 0;
-    if (recoilArmed && trigHold) {
+    if (recoilArmed && touch_is_finger_in_fire_zone()) {
         if (!g_recoilFiring) { g_recoilFiring = true; g_recoilStartMs = now; }
     } else {
         g_recoilFiring = false;
@@ -689,13 +690,13 @@ static void drawDetectionOverlay() {
                      g_cfg.touchZoneL, g_cfg.touchZoneT, g_cfg.touchZoneR, g_cfg.touchZoneB);
             draw->AddText(ImVec2(zl + 4, zt + 20), IM_COL32(0, 170, 255, 255), infolbl);
         }
-        // 触发区（扳机暂停区，玩家物理手指在此区域内时自动开火暂停）：红色半透明
+        // 开枪区（玩家物理手指按在此区域即视为按着开枪键；用于压枪触发/扳机暂停）：红色半透明
         {
             float zl = g_cfg.fireZoneL * sx, zt = g_cfg.fireZoneT * sy;
             float zr = g_cfg.fireZoneR * sx, zb = g_cfg.fireZoneB * sy;
             draw->AddRectFilled(ImVec2(zl, zt), ImVec2(zr, zb), IM_COL32(255, 70, 70, 32));
             draw->AddRect(ImVec2(zl, zt), ImVec2(zr, zb), IM_COL32(255, 70, 70, 230), 0.0f, 0, 2.0f);
-            draw->AddText(ImVec2(zl + 4, zt + 4), IM_COL32(255, 110, 110, 255), "触发区(扳机)");
+            draw->AddText(ImVec2(zl + 4, zt + 4), IM_COL32(255, 110, 110, 255), "开枪区");
             char infolbl[48];
             snprintf(infolbl, sizeof(infolbl), "L%.2f T%.2f R%.2f B%.2f",
                      g_cfg.fireZoneL, g_cfg.fireZoneT, g_cfg.fireZoneR, g_cfg.fireZoneB);
@@ -832,7 +833,7 @@ static void drawZoneEditor() {
     case 2:
         zL = &g_cfg.fireZoneL; zT = &g_cfg.fireZoneT;
         zR = &g_cfg.fireZoneR; zB = &g_cfg.fireZoneB;
-        color = IM_COL32(255, 70, 70, 255); label = "触发区(扳机)"; break;
+        color = IM_COL32(255, 70, 70, 255); label = "开枪区"; break;
     case 3:
         zL = &g_cfg.aimTriggerZoneL; zT = &g_cfg.aimTriggerZoneT;
         zR = &g_cfg.aimTriggerZoneR; zB = &g_cfg.aimTriggerZoneB;
@@ -1220,7 +1221,7 @@ static void drawControlPanel() {
         // 区域拖拽编辑：在悬浮窗上直接拖动控制点调整区域大小和位置（扳机区改为拖拽调整）
         ImGui::Text("区域编辑(拖拽调整)");
         {
-            const char* zmodes[] = {"关闭", "触控区", "触发区(扳机)", "自瞄触发区", "倍镜区"};
+            const char* zmodes[] = {"关闭", "触控区", "开枪区", "自瞄触发区", "倍镜区"};
             int cur = g_cfg.zoneEditTarget;
             if (cur < 0 || cur > 4) cur = 0;
             if (ImGui::BeginCombo("编辑区域", zmodes[cur])) {
@@ -1263,17 +1264,12 @@ static void drawControlPanel() {
     // ===== 压枪分类（独立折叠页，默认展开便于发现） =====
     if (ImGui::CollapsingHeader("压枪", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Checkbox("压枪", &g_cfg.recoilEnabled);
-        ImGui::TextDisabled("开火按住时视角自动下拉补偿后坐力，需配合“扳机按住”使用");
+        ImGui::TextDisabled("物理手指按在“开枪区域”时视角自动下拉补偿后坐力，独立于扳机");
         ImGui::SliderInt("开始时间(ms)", &g_cfg.recoilStartMs, 0, 2000,
                          "%d");
         ImGui::SliderInt("压枪力度(px/s)", &g_cfg.recoilStrength, 0, 2000,
                          "%d");
         if (g_cfg.recoilStrength < 0) g_cfg.recoilStrength = 0;
-        if (!g_cfg.triggerHold) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
-                               "需要开启扳机按住");
-        }
     }
     ImGui::End();
 }
