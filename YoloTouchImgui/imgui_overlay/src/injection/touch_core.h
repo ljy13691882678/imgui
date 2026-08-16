@@ -48,6 +48,11 @@ bool touch_is_finger_in_joystick_zone(void);
 // Lift physical finger in joystick zone
 bool touch_lift_joystick_finger(void);
 
+// Query: primary physical finger (screen coords + pressed state)
+// 用于悬浮窗 UI 输入（imgui overlay 交互）
+// 返回 true 表示当前有物理手指按下；无手指时 *down 置 false 且返回 false
+bool touch_get_primary_finger(int* sx, int* sy, bool* down);
+
 #ifdef __cplusplus
 }
 #endif

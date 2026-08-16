@@ -654,3 +654,33 @@ bool touch_lift_joystick_finger(void) {
     if (lifted) upload();
     return lifted;
 }
+
+// ─── Overlay UI input (physical finger → screen coords) ─────────────
+
+bool touch_get_primary_finger(int* sx, int* sy, bool* down) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    if (sx) *sx = 0;
+    if (sy) *sy = 0;
+    if (down) *down = false;
+    if (!g_initialized || g_devices.empty()) return false;
+
+    const int touchMaxX = std::max(1, g_devices[0].absX.maximum);
+    const int touchMaxY = std::max(1, g_devices[0].absY.maximum);
+
+    for (size_t d = 0; d < g_devices.size(); d++) {
+        for (int f = 0; f < maxF; f++) {
+            if (!g_devices[d].fingers[f].isDown) continue;
+            // 跳过注入的虚拟手指，只报告真实物理手指
+            if (d == 0 && (f == TOUCH_VIRTUAL_SLOT || f == TOUCH_TRIGGER_SLOT)) continue;
+
+            const TouchObj& finger = g_devices[d].fingers[f];
+            int screenX = 0, screenY = 0;
+            touchToScreen(finger.pos.x, finger.pos.y, touchMaxX, touchMaxY, screenX, screenY);
+            if (sx) *sx = screenX;
+            if (sy) *sy = screenY;
+            if (down) *down = true;
+            return true;
+        }
+    }
+    return false;
+}

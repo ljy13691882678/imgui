@@ -344,7 +344,27 @@ int main(int argc, char* argv[]) {
     std::thread inferThread(inferenceLoop);
 
     // 主循环
+    bool lastFingerDown = false;
     while (main_thread_flag) {
+        // 喂入触摸输入：把真实物理手指坐标转成 ImGui 鼠标输入，
+        // 使悬浮窗（SurfaceFlinger 直接创建，不经系统 InputDispatcher）可交互。
+        // 触摸仍会正常透传给前台应用（游戏），此处仅读取用于 UI 操作。
+        if (g_touchReady) {
+            ImGuiIO& io = ImGui::GetIO();
+            int mx = 0, my = 0;
+            bool down = false;
+            bool hasFinger = touch_get_primary_finger(&mx, &my, &down);
+            if (hasFinger) {
+                io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+                io.AddMousePosEvent((float)mx, (float)my);
+                if (down != lastFingerDown)
+                    io.AddMouseButtonEvent(0, down);
+            } else if (lastFingerDown) {
+                io.AddMouseButtonEvent(0, false);
+            }
+            lastFingerDown = down;
+        }
+
         drawBegin();
         Layout_tick_UI();
         drawEnd();
