@@ -42,17 +42,20 @@ struct AimConfig {
     // 自瞄参数
     bool  aimEnabled = true;
     float deadZone = 0.02f;        // 归一化死区（中心距离小于此不移动）
-    float smoothX = 0.35f;         // 平滑系数 0~1
-    float smoothY = 0.35f;
+    float smoothX = 0.5f;          // 平滑系数 0~1
+    float smoothY = 0.5f;
     float aimSpeed = 1.0f;         // 速度增益
     float predictGain = 0.05f;     // 预判增益（秒）
     int   aimLockTimeMs = 300;     // 锁定时间
     // 自瞄锁定部位：0=中心 1=头部 2=身体（按目标框计算瞄准点，头部/身体按类别名 head/body 识别）
     int   aimPart = 0;
     // 自瞄拖拽灵敏度（拖动视角式）：归一化增量 × 屏幕 × dragSens → 每帧拖拽像素
-    float dragSens = 0.5f;
+    float dragSens = 0.35f;
     // 自瞄单帧最大拖拽像素（防止瞬移/抖动）
-    int   aimMaxStepPx = 40;
+    int   aimMaxStepPx = 24;
+    // 瞄准点时间平滑（EMA，0~1）：同一跟踪目标对瞄准点做指数移动平均，
+    // 压掉检测框抖动/拖视角反馈振荡（越大越平滑，0=关闭）
+    float aimPointSmooth = 0.75f;
     // 自瞄类别锁定：-1=所有启用类别；>=0=仅锁定该类（模型类别索引，面板按类别名选择）
     int   aimClass = -1;
 
@@ -61,6 +64,8 @@ struct AimConfig {
     float touchZoneL = 0.40f, touchZoneT = 0.10f, touchZoneR = 1.0f, touchZoneB = 0.90f;
     // 触发区（玩家物理手指在此区域内时，扳机暂停自动开火，避免与手动开火冲突）
     float fireZoneL = 0.65f, fireZoneT = 0.65f, fireZoneR = 1.0f, fireZoneB = 1.0f;
+    // 在悬浮窗上可视化触控区/触发区当前位置（半透明矩形 + 文字，调节时可直观看到）
+    bool  showZones = true;
 
     // 触发参数
     float triggerSensitivity = 0.5f;

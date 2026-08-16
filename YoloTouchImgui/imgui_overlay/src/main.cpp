@@ -95,6 +95,10 @@ static float  g_aimFingerX = 0.0f, g_aimFingerY = 0.0f;
 // 扳机虚拟手指状态（按住模式需保持按下，并在目标离开/停用时抬起）
 static bool   g_triggerDown = false;
 
+// 瞄准点时间平滑（EMA）：抑制检测框抖动传导，尤其锁头部/身体时 Y 轴上下甩
+static float  g_aimSmoothX = -1.0f, g_aimSmoothY = -1.0f;
+static int    g_aimSmoothTrack = -1;
+
 // 根据锁定部位计算瞄准点（归一化坐标）。
 // part: 0=中心 1=头部 2=身体。头部/身体按模型类别名 head/body 识别：
 //   - 锁头部：head 类框直接用框中心，全身框用上部 12% 高度处
@@ -299,6 +303,20 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     {
         float ax, ay;
         computeAimPoint(*pick, g_cfg.aimPart, &ax, &ay);
+        // 瞄准点时间平滑（EMA）：同一跟踪目标用指数移动平均压掉检测框抖动，
+        // 避免“拖视角→框移动→再拖”的反馈振荡传导到自瞄（尤其锁头/身体时 Y 轴上下甩）。
+        // 切换跟踪目标时重置，避免新旧目标位置混叠。
+        float alpha = g_cfg.aimPointSmooth; // 上一帧权重（0~1，越大越平滑/越迟钝）
+        if (g_aimSmoothTrack != pick->trackId) {
+            g_aimSmoothX = ax;
+            g_aimSmoothY = ay;
+            g_aimSmoothTrack = pick->trackId;
+        } else if (alpha > 0.0f) {
+            g_aimSmoothX = g_aimSmoothX * alpha + ax * (1.0f - alpha);
+            g_aimSmoothY = g_aimSmoothY * alpha + ay * (1.0f - alpha);
+            ax = g_aimSmoothX;
+            ay = g_aimSmoothY;
+        }
         aimTarget.cx = ax;
         aimTarget.cy = ay;
     }
@@ -510,13 +528,41 @@ static void inferenceLoop() {
 // UI 绘制
 // ---------------------------------------------------------------------------
 static void drawDetectionOverlay() {
-    if (!g_cfg.showBoxes && !g_cfg.showFps && !g_cfg.showCropBox) return;
+    if (!g_cfg.showBoxes && !g_cfg.showFps && !g_cfg.showCropBox && !g_cfg.showZones) return;
 
     ImDrawList* draw = ImGui::GetBackgroundDrawList();
     if (!draw) return;
 
     float sx = native_window_screen_x;
     float sy = native_window_screen_y;
+
+    // 可视化触控区/触发区当前位置：调节参数时可直观看到区域范围
+    if (g_cfg.showZones) {
+        // 触控区（自瞄拖拽注入区）：蓝色半透明填充 + 边框 + 文字
+        {
+            float zl = g_cfg.touchZoneL * sx, zt = g_cfg.touchZoneT * sy;
+            float zr = g_cfg.touchZoneR * sx, zb = g_cfg.touchZoneB * sy;
+            draw->AddRectFilled(ImVec2(zl, zt), ImVec2(zr, zb), IM_COL32(0, 140, 255, 32));
+            draw->AddRect(ImVec2(zl, zt), ImVec2(zr, zb), IM_COL32(0, 140, 255, 230), 0.0f, 0, 2.0f);
+            draw->AddText(ImVec2(zl + 4, zt + 4), IM_COL32(0, 170, 255, 255), "触控区(自瞄)");
+            char infolbl[48];
+            snprintf(infolbl, sizeof(infolbl), "L%.2f T%.2f R%.2f B%.2f",
+                     g_cfg.touchZoneL, g_cfg.touchZoneT, g_cfg.touchZoneR, g_cfg.touchZoneB);
+            draw->AddText(ImVec2(zl + 4, zt + 20), IM_COL32(0, 170, 255, 255), infolbl);
+        }
+        // 触发区（扳机暂停区，玩家物理手指在此区域内时自动开火暂停）：红色半透明
+        {
+            float zl = g_cfg.fireZoneL * sx, zt = g_cfg.fireZoneT * sy;
+            float zr = g_cfg.fireZoneR * sx, zb = g_cfg.fireZoneB * sy;
+            draw->AddRectFilled(ImVec2(zl, zt), ImVec2(zr, zb), IM_COL32(255, 70, 70, 32));
+            draw->AddRect(ImVec2(zl, zt), ImVec2(zr, zb), IM_COL32(255, 70, 70, 230), 0.0f, 0, 2.0f);
+            draw->AddText(ImVec2(zl + 4, zt + 4), IM_COL32(255, 110, 110, 255), "触发区(扳机)");
+            char infolbl[48];
+            snprintf(infolbl, sizeof(infolbl), "L%.2f T%.2f R%.2f B%.2f",
+                     g_cfg.fireZoneL, g_cfg.fireZoneT, g_cfg.fireZoneR, g_cfg.fireZoneB);
+            draw->AddText(ImVec2(zl + 4, zt + 20), IM_COL32(255, 110, 110, 255), infolbl);
+        }
+    }
 
     // 裁剪区域描边：在屏幕上画一个矩形框，标出当前推理输入的裁剪范围
     if (g_cfg.showCropBox && g_shm && g_shm->valid()) {
@@ -626,6 +672,7 @@ static void drawControlPanel() {
     ImGui::Checkbox("显示检测框", &g_cfg.showBoxes);
     ImGui::Checkbox("显示帧率", &g_cfg.showFps);
     ImGui::Checkbox("显示裁剪框", &g_cfg.showCropBox);
+    ImGui::Checkbox("显示区域", &g_cfg.showZones);
     ImGui::SliderFloat("置信度阈值", &g_cfg.confidence, 0.05f, 0.95f);
     ImGui::Separator();
 
@@ -766,6 +813,7 @@ static void drawControlPanel() {
     ImGui::SliderFloat("死区", &g_cfg.deadZone, 0.005f, 0.1f);
     ImGui::SliderFloat("X 平滑", &g_cfg.smoothX, 0.0f, 0.95f);
     ImGui::SliderFloat("Y 平滑", &g_cfg.smoothY, 0.0f, 0.95f);
+    ImGui::SliderFloat("瞄准点平滑", &g_cfg.aimPointSmooth, 0.0f, 0.95f);
     ImGui::SliderFloat("自瞄速度", &g_cfg.aimSpeed, 0.1f, 3.0f);
     ImGui::SliderFloat("拖拽灵敏度", &g_cfg.dragSens, 0.1f, 2.0f);
     ImGui::SliderInt("最大步长(px)", &g_cfg.aimMaxStepPx, 4, 160);
