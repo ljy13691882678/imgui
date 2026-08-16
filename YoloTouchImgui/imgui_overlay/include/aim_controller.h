@@ -42,8 +42,14 @@ public:
             return out;
         }
 
-        // PID 比例控制（这里用 P 项 + 平滑）
-        float kP = cfg.aimSpeed * 0.5f;
+        // 减速区：进入 3×死区 范围后按比例减弱移动量，平滑收敛，避免过冲/抖动
+        float ease = 1.0f;
+        if (cfg.deadZone > 0.0f && dist < cfg.deadZone * 3.0f) {
+            ease = std::clamp((dist - cfg.deadZone) / (cfg.deadZone * 2.0f), 0.0f, 1.0f);
+        }
+
+        // PID 比例控制（这里用 P 项 + 平滑 + 减速区）
+        float kP = cfg.aimSpeed * 0.5f * ease;
         float moveX = dx * kP;
         float moveY = dy * kP;
 

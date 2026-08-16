@@ -77,6 +77,8 @@ static void syncClassConfig() {
     int n = g_engine ? g_engine->getNumClasses() : 0;
     if (n > 0 && (int)g_classEnabled.size() != n)
         g_classEnabled.assign((size_t)n, true);
+    // 类别锁定索引越界（切换模型后类别数变化）时回退到"全部"
+    if (n > 0 && g_cfg.aimClass >= n) g_cfg.aimClass = -1;
 }
 
 // 控制面板折叠：true 时只显示一个小状态框
@@ -273,6 +275,9 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     float bestScore = -1.0f;
     float screenCx = 0.5f, screenCy = 0.5f;
     for (const auto& t : tracks) {
+        // 类别锁定：若 aimClass≥0，仅选择该类目标
+        if (g_cfg.aimClass >= 0 && (int)t.classId != g_cfg.aimClass) continue;
+
         float score;
         float dx = t.cx - screenCx;
         float dy = t.cy - screenCy;
@@ -298,42 +303,47 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         aimTarget.cy = ay;
     }
 
+    // 触控区（归一化 → 像素坐标）。自瞄虚拟手指在该区域内拖动，不超出边界。
+    // 起始位置为触控区中心，模拟玩家在游戏转向/瞄准区域内的操作。
+    int scrW = native_window_screen_x;
+    int scrH = native_window_screen_y;
+    float tzLpx = g_cfg.touchZoneL * scrW, tzTpx = g_cfg.touchZoneT * scrH;
+    float tzRpx = g_cfg.touchZoneR * scrW, tzBpx = g_cfg.touchZoneB * scrH;
+    float tzCx = (tzLpx + tzRpx) * 0.5f, tzCy = (tzTpx + tzBpx) * 0.5f;
+
     // ── 自瞄（拖动视角式）──
     // 用 AimController 计算每帧增量，保持虚拟手指按下并逐帧移动，模拟人手拖屏转向。
-    // 目标进入死区后抬起手指停止转向。
+    // 目标进入死区后抬起手指停止转向。手指被 clamp 在触控区内。
     if (g_touchReady && g_cfg.aimEnabled && g_cfg.enabled) {
         auto out = g_aim.compute(aimTarget, g_cfg, screenCx, screenCy, dt);
         if (out.active) {
-            int scrW = native_window_screen_x;
-            int scrH = native_window_screen_y;
             // 归一化增量 → 像素拖拽量（× 拖拽灵敏度）
             float dpx = out.deltaX * scrW * g_cfg.dragSens;
             float dpy = out.deltaY * scrH * g_cfg.dragSens;
             // 限制单帧最大拖拽像素，避免目标偏离过大时瞬移/抖动
-            const float maxStep = 40.0f;
+            float maxStep = (float)g_cfg.aimMaxStepPx;
             float step = std::sqrt(dpx*dpx + dpy*dpy);
             if (step > maxStep) { dpx *= maxStep / step; dpy *= maxStep / step; }
 
             if (!g_aimFingerDown) {
-                // 手指从屏幕中心按下
-                g_aimFingerX = scrW * 0.5f;
-                g_aimFingerY = scrH * 0.5f;
+                // 手指从触控区中心按下
+                g_aimFingerX = tzCx;
+                g_aimFingerY = tzCy;
                 touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
                            (int)g_aimFingerX, (int)g_aimFingerY);
                 g_aimFingerDown = true;
             }
-            g_aimFingerX = std::clamp(g_aimFingerX + dpx, 0.0f, (float)scrW);
-            g_aimFingerY = std::clamp(g_aimFingerY + dpy, 0.0f, (float)scrH);
+            g_aimFingerX = std::clamp(g_aimFingerX + dpx, tzLpx, tzRpx);
+            g_aimFingerY = std::clamp(g_aimFingerY + dpy, tzTpx, tzBpx);
             touch_move(TOUCH_VIRTUAL_SLOT, (int)g_aimFingerX, (int)g_aimFingerY);
-            // 拖到远离起点（或触到屏幕边缘）时抬手回中心再按下，模拟人手重新起指，
+            // 拖到远离触控区中心时抬手回中心再按下，模拟人手重新起指，
             // 保证目标在屏幕边缘也能持续转向（游戏累积每段拖拽的旋转量）
-            float cx = scrW * 0.5f, cy = scrH * 0.5f;
-            float drift = std::sqrt((g_aimFingerX - cx) * (g_aimFingerX - cx) +
-                                    (g_aimFingerY - cy) * (g_aimFingerY - cy));
-            if (drift > std::max(scrW, scrH) * 0.3f) {
+            float drift = std::sqrt((g_aimFingerX - tzCx) * (g_aimFingerX - tzCx) +
+                                    (g_aimFingerY - tzCy) * (g_aimFingerY - tzCy));
+            if (drift > std::max(tzRpx - tzLpx, tzBpx - tzTpx) * 0.5f) {
                 touch_up(TOUCH_VIRTUAL_SLOT);
-                g_aimFingerX = cx;
-                g_aimFingerY = cy;
+                g_aimFingerX = tzCx;
+                g_aimFingerY = tzCy;
                 touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
                            (int)g_aimFingerX, (int)g_aimFingerY);
             }
@@ -341,15 +351,13 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             g_aimX = out.targetX;
             g_aimY = out.targetY;
         } else {
-            // 目标已进入死区：抬起手指，停止转向
+            g_aimActive = false;
             if (g_aimFingerDown) {
                 touch_up(TOUCH_VIRTUAL_SLOT);
                 g_aimFingerDown = false;
             }
-            g_aimActive = false;
         }
     } else {
-        // 自瞄未启用：确保虚拟手指抬起
         if (g_aimFingerDown) {
             touch_up(TOUCH_VIRTUAL_SLOT);
             g_aimFingerDown = false;
@@ -358,31 +366,34 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     }
 
     // ── 扳机（点射/按住可切换）──
+    // 触发区（fire zone）：玩家物理手指在此区域内时，暂停自动开火，避免与手动开火冲突。
+    // 先按配置同步触发区到 touch_core，再让 reader 线程做硬件手指检测。
     if (g_touchReady && g_cfg.triggerEnabled && g_cfg.enabled) {
+        int fzL = (int)(g_cfg.fireZoneL * scrW), fzT = (int)(g_cfg.fireZoneT * scrH);
+        int fzR = (int)(g_cfg.fireZoneR * scrW), fzB = (int)(g_cfg.fireZoneB * scrH);
+        touch_set_fire_zone(fzL, fzT, fzR, fzB);
+
         bool fireOnce = false, hold = false, holdRelease = false;
         bool fingerDown = touch_is_finger_in_fire_zone();
         g_trigger.update(aimTarget, g_cfg, screenCx, screenCy, fingerDown,
                          fireOnce, hold, holdRelease);
+        // 扳机注入落点 = 触发区中心（开火按钮位置）
+        int trigX = (int)((g_cfg.fireZoneL + g_cfg.fireZoneR) * 0.5f * scrW);
+        int trigY = (int)((g_cfg.fireZoneT + g_cfg.fireZoneB) * 0.5f * scrH);
         if (fireOnce) {
-            // 点射：一次 touch_down + touch_up 点击
             if (g_triggerDown) { touch_up(TOUCH_TRIGGER_SLOT); g_triggerDown = false; }
-            touch_down(TOUCH_TRIGGER_SLOT, TOUCH_TRIGGER_ID,
-                       native_window_screen_x / 2, native_window_screen_y / 2);
+            touch_down(TOUCH_TRIGGER_SLOT, TOUCH_TRIGGER_ID, trigX, trigY);
             touch_up(TOUCH_TRIGGER_SLOT);
         } else if (hold) {
-            // 按住：保持按下
             if (!g_triggerDown) {
-                touch_down(TOUCH_TRIGGER_SLOT, TOUCH_TRIGGER_ID,
-                           native_window_screen_x / 2, native_window_screen_y / 2);
+                touch_down(TOUCH_TRIGGER_SLOT, TOUCH_TRIGGER_ID, trigX, trigY);
                 g_triggerDown = true;
             }
         } else if (holdRelease || g_triggerDown) {
-            // 目标离开触发区/切回点射：抬起虚拟手指
             touch_up(TOUCH_TRIGGER_SLOT);
             g_triggerDown = false;
         }
     } else if (g_triggerDown) {
-        // 扳机未启用：确保抬起
         touch_up(TOUCH_TRIGGER_SLOT);
         g_triggerDown = false;
     }
@@ -714,12 +725,65 @@ static void drawControlPanel() {
             ImGui::EndCombo();
         }
     }
+    // 自瞄类别锁定（aimClass: -1=全部, >=0=仅锁定该类）
+    {
+        char clsBuf[64];
+        const char* preview = "全部";
+        if (g_engine && g_engineReady.load() && g_cfg.aimClass >= 0 &&
+            g_cfg.aimClass < g_engine->getNumClasses()) {
+            const char* nm = g_engine->getClassName(g_cfg.aimClass);
+            if (nm && nm[0]) { snprintf(clsBuf, sizeof(clsBuf), "%s", nm); preview = clsBuf; }
+        }
+        if (ImGui::BeginCombo("自瞄类别", preview)) {
+            if (ImGui::Selectable("全部", g_cfg.aimClass < 0)) g_cfg.aimClass = -1;
+            if (g_engine && g_engineReady.load()) {
+                for (int i = 0; i < g_engine->getNumClasses(); ++i) {
+                    const char* nm = g_engine->getClassName(i);
+                    char lbl[64];
+                    if (nm && nm[0]) snprintf(lbl, sizeof(lbl), "%s##ac%d", nm, i);
+                    else snprintf(lbl, sizeof(lbl), "类别%d##ac%d", i, i);
+                    bool sel = (g_cfg.aimClass == i);
+                    if (ImGui::Selectable(lbl, sel)) g_cfg.aimClass = i;
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
+    // 锁定优先级（多目标时如何选择）
+    {
+        const char* modes[] = {"最近中心", "最大框", "最接近准星"};
+        int cur = g_cfg.selectMode;
+        if (cur < 0 || cur > 2) cur = 0;
+        if (ImGui::BeginCombo("锁定优先级", modes[cur])) {
+            for (int i = 0; i < 3; ++i) {
+                if (ImGui::Selectable(modes[i], i == cur)) g_cfg.selectMode = i;
+                if (i == cur) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+    }
     ImGui::SliderFloat("死区", &g_cfg.deadZone, 0.005f, 0.1f);
     ImGui::SliderFloat("X 平滑", &g_cfg.smoothX, 0.0f, 0.95f);
     ImGui::SliderFloat("Y 平滑", &g_cfg.smoothY, 0.0f, 0.95f);
     ImGui::SliderFloat("自瞄速度", &g_cfg.aimSpeed, 0.1f, 3.0f);
     ImGui::SliderFloat("拖拽灵敏度", &g_cfg.dragSens, 0.1f, 2.0f);
+    ImGui::SliderInt("最大步长(px)", &g_cfg.aimMaxStepPx, 4, 160);
     ImGui::SliderFloat("预判", &g_cfg.predictGain, 0.0f, 0.2f);
+    ImGui::Separator();
+    // 触控区：自瞄拖拽注入区域（与游戏转向/瞄准区对齐）
+    ImGui::Text("触控区(自瞄拖拽)");
+    ImGui::SliderFloat("触控左##tzL", &g_cfg.touchZoneL, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("触控上##tzT", &g_cfg.touchZoneT, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("触控右##tzR", &g_cfg.touchZoneR, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("触控下##tzB", &g_cfg.touchZoneB, 0.0f, 1.0f, "%.2f");
+    ImGui::Separator();
+    // 触发区：玩家物理手指在此区域内时，扳机暂停自动开火
+    ImGui::Text("触发区(扳机暂停)");
+    ImGui::SliderFloat("触发左##fzL", &g_cfg.fireZoneL, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("触发上##fzT", &g_cfg.fireZoneT, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("触发右##fzR", &g_cfg.fireZoneR, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("触发下##fzB", &g_cfg.fireZoneB, 0.0f, 1.0f, "%.2f");
     ImGui::Separator();
 
     ImGui::Checkbox("扳机", &g_cfg.triggerEnabled);
@@ -798,6 +862,12 @@ int main(int argc, char* argv[]) {
     g_touchReady = touch_init(native_window_screen_x, native_window_screen_y);
     if (g_touchReady) {
         touch_set_screen_params(native_window_screen_x, native_window_screen_y, g_rotation);
+        // 初始同步触发区（默认右下角区域）
+        int fzL = (int)(g_cfg.fireZoneL * native_window_screen_x);
+        int fzT = (int)(g_cfg.fireZoneT * native_window_screen_y);
+        int fzR = (int)(g_cfg.fireZoneR * native_window_screen_x);
+        int fzB = (int)(g_cfg.fireZoneB * native_window_screen_y);
+        touch_set_fire_zone(fzL, fzT, fzR, fzB);
         touch_start_readers();
         printf("touch injection ready\n");
     } else {

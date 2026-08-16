@@ -51,6 +51,16 @@ struct AimConfig {
     int   aimPart = 0;
     // 自瞄拖拽灵敏度（拖动视角式）：归一化增量 × 屏幕 × dragSens → 每帧拖拽像素
     float dragSens = 0.5f;
+    // 自瞄单帧最大拖拽像素（防止瞬移/抖动）
+    int   aimMaxStepPx = 40;
+    // 自瞄类别锁定：-1=所有启用类别；>=0=仅锁定该类（模型类别索引，面板按类别名选择）
+    int   aimClass = -1;
+
+    // 触控区（自瞄拖拽注入区域，归一化 [0,1]）：虚拟手指只在该区域内拖动视角。
+    // 游戏通常只在特定区域响应拖屏转向，此区域应与游戏的转向/瞄准区域对齐。
+    float touchZoneL = 0.40f, touchZoneT = 0.10f, touchZoneR = 1.0f, touchZoneB = 0.90f;
+    // 触发区（玩家物理手指在此区域内时，扳机暂停自动开火，避免与手动开火冲突）
+    float fireZoneL = 0.65f, fireZoneT = 0.65f, fireZoneR = 1.0f, fireZoneB = 1.0f;
 
     // 触发参数
     float triggerSensitivity = 0.5f;
