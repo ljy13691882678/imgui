@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.App" parent="android:Theme.Material.NoActionBar">
+    <!-- AppCompatActivity 必须使用 AppCompat 主题，否则启动即抛 IllegalStateException -->
+    <style name="Theme.App" parent="Theme.AppCompat.NoActionBar">
         <item name="android:windowBackground">@android:color/black</item>
     </style>
 </resources>
