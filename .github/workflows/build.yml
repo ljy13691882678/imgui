@@ -53,10 +53,11 @@ jobs:
         working-directory: YoloTouchImgui
         run: |
           ASSETS="app/src/main/assets/native"
-          mkdir -p "$ASSETS/lib"
+          mkdir -p "$ASSETS/lib" "$ASSETS/models"
           # imgui 可执行文件
           cp imgui_overlay/libs/arm64-v8a/imgui "$ASSETS/imgui"
-          # 模型
+          # 全部模型（复制到 models/ 子目录 + 根目录保留默认模型）
+          cp models/*.tflite "$ASSETS/models/"
           cp models/valorant_256_v26n.tflite "$ASSETS/valorant_256_v26n.tflite"
           # 预编译 .so（TFLite / QNN）
           cp imgui_overlay/lib/arm64-v8a/*.so "$ASSETS/lib/"

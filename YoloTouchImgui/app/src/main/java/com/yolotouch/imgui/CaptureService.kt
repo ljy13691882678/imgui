@@ -79,6 +79,9 @@ class CaptureService : Service() {
     private val running = AtomicBoolean(true)
     private val lastSeq = AtomicLong(0)
 
+    // 防止写帧任务在 ioExecutor 上堆积（一次只处理一帧，多余帧交给下次 acquireLatestImage）
+    private val frameWriting = AtomicBoolean(false)
+
     private var shmFile: File? = null
     private var captureW = 0
     private var captureH = 0
@@ -156,13 +159,23 @@ class CaptureService : Service() {
         val density = metrics.densityDpi
         Log.d(TAG, "screen=${captureW}x${captureH} rotation=$rotation")
 
+        // MediaProjection 的 ImageReader 必须注册 OnImageAvailableListener，
+        // 否则部分设备/系统上 producer 不持续产帧，acquireLatestImage() 一直返回 null，
+        // 导致共享内存无新帧、imgui 推理 FPS 显示为 0。
         imageReader = ImageReader.newInstance(captureW, captureH, PixelFormat.RGBA_8888, 2)
+            .also { it.setOnImageAvailableListener({ reader -> onFrameAvailable(reader) }, mainHandler) }
         virtualDisplay = projection.createVirtualDisplay(
             "YoloTouchCapture",
             captureW, captureH, density,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader!!.surface, null, null
         )
+        if (virtualDisplay == null) {
+            Log.e(TAG, "createVirtualDisplay failed")
+            stopSelf()
+            return
+        }
+        Log.d(TAG, "virtualDisplay created, capture started")
 
         ioExecutor.execute {
             try {
@@ -217,10 +230,23 @@ class CaptureService : Service() {
         }
         imgui.setExecutable(true, true)
 
-        // 3. 解压模型
-        val model = File(dir, ASSET_MODEL)
-        if (!model.exists() || model.length() == 0L) {
-            assets.open("$ASSET_NATIVE_DIR/$ASSET_MODEL").use { input ->
+        // 3. 解压全部模型到 models/ 目录（面板可按需切换）
+        val modelDir = File(dir, "models").apply { mkdirs() }
+        val modelNames = assets.list("$ASSET_NATIVE_DIR/models") ?: emptyArray()
+        for (name in modelNames) {
+            if (!name.endsWith(".tflite")) continue
+            val out = File(modelDir, name)
+            if (!out.exists() || out.length() == 0L) {
+                assets.open("$ASSET_NATIVE_DIR/models/$name").use { input ->
+                    FileOutputStream(out).use { output -> input.copyTo(output) }
+                }
+            }
+            out.setReadable(true, false)
+        }
+        // 默认模型（确保存在，imgui 用它初始化）
+        val model = File(modelDir, ASSET_MODEL)
+        if (!model.exists()) {
+            assets.open("$ASSET_NATIVE_DIR/models/$ASSET_MODEL").use { input ->
                 FileOutputStream(model).use { output -> input.copyTo(output) }
             }
         }
@@ -241,8 +267,7 @@ class CaptureService : Service() {
         )
         Log.d(TAG, "root launch: rc=${result.exitCode} out=${result.output} err=${result.error}")
 
-        // 启动帧写入循环
-        startFrameLoop()
+        // 帧写入由 ImageReader 的 OnImageAvailableListener 驱动（见 onFrameAvailable）
         return true
     }
 
@@ -271,77 +296,73 @@ class CaptureService : Service() {
         Log.d(TAG, "shm initialized size=$total")
     }
 
-    // ─── 写帧循环 ────────────────────────────────────────────
-    private fun startFrameLoop() {
+    // ─── 写帧（由 OnImageAvailableListener 驱动） ─────────────
+    private fun onFrameAvailable(reader: ImageReader) {
+        if (!running.get()) return
+        // 上一帧还在写（ioExecutor 单线程排队），则跳过本次，
+        // 下一帧到达时 acquireLatestImage() 会取到最新一帧，避免堆积。
+        if (!frameWriting.compareAndSet(false, true)) return
         ioExecutor.execute {
-            val shm = shmFile ?: return@execute
-            val reader = imageReader ?: return@execute
-            var lastLog = 0L
-            var frames = 0L
-
-            while (running.get()) {
-                val image = reader.acquireLatestImage()
-                if (image == null) {
-                    Thread.sleep(5)
-                    continue
-                }
-                try {
-                    val plane = image.planes[0]
-                    val buf = plane.buffer
-                    val w = image.width
-                    val h = image.height
-                    val rowStride = plane.rowStride
-                    val sizePerFrame = rowStride * h
-
-                    if (shm.length() < (SHM_HEADER_SIZE + sizePerFrame * SHM_BUFFER_COUNT).toLong()) {
-                        RandomAccessFile(shm, "rw").use { it.setLength(
-                            (SHM_HEADER_SIZE + sizePerFrame * SHM_BUFFER_COUNT).toLong()
-                        ) }
-                    }
-
-                    val seq = lastSeq.incrementAndGet()
-                    val bufIdx = ((seq % SHM_BUFFER_COUNT).toInt()) * sizePerFrame
-                    val offset = SHM_HEADER_SIZE + bufIdx
-
-                    RandomAccessFile(shm, "rw").use { raf ->
-                        // 写入帧数据
-                        val pos = buf.position()
-                        buf.rewind()
-                        if (buf.remaining() >= sizePerFrame) {
-                            val chunk = ByteArray(sizePerFrame)
-                            buf.get(chunk)
-                            raf.seek(offset.toLong())
-                            raf.write(chunk)
-                        }
-                        buf.position(pos)
-
-                        // 更新 header（宽度/高度/stride + 序号）
-                        raf.seek(0)
-                        val hdr = ByteBuffer.allocate(SHM_HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN)
-                        hdr.putInt(SHM_MAGIC.toInt())
-                        hdr.putInt(w)
-                        hdr.putInt(h)
-                        hdr.putInt(rowStride)
-                        hdr.putInt(plane.pixelStride)
-                        hdr.putInt(rotation)
-                        hdr.putInt(sizePerFrame)
-                        hdr.putInt(seq.toInt())
-                        hdr.put(ByteArray(32))
-                        raf.write(hdr.array())
-                    }
-                    frames++
-                    val now = System.currentTimeMillis()
-                    if (now - lastLog > 5000) {
-                        Log.d(TAG, "captured $frames frames, seq=$seq")
-                        lastLog = now
-                        frames = 0
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "frame write error: ${e.message}")
-                } finally {
-                    image.close()
-                }
+            try {
+                writeFrame(reader)
+            } finally {
+                frameWriting.set(false)
             }
+        }
+    }
+
+    private fun writeFrame(reader: ImageReader) {
+        val shm = shmFile ?: return
+        val image = reader.acquireLatestImage() ?: return
+        try {
+            val plane = image.planes[0]
+            val buf = plane.buffer
+            val w = image.width
+            val h = image.height
+            val rowStride = plane.rowStride
+            val sizePerFrame = rowStride * h
+
+            if (shm.length() < (SHM_HEADER_SIZE + sizePerFrame * SHM_BUFFER_COUNT).toLong()) {
+                RandomAccessFile(shm, "rw").use { it.setLength(
+                    (SHM_HEADER_SIZE + sizePerFrame * SHM_BUFFER_COUNT).toLong()
+                ) }
+            }
+
+            val seq = lastSeq.incrementAndGet()
+            val bufIdx = ((seq % SHM_BUFFER_COUNT).toInt()) * sizePerFrame
+            val offset = SHM_HEADER_SIZE + bufIdx
+
+            RandomAccessFile(shm, "rw").use { raf ->
+                // 写入帧数据
+                val pos = buf.position()
+                buf.rewind()
+                if (buf.remaining() >= sizePerFrame) {
+                    val chunk = ByteArray(sizePerFrame)
+                    buf.get(chunk)
+                    raf.seek(offset.toLong())
+                    raf.write(chunk)
+                }
+                buf.position(pos)
+
+                // 更新 header（宽度/高度/stride + 序号）
+                raf.seek(0)
+                val hdr = ByteBuffer.allocate(SHM_HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+                hdr.putInt(SHM_MAGIC.toInt())
+                hdr.putInt(w)
+                hdr.putInt(h)
+                hdr.putInt(rowStride)
+                hdr.putInt(plane.pixelStride)
+                hdr.putInt(rotation)
+                hdr.putInt(sizePerFrame)
+                hdr.putInt(seq.toInt())
+                hdr.put(ByteArray(32))
+                raf.write(hdr.array())
+            }
+            if (seq % 60 == 0L) Log.d(TAG, "captured seq=$seq")
+        } catch (e: Exception) {
+            Log.e(TAG, "frame write error: ${e.message}")
+        } finally {
+            image.close()
         }
     }
 

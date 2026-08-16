@@ -39,15 +39,17 @@ object RootHelper {
     fun exec(command: String, timeoutSec: Long = 10): ShellResult {
         return try {
             val p = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
-            val out = p.inputStream.bufferedReader().readText()
-            val err = p.errorStream.bufferedReader().readText()
+            // 必须先 waitFor（带超时）再读输出：
+            // 若先 readText()，遇到 KernelSU 授权弹窗未确认时进程不退出，
+            // readText() 会无限阻塞，导致后续帧循环永远不启动（FPS=0）。
             val finished = p.waitFor(timeoutSec, TimeUnit.SECONDS)
             if (!finished) {
                 p.destroy()
-                ShellResult(-1, out, "$err (exec timeout ${timeoutSec}s)")
-            } else {
-                ShellResult(p.exitValue(), out, err)
+                return ShellResult(-1, "", "exec timeout ${timeoutSec}s: $command")
             }
+            val out = p.inputStream.bufferedReader().readText()
+            val err = p.errorStream.bufferedReader().readText()
+            ShellResult(p.exitValue(), out, err)
         } catch (e: Exception) {
             Log.e(TAG, "exec failed: $command -> ${e.message}")
             ShellResult(-1, "", e.message ?: "unknown")

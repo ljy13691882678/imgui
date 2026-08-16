@@ -11,12 +11,17 @@
 
 #include <atomic>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
+#include <vector>
 #include <memory>
 #include <thread>
 #include <chrono>
+#include <algorithm>
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
+#include <dirent.h>
 #include <unistd.h>
 #include <sys/time.h>
 
@@ -30,6 +35,12 @@ int abs_ScreenY = 0;
 // 当前推理引擎（main 创建，推理线程只读调用）
 static InferenceEngine* g_engine = nullptr;
 static std::atomic<bool> g_engineReady{false};
+// 引擎读写锁：推理线程读锁调用 detect，模型切换写锁重建引擎
+static std::shared_mutex g_engineMutex;
+
+// 可用模型列表（从模型目录扫描）
+static std::vector<std::string> g_modelList;
+static int g_modelIndex = 0;
 
 // 录屏帧尺寸（从共享内存头读取，供绘制坐标缩放）
 static int g_shmWidth = 0;
@@ -70,12 +81,58 @@ static long long getTimeNowMs() {
 }
 
 // ---------------------------------------------------------------------------
+// 模型管理
+// ---------------------------------------------------------------------------
+// 扫描目录下所有 .tflite 模型
+static void scanModels(const char* dir) {
+    g_modelList.clear();
+    if (!dir || !dir[0]) return;
+    DIR* d = opendir(dir);
+    if (!d) {
+        printf("model dir not found: %s\n", dir);
+        return;
+    }
+    std::vector<std::string> names;
+    struct dirent* e;
+    while ((e = readdir(d)) != nullptr) {
+        std::string n = e->d_name;
+        if (n.size() > 7 && n.compare(n.size() - 7, 7, ".tflite") == 0)
+            names.push_back(n);
+    }
+    closedir(d);
+    std::sort(names.begin(), names.end());
+    for (const auto& n : names) g_modelList.push_back(std::string(dir) + "/" + n);
+    printf("found %zu model(s) in %s\n", g_modelList.size(), dir);
+}
+
+// 重新加载指定索引的模型（写锁重建引擎）
+static bool loadModel(int idx) {
+    if (idx < 0 || (size_t)idx >= g_modelList.size()) return false;
+    std::unique_lock<std::shared_mutex> lock(g_engineMutex);
+    if (!g_engine) return false;
+    bool ok = g_engine->init(g_modelList[idx].c_str());
+    if (ok) {
+        g_engine->setConfidence(g_cfg.confidence);
+        g_modelIndex = idx;
+        printf("switched model -> %s (backend=%s)\n",
+               g_modelList[idx].c_str(), g_engine->getBackendType().c_str());
+    } else {
+        fprintf(stderr, "load model failed: %s\n", g_modelList[idx].c_str());
+    }
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
 // 单帧处理：推理 + 跟踪 + 自瞄 + 触发 + 注入
 // ---------------------------------------------------------------------------
 static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     const int w = (int)h->width;
     const int hh = (int)h->height;
     if (w <= 0 || hh <= 0) return;
+    if (!g_engine) return;
+
+    // 读锁保护引擎（切换模型时会取写锁等待）
+    std::shared_lock<std::shared_mutex> engLock(g_engineMutex);
     if (!g_engine) return;
 
     auto dets = g_engine->detect(
@@ -180,6 +237,8 @@ static std::atomic<bool> g_inferRunning{false};
 static void inferenceLoop() {
     uint64_t frames = 0;
     long long lastFpsMs = getTimeNowMs();
+    long long lastNoFrameLog = getTimeNowMs();
+    bool everGotFrame = false;
 
     while (g_inferRunning.load()) {
         if (!g_shm || !g_shm->valid()) {
@@ -188,9 +247,18 @@ static void inferenceLoop() {
         }
         const uint8_t* frame = g_shm->readFrame();
         if (!frame) {
+            // 诊断：长时间没有新帧（APK 未写帧 / 共享内存未通）
+            long long now = getTimeNowMs();
+            if (now - lastNoFrameLog >= 5000) {
+                lastNoFrameLog = now;
+                printf("[infer] no new frame for 5s, everGotFrame=%d, shmSeq=%u\n",
+                       everGotFrame ? 1 : 0,
+                       g_shm->header() ? g_shm->header()->lastSeq : 0u);
+            }
             std::this_thread::sleep_for(5ms);
             continue;
         }
+        everGotFrame = true;
         processFrame(frame, g_shm->header());
         frames++;
 
@@ -246,11 +314,31 @@ static void drawDetectionOverlay() {
 
 static void drawControlPanel() {
     ImGui::SetNextWindowPos(ImVec2(20, 80), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(340, 520), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(360, 580), ImGuiCond_FirstUseEver);
     ImGui::Begin("YoloTouch 控制面板", nullptr, ImGuiWindowFlags_NoCollapse);
     ImGui::Text("后端: %s", g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "无");
     ImGui::Text("帧: %ux%u 旋转=%d", g_shmWidth, g_shmHeight, g_rotation);
+    ImGui::Text("推理: %llu FPS  帧源序号: %u",
+                (unsigned long long)g_inferFps.load(),
+                g_shm && g_shm->valid() ? g_shm->header()->lastSeq : 0u);
     ImGui::Separator();
+
+    // 模型选择
+    if (!g_modelList.empty()) {
+        const char* preview = g_modelIndex >= 0 && (size_t)g_modelIndex < g_modelList.size()
+            ? strrchr(g_modelList[g_modelIndex].c_str(), '/') + 1
+            : g_modelList[0].c_str();
+        if (ImGui::BeginCombo("模型", preview)) {
+            for (int i = 0; i < (int)g_modelList.size(); ++i) {
+                const char* name = strrchr(g_modelList[i].c_str(), '/') + 1;
+                if (ImGui::Selectable(name, i == g_modelIndex)) {
+                    if (i != g_modelIndex) loadModel(i);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::Separator();
+    }
 
     ImGui::Checkbox("启用", &g_cfg.enabled);
     ImGui::Checkbox("显示检测框", &g_cfg.showBoxes);
@@ -295,6 +383,15 @@ int main(int argc, char* argv[]) {
     const char* shmPath = argv[2];
     if (argc >= 4) chdir(argv[3]);
 
+    // 扫描模型目录（模型文件所在目录），供面板切换
+    {
+        std::string modelDir = modelPath;
+        size_t slash = modelDir.find_last_of('/');
+        if (slash != std::string::npos) modelDir = modelDir.substr(0, slash);
+        else modelDir = ".";
+        scanModels(modelDir.c_str());
+    }
+
     // 屏幕信息
     screen_config();
     ::abs_ScreenX = (displayInfo.height > displayInfo.width ? displayInfo.height : displayInfo.width);
@@ -324,6 +421,15 @@ int main(int argc, char* argv[]) {
     bool engOk = engine->init(modelPath);
     g_engine = engine.get();
     g_engineReady.store(engOk);
+
+    // 若默认模型在扫描列表中，记录其索引（供面板高亮）
+    {
+        std::string target = modelPath;
+        for (size_t i = 0; i < g_modelList.size(); ++i) {
+            if (g_modelList[i] == target) { g_modelIndex = (int)i; break; }
+        }
+    }
+
     if (!engOk) {
         fprintf(stderr, "engine init failed: %s\n", modelPath);
     } else {
