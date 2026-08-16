@@ -66,12 +66,26 @@ jobs:
       - name: Build APK with Gradle
         working-directory: YoloTouchImgui
         run: |
+          # 生成 release keystore，注入签名环境变量（避免 unsigned APK 无法安装/闪退）
+          keytool -genkeypair -v -keystore release.jks -keyalg RSA -keysize 2048 \
+            -validity 10000 -alias yolotouch \
+            -storepass yolotouch -keypass yolotouch \
+            -dname "CN=YoloTouch, OU=Dev, O=YoloTouch, L=CN, S=CN, C=CN" || true
+          export KEYSTORE_PATH="${GITHUB_WORKSPACE}/YoloTouchImgui/release.jks"
+          export KEYSTORE_PASSWORD=yolotouch
+          export KEY_ALIAS=yolotouch
+          export KEY_PASSWORD=yolotouch
           chmod +x ./gradlew
           ./gradlew :app:assembleRelease --no-daemon
 
       - name: Show APK
         run: |
           find YoloTouchImgui/app/build -name '*.apk' -exec ls -lh {} \;
+          echo "=== signing check ==="
+          for apk in $(find YoloTouchImgui/app/build -name '*.apk'); do
+            echo "-- $apk"
+            unzip -l "$apk" | grep -E "META-INF/.*\.(RSA|DSA|EC|SF|MF)" | grep -v "version" || echo "NO SIGNATURE FOUND"
+          done
 
       - name: Upload APK (${{ matrix.variant.name }})
         uses: actions/upload-artifact@v4
