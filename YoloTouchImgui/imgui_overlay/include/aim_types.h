@@ -125,9 +125,6 @@ struct AimConfig {
     int   recoilStartMs = 250;     // 压枪开始时间：开枪键按住后延迟多久开始下拉（ms）
     int   recoilStrength = 300;    // 压枪力度：下拉速度（px/s），0=关闭
 
-    // 触摸注入模式：0=uinput（/dev/uinput 合成触摸，默认），1=内核驱动 paradise
-    int   injectMode = 0;
-
     // 目标选择
     int   selectMode = 0;          // 0=最近中心 1=最大框 2=最接近准星
 };

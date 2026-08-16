@@ -1172,32 +1172,18 @@ static void drawControlPanel() {
         ImGui::SliderFloat("收敛阈值(px)", &g_cfg.convergeThresh, 1.0f, 60.0f);
         ImGui::SliderFloat("移动平滑", &g_cfg.aimMoveSmooth, 0.0f, 0.95f);
     }
+    // 压枪（并入自瞄分类）：物理手指按在“开枪区”时视角自动下拉补偿后坐力，独立于扳机
+    ImGui::Separator();
+    ImGui::Checkbox("压枪", &g_cfg.recoilEnabled);
+    ImGui::TextDisabled("物理手指按在“开枪区”时视角自动下拉补偿后坐力");
+    ImGui::SliderInt("压枪开始时间(ms)", &g_cfg.recoilStartMs, 0, 2000, "%d");
+    ImGui::SliderInt("压枪力度(px/s)", &g_cfg.recoilStrength, 0, 2000, "%d");
+    if (g_cfg.recoilStrength < 0) g_cfg.recoilStrength = 0;
     }
     ImGui::Separator();
 
     // ===== 触摸注入 =====
     if (ImGui::CollapsingHeader("注入", ImGuiTreeNodeFlags_DefaultOpen)) {
-        // 注入方式：uinput 合成触摸 / 内核驱动 paradise
-        {
-            const char* imodes[] = {"uinput(合成触摸)", "内核驱动(paradise)"};
-            int imode = (g_cfg.injectMode == TOUCH_MODE_KERNEL) ? TOUCH_MODE_KERNEL : TOUCH_MODE_UINPUT;
-            if (ImGui::BeginCombo("注入方式", imodes[imode])) {
-                for (int i = 0; i < 2; ++i) {
-                    if (ImGui::Selectable(imodes[i], i == imode)) {
-                        g_cfg.injectMode = i;
-                        touch_set_inject_mode(i);
-                    }
-                    if (i == imode) ImGui::SetItemDefaultFocus();
-                }
-                ImGui::EndCombo();
-            }
-            if (g_cfg.injectMode == TOUCH_MODE_KERNEL) {
-                bool kc = touch_kernel_connected();
-                ImGui::TextColored(kc ? ImVec4(0.2f, 1.0f, 0.3f, 1.0f) : ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
-                                   "内核驱动: %s%s", kc ? "已连接" : "未连接",
-                                   touch_inject_ready() ? " · 注入已初始化" : "");
-            }
-        }
         // 触摸注入初始化状态：默认未初始化，需要自瞄/扳机/压枪时点击初始化
         {
             bool injReady = touch_inject_ready();
@@ -1282,16 +1268,6 @@ static void drawControlPanel() {
             g_cfg.triggerDelayMax = g_cfg.triggerDelayMin;
     }
 
-    // ===== 压枪分类（独立折叠页，默认展开便于发现） =====
-    if (ImGui::CollapsingHeader("压枪", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Checkbox("压枪", &g_cfg.recoilEnabled);
-        ImGui::TextDisabled("物理手指按在“开枪区域”时视角自动下拉补偿后坐力，独立于扳机");
-        ImGui::SliderInt("开始时间(ms)", &g_cfg.recoilStartMs, 0, 2000,
-                         "%d");
-        ImGui::SliderInt("压枪力度(px/s)", &g_cfg.recoilStrength, 0, 2000,
-                         "%d");
-        if (g_cfg.recoilStrength < 0) g_cfg.recoilStrength = 0;
-    }
     ImGui::End();
 }
 
@@ -1343,8 +1319,6 @@ int main(int argc, char* argv[]) {
         if (g_cfg.aimPart < 0 || g_cfg.aimPart > 2) g_cfg.aimPart = 0;
         if (g_cfg.selectMode < 0 || g_cfg.selectMode > 2) g_cfg.selectMode = 0;
         if (g_cfg.zoneEditTarget < 0 || g_cfg.zoneEditTarget > 4) g_cfg.zoneEditTarget = 0;
-        if (g_cfg.injectMode < TOUCH_MODE_UINPUT || g_cfg.injectMode > TOUCH_MODE_KERNEL)
-            g_cfg.injectMode = TOUCH_MODE_UINPUT;
     } else {
         printf("no saved config, using defaults\n");
     }
@@ -1377,8 +1351,6 @@ int main(int argc, char* argv[]) {
     // touch_init 仅扫描设备、准备坐标系并启动 reader，供 ImGui 交互与区域判断。
     g_touchReady = touch_init(native_window_screen_x, native_window_screen_y, g_rotation);
     if (g_touchReady) {
-        // 同步注入模式（从配置读取，面板切换时同步）
-        touch_set_inject_mode(g_cfg.injectMode);
         touch_set_screen_params(native_window_screen_x, native_window_screen_y, g_rotation);
         // 初始同步触发区（默认右下角区域）
         int fzL = (int)(g_cfg.fireZoneL * native_window_screen_x);
