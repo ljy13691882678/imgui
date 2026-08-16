@@ -108,6 +108,21 @@ public:
         return hdr.lastSeq;
     }
 
+    // 读取 APK 侧写帧诊断计数（写进头部，imgui 侧只读）。
+    // 用于面板直接判断“APK 是否在持续写帧”：writeAttempts 不增长 = APK 没取到帧。
+    ShmFrameHeader readHeader() const {
+        ShmFrameHeader hdr{};
+        if (m_valid && m_fd >= 0 &&
+            ::pread(m_fd, &hdr, sizeof(hdr), 0) == (ssize_t)sizeof(hdr)) {
+            return hdr;
+        }
+        return hdr;
+    }
+    uint64_t writeAttempts() const { return readHeader().writeAttempts; }
+    uint64_t writeSuccesses() const { return readHeader().writeSuccesses; }
+    uint64_t acquireNulls() const { return readHeader().acquireNulls; }
+    uint64_t writeFails() const { return readHeader().writeFails; }
+
     // 读取统计（供面板诊断“帧源/读取是否正常”）
     uint64_t readOkCount() const { return m_readOk; }
     uint64_t noNewCount() const { return m_noNew; }
@@ -116,12 +131,15 @@ public:
 
     // 简短诊断字符串（面板显示用）
     std::string diag() const {
-        char buf[256];
+        char buf[512];
         snprintf(buf, sizeof(buf),
-                 "seq=%u ok=%llu nonew=%llu hdrFail=%llu dataFail=%llu",
+                 "seq=%u ok=%llu nonew=%llu hdrFail=%llu dataFail=%llu "
+                 "| APK写帧: att=%llu ok=%llu null=%llu fail=%llu",
                  readSeq(),
                  (unsigned long long)m_readOk, (unsigned long long)m_noNew,
-                 (unsigned long long)m_headerFail, (unsigned long long)m_dataFail);
+                 (unsigned long long)m_headerFail, (unsigned long long)m_dataFail,
+                 (unsigned long long)writeAttempts(), (unsigned long long)writeSuccesses(),
+                 (unsigned long long)acquireNulls(), (unsigned long long)writeFails());
         return buf;
     }
 

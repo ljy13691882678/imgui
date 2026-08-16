@@ -362,6 +362,11 @@ static void drawControlPanel() {
                 (unsigned long long)g_frameCount.load());
     ImGui::Text("最近推理耗时: %lld ms", (long long)g_lastFrameMs.load());
     if (g_shm && g_shm->valid()) {
+        ImGui::Text("APK 写帧: 尝试=%llu 成功=%llu 空=%llu 失败=%llu",
+                    (unsigned long long)g_shm->writeAttempts(),
+                    (unsigned long long)g_shm->writeSuccesses(),
+                    (unsigned long long)g_shm->acquireNulls(),
+                    (unsigned long long)g_shm->writeFails());
         ImGui::TextWrapped("共享内存: %s", g_shm->diag().c_str());
     }
     ImGui::Separator();

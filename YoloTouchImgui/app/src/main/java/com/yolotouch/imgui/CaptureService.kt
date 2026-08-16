@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -69,13 +70,13 @@ class CaptureService : Service() {
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    // 拆成两个单线程池：
-    //  - setupExecutor：解压/拉起 imgui（耗时长，秒级）
-    //  - frameExecutor：写帧（毫秒级）
-    // 之前共用 ioExecutor 时，解压期间 writeFrame 被排在其后，imgui 一启动反而
-    // 没有新帧可读（推理 FPS=0）。拆分后 initShm 一完成即开始持续写帧。
+    // setupExecutor：解压/拉起 imgui（耗时长，秒级）
     private val setupExecutor: ExecutorService = Executors.newSingleThreadExecutor()
-    private val frameExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    // 帧消费线程：独立线程上轮询 acquireLatestImage → 写共享内存 → close。
+    // 不依赖 OnImageAvailableListener —— 该回调在部分设备/系统上可能只触发一次或
+    // 丢失，导致 ImageReader 缓冲被占满后 producer 停摆，共享内存永远只有 1 帧
+    // （推理 FPS=0）。轮询方式总能持续消费，producer 不会被卡死。
+    private var frameThread: Thread? = null
 
     private lateinit var mediaProjectionManager: MediaProjectionManager
     private var mediaProjection: MediaProjection? = null
@@ -85,8 +86,11 @@ class CaptureService : Service() {
     private val running = AtomicBoolean(true)
     private val lastSeq = AtomicLong(0)
 
-    // 防止写帧任务在 ioExecutor 上堆积（一次只处理一帧，多余帧交给下次 acquireLatestImage）
-    private val frameWriting = AtomicBoolean(false)
+    // 写帧诊断计数（写入共享内存头部，imgui 侧可直接读取判断帧源是否在产帧）
+    private val writeAttempts = AtomicLong(0)   // writeFrame 被调用次数（取到非空帧）
+    private val writeSuccesses = AtomicLong(0)  // 写帧成功次数
+    private val acquireNulls = AtomicLong(0)    // acquireLatestImage 返回 null 次数
+    private val writeFails = AtomicLong(0)      // 写帧异常次数
 
     private var shmFile: File? = null
     private var captureW = 0
@@ -221,11 +225,9 @@ class CaptureService : Service() {
             val density = resources.displayMetrics.densityDpi
             diagLog("screen=${captureW}x${captureH} rotation=$rotation density=$density")
 
-            // MediaProjection 的 ImageReader 必须注册 OnImageAvailableListener，
-            // 否则部分设备/系统上 producer 不持续产帧，acquireLatestImage() 一直返回 null，
-            // 导致共享内存无新帧、imgui 推理 FPS 显示为 0。
-            imageReader = ImageReader.newInstance(captureW, captureH, PixelFormat.RGBA_8888, 2)
-                .also { it.setOnImageAvailableListener({ reader -> onFrameAvailable(reader) }, mainHandler) }
+            // 用独立帧消费线程轮询 acquireLatestImage()（见 startFrameCapture），
+            // 不依赖 OnImageAvailableListener 回调，避免回调丢失导致只写出 1 帧。
+            imageReader = ImageReader.newInstance(captureW, captureH, PixelFormat.RGBA_8888, 3)
             virtualDisplay = projection.createVirtualDisplay(
                 "YoloTouchCapture",
                 captureW, captureH, density,
@@ -247,6 +249,8 @@ class CaptureService : Service() {
                 showError("共享内存初始化失败：${e.message}")
                 return
             }
+            // 共享内存就绪后立刻启动帧消费线程（独立线程轮询 ImageReader）
+            startFrameCapture()
             diagLog("virtualDisplay created, capture started")
             updateNotification("录屏中，正在准备悬浮窗...")
 
@@ -334,7 +338,7 @@ class CaptureService : Service() {
         }
 
         // 4. 共享内存文件在 startProjection 里已提前创建（initShm），
-        //    帧写入也已在 frameExecutor 上独立进行。
+        //    帧写入也已在 startFrameCapture 的独立线程上持续进行。
         //    这里不能再调用 initShm（会 delete+重建文件）——解压期间可能已有
         //    帧写入在写该文件，重建会导致文件被删除/截断、与写帧线程竞争。
         //    只确保 imgui（root 进程）可读可写。
@@ -354,7 +358,7 @@ class CaptureService : Service() {
         )
         diagLog("root launch: rc=${result.exitCode} out=${result.output} err=${result.error}")
 
-        // 帧写入由 ImageReader 的 OnImageAvailableListener 驱动（见 onFrameAvailable）
+        // 帧写入由 startFrameCapture 的独立线程持续进行
         // 拉起后延迟 3s 检查 imgui 是否存活；若崩溃，把 /data/local/tmp/imgui.log 的关键
         // 错误带到通知栏，用户无需 adb 即可看到失败原因。
         mainHandler.postDelayed({ checkImguiAlive() }, 3000)
@@ -395,7 +399,10 @@ class CaptureService : Service() {
             hdr.putInt(rotation)
             hdr.putInt(sizePerFrame) // sizePerFrame
             hdr.putInt(0)            // lastSeq
-            hdr.put(ByteArray(32))   // reserved
+            hdr.putLong(0)           // writeAttempts
+            hdr.putLong(0)           // writeSuccesses
+            hdr.putLong(0)           // acquireNulls
+            hdr.putLong(0)           // writeFails
             raf.seek(0)
             raf.write(hdr.array())
         }
@@ -403,19 +410,30 @@ class CaptureService : Service() {
         Log.d(TAG, "shm initialized size=$total")
     }
 
-    // ─── 写帧（由 OnImageAvailableListener 驱动） ─────────────
-    private fun onFrameAvailable(reader: ImageReader) {
-        if (!running.get()) return
-        // 上一帧还在写（frameExecutor 单线程排队），则跳过本次，
-        // 下一帧到达时 acquireLatestImage() 会取到最新一帧，避免堆积。
-        if (!frameWriting.compareAndSet(false, true)) return
-        frameExecutor.execute {
-            try {
-                writeFrame(reader)
-            } finally {
-                frameWriting.set(false)
+    // ─── 写帧（独立帧消费线程轮询 ImageReader） ──────────────
+    // 不依赖 OnImageAvailableListener 回调 —— 该回调在部分设备/系统上可能只触发一次
+    // 或丢失，导致 ImageReader 缓冲被占满后 producer 停摆，共享内存永远只有 1 帧
+    // （推理 FPS=0）。用独立线程轮询 acquireLatestImage() 总能持续消费新帧。
+    private fun startFrameCapture() {
+        frameThread = Thread {
+            while (running.get()) {
+                try {
+                    val reader = imageReader ?: break
+                    val image = reader.acquireLatestImage()
+                    if (image == null) {
+                        acquireNulls.incrementAndGet()
+                        Thread.sleep(10) // 避免 CPU 空转
+                        continue
+                    }
+                    writeAttempts.incrementAndGet()
+                    writeFrame(image)   // 内部会 close
+                } catch (e: Exception) {
+                    writeFails.incrementAndGet()
+                    diagLog("frame capture error: ${e.message}")
+                    Thread.sleep(100)
+                }
             }
-        }
+        }.apply { start() }
     }
 
     // 帧写入看门狗：周期性检查共享内存序号是否在增长。
@@ -444,9 +462,8 @@ class CaptureService : Service() {
         })
     }
 
-    private fun writeFrame(reader: ImageReader) {
-        val shm = shmFile ?: return
-        val image = reader.acquireLatestImage() ?: return
+    private fun writeFrame(image: Image) {
+        val shm = shmFile ?: run { image.close(); return }
         try {
             val plane = image.planes[0]
             val buf = plane.buffer
@@ -477,7 +494,8 @@ class CaptureService : Service() {
                 }
                 buf.position(pos)
 
-                // 更新 header（宽度/高度/stride + 序号）
+                // 更新 header（尺寸/序号 + 写帧诊断计数）
+                writeSuccesses.incrementAndGet()
                 raf.seek(0)
                 val hdr = ByteBuffer.allocate(SHM_HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN)
                 hdr.putInt(SHM_MAGIC.toInt())
@@ -488,11 +506,15 @@ class CaptureService : Service() {
                 hdr.putInt(rotation)
                 hdr.putInt(sizePerFrame)
                 hdr.putInt(seq.toInt())
-                hdr.put(ByteArray(32))
+                hdr.putLong(writeAttempts.get())
+                hdr.putLong(writeSuccesses.get())
+                hdr.putLong(acquireNulls.get())
+                hdr.putLong(writeFails.get())
                 raf.write(hdr.array())
             }
             if (seq % 60 == 0L) Log.d(TAG, "captured seq=$seq")
         } catch (e: Exception) {
+            writeFails.incrementAndGet()
             Log.e(TAG, "frame write error: ${e.message}")
         } finally {
             image.close()
@@ -528,7 +550,7 @@ class CaptureService : Service() {
     override fun onDestroy() {
         stopAll()
         setupExecutor.shutdownNow()
-        frameExecutor.shutdownNow()
+        try { frameThread?.join(1000) } catch (_: Exception) {}
         super.onDestroy()
     }
 

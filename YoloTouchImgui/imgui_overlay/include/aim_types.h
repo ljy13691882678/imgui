@@ -45,6 +45,7 @@ struct AimConfig {
 };
 
 // 共享内存帧头（与 APK 侧严格一致）
+// 布局：8×uint32(32B) + 4×uint64(32B) = 64B
 #pragma pack(push, 1)
 struct ShmFrameHeader {
     uint32_t magic;          // 0xA1B2C3D4
@@ -55,7 +56,11 @@ struct ShmFrameHeader {
     uint32_t rotation;
     uint32_t sizePerFrame;   // 单帧字节数
     uint32_t lastSeq;        // 最近写入序号
-    uint8_t  reserved[32];   // 头部共 64 字节
+    // APK 侧写帧诊断计数（imgui 侧只读，用于判断“APK 是否在持续写帧”）
+    uint64_t writeAttempts;  // writeFrame 被调用次数（已取到非空帧）
+    uint64_t writeSuccesses; // 写帧成功次数
+    uint64_t acquireNulls;   // acquireLatestImage 返回 null 次数
+    uint64_t writeFails;     // 写帧异常次数
 };
 #pragma pack(pop)
 
