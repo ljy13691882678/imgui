@@ -50,8 +50,12 @@ class CaptureService : Service() {
 
         // 与 C++ ShmFrameHeader 一致
         private const val SHM_MAGIC = 0xA1B2C3D4u
-        private const val SHM_HEADER_SIZE = 64
+        private const val SHM_HEADER_SIZE = 80
         private const val SHM_BUFFER_COUNT = 2
+
+        // 居中裁剪可选边长（与 C++ CROP_OPTIONS 一致），默认 416
+        private val CROP_OPTIONS = intArrayOf(620, 416, 320, 256)
+        private const val CROP_DEFAULT = 416
 
         private const val ASSET_NATIVE_DIR = "native"
         private const val ASSET_IMGUI = "imgui"
@@ -96,6 +100,10 @@ class CaptureService : Service() {
     private var captureW = 0
     private var captureH = 0
     private var rotation = 0
+    // 帧线程复用的共享内存文件句柄与裁剪缓冲：避免每帧 open/close 文件、
+    // 以及逐行多次 write() 系统调用（推理仅 ~1ms，帧率瓶颈在文件 I/O）。
+    private var shmRaf: RandomAccessFile? = null
+    private var cropBuffer = ByteArray(620 * 620 * 4)  // 最大裁剪 620×620×RGBA
 
     // 最近一帧的尺寸/stride（flushDiagnostics 无新帧时写头部用，避免写 0）
     @Volatile private var lastW = 0
@@ -103,6 +111,14 @@ class CaptureService : Service() {
     @Volatile private var lastRowStride = 0
     @Volatile private var lastSizePerFrame = 0
     private var lastDiagFlushMs = 0L
+
+    // 居中裁剪状态：只把屏幕中心 crop×crop 的准星区域写入共享内存，
+    // 大幅减小写帧体积 → 帧率提升（可到 60-120）。cropRequest 由 C++ 面板
+    // 写入头部，这里读取并应用（默认 CROP_DEFAULT）。
+    @Volatile private var activeCrop = 416
+    @Volatile private var activeCropOffsetX = 0
+    @Volatile private var activeCropOffsetY = 0
+    private var lastCropCheckMs = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -393,7 +409,10 @@ class CaptureService : Service() {
         try {
             if (file.exists()) file.delete()
         } catch (_: Exception) {}
-        val sizePerFrame = captureW * captureH * 4
+        val crop = activeCrop.coerceAtMost(minOf(captureW, captureH))
+        activeCropOffsetX = (captureW - crop) / 2
+        activeCropOffsetY = (captureH - crop) / 2
+        val sizePerFrame = crop * crop * 4
         val total = SHM_HEADER_SIZE + sizePerFrame * SHM_BUFFER_COUNT
         RandomAccessFile(file, "rw").use { raf ->
             raf.setLength(total.toLong())
@@ -401,20 +420,27 @@ class CaptureService : Service() {
             hdr.putInt(SHM_MAGIC.toInt())
             hdr.putInt(captureW)
             hdr.putInt(captureH)
-            hdr.putInt(sizePerFrame) // rowStride（RGBA 无对齐）
-            hdr.putInt(4)            // pixelStride
+            hdr.putInt(crop * 4)         // rowStride（裁剪后）
+            hdr.putInt(4)                 // pixelStride
             hdr.putInt(rotation)
-            hdr.putInt(sizePerFrame) // sizePerFrame
-            hdr.putInt(0)            // lastSeq
-            hdr.putLong(0)           // writeAttempts
-            hdr.putLong(0)           // writeSuccesses
-            hdr.putLong(0)           // acquireNulls
-            hdr.putLong(0)           // writeFails
+            hdr.putInt(sizePerFrame)      // sizePerFrame
+            hdr.putInt(0)                 // lastSeq
+            hdr.putInt(crop)              // cropSize
+            hdr.putInt(activeCropOffsetX) // cropOffsetX
+            hdr.putInt(activeCropOffsetY) // cropOffsetY
+            hdr.putInt(0)                 // cropRequest
+            hdr.putLong(0)                // writeAttempts
+            hdr.putLong(0)                // writeSuccesses
+            hdr.putLong(0)                // acquireNulls
+            hdr.putLong(0)                // writeFails
             raf.seek(0)
             raf.write(hdr.array())
         }
         shmFile = file
-        Log.d(TAG, "shm initialized size=$total")
+        // 保持一个持久 RAF 供帧线程每帧复用（避免每帧 open/close 文件）
+        try { shmRaf?.close() } catch (_: Exception) {}
+        shmRaf = RandomAccessFile(file, "rw")
+        Log.d(TAG, "shm initialized size=$total crop=$crop")
     }
 
     // ─── 写帧（独立帧消费线程轮询 ImageReader） ──────────────
@@ -453,30 +479,41 @@ class CaptureService : Service() {
 
     // 把当前诊断计数写入共享内存头部（保持 lastSeq 不变，C++ 不会误判为新帧）。
     // 在无新帧时由帧线程每 500ms 调用一次，让面板能看到实时的写帧/取帧计数变化。
+    // 注意：必须保留 C++ 写入的 cropRequest（offset 44）——若在无新帧期间把它
+    // 清成 0，用户切换裁剪尺寸的请求会在这段时间内被丢失、永远不会被应用。
     private fun flushDiagnostics() {
-        val shm = shmFile ?: return
+        val raf = shmRaf ?: return
         try {
             val w = if (lastW > 0) lastW else captureW
             val h = if (lastH > 0) lastH else captureH
-            val rs = if (lastRowStride > 0) lastRowStride else captureW * 4
-            val spf = if (lastSizePerFrame > 0) lastSizePerFrame else captureW * captureH * 4
-            RandomAccessFile(shm, "rw").use { raf ->
-                raf.seek(0)
-                val hdr = ByteBuffer.allocate(SHM_HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN)
-                hdr.putInt(SHM_MAGIC.toInt())
-                hdr.putInt(w)
-                hdr.putInt(h)
-                hdr.putInt(rs)
-                hdr.putInt(4)            // pixelStride
-                hdr.putInt(rotation)
-                hdr.putInt(spf)
-                hdr.putInt(lastSeq.get().toInt())
-                hdr.putLong(writeAttempts.get())
-                hdr.putLong(writeSuccesses.get())
-                hdr.putLong(acquireNulls.get())
-                hdr.putLong(writeFails.get())
-                raf.write(hdr.array())
-            }
+            val crop = activeCrop.coerceAtMost(minOf(w, h))
+            val rs = if (lastRowStride > 0) lastRowStride else crop * 4
+            val spf = if (lastSizePerFrame > 0) lastSizePerFrame else crop * crop * 4
+            val offX = (w - crop) / 2
+            val offY = (h - crop) / 2
+            // 保留 C++ 侧尚未消费的裁剪请求
+            var req = 0
+            raf.seek(44L)
+            if (raf.length() >= 48L) req = raf.readInt()
+            raf.seek(0)
+            val hdr = ByteBuffer.allocate(SHM_HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+            hdr.putInt(SHM_MAGIC.toInt())
+            hdr.putInt(w)
+            hdr.putInt(h)
+            hdr.putInt(rs)
+            hdr.putInt(4)            // pixelStride
+            hdr.putInt(rotation)
+            hdr.putInt(spf)
+            hdr.putInt(lastSeq.get().toInt())
+            hdr.putInt(crop)
+            hdr.putInt(offX)
+            hdr.putInt(offY)
+            hdr.putInt(req)          // 保留 C++ 的裁剪请求
+            hdr.putLong(writeAttempts.get())
+            hdr.putLong(writeSuccesses.get())
+            hdr.putLong(acquireNulls.get())
+            hdr.putLong(writeFails.get())
+            raf.write(hdr.array())
         } catch (_: Exception) {}
     }
 
@@ -507,62 +544,99 @@ class CaptureService : Service() {
     }
 
     private fun writeFrame(image: Image) {
+        // 句柄/文件未就绪时直接关闭退出（在 try 之外，避免 finally 二次 close）
         val shm = shmFile ?: run { image.close(); return }
+        if (shmRaf == null) {
+            try {
+                shmRaf = RandomAccessFile(shm, "rw")
+            } catch (e: Exception) {
+                writeFails.incrementAndGet()
+                image.close()
+                return
+            }
+        }
+        val raf = shmRaf ?: run { image.close(); return }
         try {
             val plane = image.planes[0]
             val buf = plane.buffer
-            val w = image.width
-            val h = image.height
-            val rowStride = plane.rowStride
-            val sizePerFrame = rowStride * h
+            val imgW = image.width
+            val imgH = image.height
+            val srcRowStride = plane.rowStride
+            val ps = plane.pixelStride
 
-            if (shm.length() < (SHM_HEADER_SIZE + sizePerFrame * SHM_BUFFER_COUNT).toLong()) {
-                RandomAccessFile(shm, "rw").use { it.setLength(
-                    (SHM_HEADER_SIZE + sizePerFrame * SHM_BUFFER_COUNT).toLong()
-                ) }
+            // 读取 C++ 面板请求的裁剪尺寸（cropRequest，offset 44）。每帧都读，
+            // 读到合法新值立即应用（不做 delete+重建，C++ 侧持有旧文件 fd 会失效）。
+            var crop = activeCrop
+            if (raf.length() >= 48L) {
+                raf.seek(44L)
+                val req = raf.readInt()
+                if (req != 0 && req != activeCrop && CROP_OPTIONS.contains(req)) {
+                    diagLog("C++ 请求切换裁剪尺寸: $req (原 ${activeCrop})")
+                    activeCrop = req
+                    crop = req
+                }
+            }
+            crop = crop.coerceAtMost(minOf(imgW, imgH))
+            val offX = (imgW - crop) / 2
+            val offY = (imgH - crop) / 2
+            val cropStride = crop * ps
+            val sizePerFrame = crop * crop * ps
+
+            // 裁剪尺寸变大时扩展文件（C++ 侧也会自动扩展）
+            val need = SHM_HEADER_SIZE + sizePerFrame * SHM_BUFFER_COUNT
+            if (raf.length() < need.toLong()) raf.setLength(need.toLong())
+            // 裁剪缓冲不够大时扩容
+            if (cropBuffer.size < sizePerFrame) {
+                cropBuffer = ByteArray(sizePerFrame)
             }
 
             val seq = lastSeq.incrementAndGet()
             val bufIdx = ((seq % SHM_BUFFER_COUNT).toInt()) * sizePerFrame
-            val offset = SHM_HEADER_SIZE + bufIdx
 
-            // 保存最近一帧尺寸供 flushDiagnostics 用
-            lastW = w
-            lastH = h
-            lastRowStride = rowStride
+            // 保存最近一帧信息供 flushDiagnostics 用
+            lastW = imgW
+            lastH = imgH
+            lastRowStride = cropStride
             lastSizePerFrame = sizePerFrame
 
-            RandomAccessFile(shm, "rw").use { raf ->
-                // 写入帧数据
-                val pos = buf.position()
-                buf.rewind()
-                if (buf.remaining() >= sizePerFrame) {
-                    val chunk = ByteArray(sizePerFrame)
-                    buf.get(chunk)
-                    raf.seek(offset.toLong())
-                    raf.write(chunk)
-                }
-                buf.position(pos)
-
-                // 更新 header（尺寸/序号 + 写帧诊断计数）
-                writeSuccesses.incrementAndGet()
-                raf.seek(0)
-                val hdr = ByteBuffer.allocate(SHM_HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN)
-                hdr.putInt(SHM_MAGIC.toInt())
-                hdr.putInt(w)
-                hdr.putInt(h)
-                hdr.putInt(rowStride)
-                hdr.putInt(plane.pixelStride)
-                hdr.putInt(rotation)
-                hdr.putInt(sizePerFrame)
-                hdr.putInt(seq.toInt())
-                hdr.putLong(writeAttempts.get())
-                hdr.putLong(writeSuccesses.get())
-                hdr.putLong(acquireNulls.get())
-                hdr.putLong(writeFails.get())
-                raf.write(hdr.array())
+            // 一次内存拷贝：把裁剪区域逐行拷贝到 cropBuffer
+            // 而非逐行 seek+write（系统调用开销极大）
+            val pos = buf.position()
+            buf.rewind()
+            val dst = cropBuffer
+            for (r in 0 until crop) {
+                buf.position((offY + r) * srcRowStride + offX * ps)
+                buf.get(dst, r * cropStride, cropStride)
             }
-            if (seq % 60 == 0L) Log.d(TAG, "captured seq=$seq")
+            buf.position(pos)
+
+            // 一次 write() 写入整个裁剪帧
+            raf.seek((SHM_HEADER_SIZE + bufIdx).toLong())
+            raf.write(dst, 0, sizePerFrame)
+
+            // 更新 header（全屏尺寸 + 裁剪信息 + 序号 + 写帧诊断计数）
+            writeSuccesses.incrementAndGet()
+            raf.seek(0)
+            val hdr = ByteBuffer.allocate(SHM_HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+            hdr.putInt(SHM_MAGIC.toInt())
+            hdr.putInt(imgW)
+            hdr.putInt(imgH)
+            hdr.putInt(cropStride)
+            hdr.putInt(ps)
+            hdr.putInt(rotation)
+            hdr.putInt(sizePerFrame)
+            hdr.putInt(seq.toInt())
+            hdr.putInt(crop)
+            hdr.putInt(offX)
+            hdr.putInt(offY)
+            hdr.putInt(0) // cropRequest 每帧已消费，回写 0
+            hdr.putLong(writeAttempts.get())
+            hdr.putLong(writeSuccesses.get())
+            hdr.putLong(acquireNulls.get())
+            hdr.putLong(writeFails.get())
+            raf.write(hdr.array())
+
+            if (lastSeq.get() % 60 == 0L) Log.d(TAG, "captured seq=${lastSeq.get()}")
         } catch (e: Exception) {
             writeFails.incrementAndGet()
             Log.e(TAG, "frame write error: ${e.message}")
@@ -582,6 +656,8 @@ class CaptureService : Service() {
 
     private fun stopAll() {
         running.set(false)
+        try { shmRaf?.close() } catch (_: Exception) {}
+        shmRaf = null
         try {
             virtualDisplay?.release()
         } catch (_: Exception) {}

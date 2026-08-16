@@ -123,6 +123,36 @@ public:
     uint64_t acquireNulls() const { return readHeader().acquireNulls; }
     uint64_t writeFails() const { return readHeader().writeFails; }
 
+    // 返回当前帧的裁剪几何信息（来自最近一次 readFrame 的 freshHeader）
+    struct CropInfo {
+        int size = 0;      // 裁剪边长
+        int offX = 0;      // 左上角 x（全屏坐标）
+        int offY = 0;      // 左上角 y（全屏坐标）
+        int fullW = 0;     // 全屏宽
+        int fullH = 0;     // 全屏高
+    };
+    CropInfo cropInfo() const {
+        CropInfo c;
+        const ShmFrameHeader* h = freshHeader();
+        if (!h) return c;
+        c.size = (int)h->cropSize;
+        c.offX = (int)h->cropOffsetX;
+        c.offY = (int)h->cropOffsetY;
+        c.fullW = (int)h->width;
+        c.fullH = (int)h->height;
+        return c;
+    }
+
+    // 请求 APK 切换裁剪边长（写入头部 cropRequest，APK 每 500ms 读取并应用）
+    void requestCrop(int size) {
+        if (!m_valid || m_fd < 0) return;
+        ShmFrameHeader hdr;
+        if (::pread(m_fd, &hdr, sizeof(hdr), 0) != (ssize_t)sizeof(hdr)) return;
+        hdr.cropRequest = (uint32_t)size;
+        // 只覆写 cropRequest 字段（offset 44，4 字节），避免与写帧竞争
+        ::pwrite(m_fd, &hdr.cropRequest, sizeof(hdr.cropRequest), 44);
+    }
+
     // 读取统计（供面板诊断“帧源/读取是否正常”）
     uint64_t readOkCount() const { return m_readOk; }
     uint64_t noNewCount() const { return m_noNew; }

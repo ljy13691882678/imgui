@@ -131,17 +131,31 @@ static bool loadModel(int idx) {
 // 单帧处理：推理 + 跟踪 + 自瞄 + 触发 + 注入
 // ---------------------------------------------------------------------------
 static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
-    const int w = (int)h->width;
-    const int hh = (int)h->height;
+    const int w = (int)h->width;      // 全屏宽
+    const int hh = (int)h->height;    // 全屏高
     if (w <= 0 || hh <= 0) return;
     if (!g_engine) return;
+
+    // 共享内存里的帧是居中裁剪出的准星区域（cropSize×cropSize）。
+    // detect 语义：src 指向裁剪区域，region=裁剪区域，offset=裁剪区域在全屏中的
+    // 左上角，screen=全屏。这样检测框坐标会回映射到全屏归一化坐标。
+    int cropSize = (int)h->cropSize;
+    int cropOffX = (int)h->cropOffsetX;
+    int cropOffY = (int)h->cropOffsetY;
+    if (cropSize <= 0 || cropSize > w || cropSize > hh) {
+        // 兼容旧头（未裁剪全屏）：cropSize 为 0 时退化为整帧
+        cropSize = std::min(w, hh);
+        cropOffX = (w - cropSize) / 2;
+        cropOffY = (hh - cropSize) / 2;
+    }
 
     // 读锁保护引擎（切换模型时会取写锁等待）
     std::shared_lock<std::shared_mutex> engLock(g_engineMutex);
     if (!g_engine) return;
 
     auto dets = g_engine->detect(
-        const_cast<uint8_t*>(frame), 0, 0, w, hh, w, hh,
+        const_cast<uint8_t*>(frame), cropOffX, cropOffY, cropSize, cropSize,
+        w, hh,
         (int)h->rowStride, (int)h->pixelStride);
 
     // 更新检测结果（供绘制）
@@ -319,10 +333,19 @@ static void drawDetectionOverlay() {
         if (!g_cfg.showBoxes) break;
         ImVec2 p1(d.x1 * sx, d.y1 * sy);
         ImVec2 p2(d.x2 * sx, d.y2 * sy);
-        draw->AddRect(p1, p2, IM_COL32(0, 255, 0, 255), 0.0f, 0, 2.0f);
-        char lbl[32];
-        snprintf(lbl, sizeof(lbl), "%.2f", d.score);
-        draw->AddText(p1, IM_COL32(0, 255, 0, 255), lbl);
+        // 描边：先画一圈黑色粗边框，再画亮色内框，保证任何背景下都清晰可见
+        int thick = std::max(1, g_cfg.boxThickness);
+        int outline = thick + 3;
+        draw->AddRect(p1, p2, IM_COL32(0, 0, 0, 200), 0.0f, 0, (float)outline);
+        draw->AddRect(p1, p2, IM_COL32(0, 255, 0, 255), 0.0f, 0, (float)thick);
+        if (g_cfg.showBoxLabels) {
+            char lbl[32];
+            snprintf(lbl, sizeof(lbl), "%.2f", d.score);
+            // 标签带黑色描边，避免浅色背景下看不清
+            draw->AddText(ImVec2(p1.x - 1, p1.y - 1), IM_COL32(0, 0, 0, 220), lbl);
+            draw->AddText(ImVec2(p1.x + 1, p1.y + 1), IM_COL32(0, 0, 0, 220), lbl);
+            draw->AddText(p1, IM_COL32(0, 255, 0, 255), lbl);
+        }
     }
 
     // 准星
@@ -392,6 +415,41 @@ static void drawControlPanel() {
     ImGui::Checkbox("显示检测框", &g_cfg.showBoxes);
     ImGui::Checkbox("显示帧率", &g_cfg.showFps);
     ImGui::SliderFloat("置信度阈值", &g_cfg.confidence, 0.05f, 0.95f);
+    ImGui::Separator();
+
+    // 居中裁剪尺寸选择（面板切换后，传给 APK 重建共享内存）
+    {
+        char previewBuf[32];
+        snprintf(previewBuf, sizeof(previewBuf), "%d", CROP_OPTIONS[g_cfg.cropIndex]);
+        if (g_shm && g_shm->valid()) {
+            auto ci = g_shm->cropInfo();
+            if (ci.size > 0) {
+                snprintf(previewBuf, sizeof(previewBuf), "%d (当前)", ci.size);
+            }
+        }
+        if (ImGui::BeginCombo("裁剪尺寸", previewBuf)) {
+            for (int i = 0; i < (int)(sizeof(CROP_OPTIONS)/sizeof(CROP_OPTIONS[0])); ++i) {
+                char label[32];
+                snprintf(label, sizeof(label), "%d×%d", CROP_OPTIONS[i], CROP_OPTIONS[i]);
+                bool selected = (i == g_cfg.cropIndex);
+                if (ImGui::Selectable(label, selected)) {
+                    if (i != g_cfg.cropIndex) {
+                        g_cfg.cropIndex = i;
+                        int newSize = CROP_OPTIONS[i];
+                        printf("[panel] requesting crop size change to %d\n", newSize);
+                        if (g_shm && g_shm->valid()) {
+                            g_shm->requestCrop(newSize);
+                        }
+                    }
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+    }
+    // 检测框描边粗细
+    ImGui::SliderInt("框描边", &g_cfg.boxThickness, 1, 4);
+    ImGui::Checkbox("框标签", &g_cfg.showBoxLabels);
     ImGui::Separator();
 
     ImGui::Checkbox("自瞄", &g_cfg.aimEnabled);

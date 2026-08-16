@@ -605,10 +605,12 @@ std::vector<Detection> LiteRtEngine::detect(
     int W = m_input_width;
 
     // Precompute coordinate LUTs
+    // src 是居中裁剪后的区域（数据从缓冲区 0,0 开始），offsetX/offsetY 仅用于
+    // 把检测框坐标回映射到全屏（见 makeDetectionFromInputBox），不参与采样。
     std::vector<int> srcX_lut(W);
     std::vector<int> srcY_lut(H);
-    for (int x = 0; x < W; ++x) srcX_lut[x] = offsetX + x * regionWidth / W;
-    for (int y = 0; y < H; ++y) srcY_lut[y] = offsetY + y * regionHeight / H;
+    for (int x = 0; x < W; ++x) srcX_lut[x] = x * regionWidth / W;
+    for (int y = 0; y < H; ++y) srcY_lut[y] = y * regionHeight / H;
 
     static const float inv255 = 1.0f / 255.0f;
 
