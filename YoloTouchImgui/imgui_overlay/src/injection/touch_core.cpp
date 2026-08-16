@@ -48,7 +48,8 @@ struct Vec2 {
 
 struct TouchObj {
     Vec2 pos{};
-    int id = 0;
+    int id = 0;       // 逻辑 id（uinput upload 用，跨设备唯一）
+    int hwId = -1;    // 设备原始 tracking id（内核转发用；-1=未按下）
     bool isDown = false;
 };
 
@@ -74,6 +75,9 @@ struct InputBuffer {
 
 static std::vector<Device> g_devices;
 static std::array<std::array<bool, maxF>, maxE> g_uploadedFingerDown{};
+// 内核模式：当前已通过驱动转发的真实手指 id 集合（按 hwId 去重，防止驱动注入回读导致重复/级联转发）
+static std::array<int, maxE * maxF>  g_fwdIds{};
+static std::array<bool, maxE * maxF> g_fwdDown{};
 static InputBuffer g_inputBuffer{};
 static Vec2 g_touchScale{1.0f, 1.0f};
 static Vec2 g_screenSize{};
@@ -274,6 +278,55 @@ static void upload() {
     write(g_outputFd, g_inputBuffer.event, sizeof(input_event) * count);
 }
 
+// ─── 内核转发状态（按 hwId 去重） ──────────────────────────────────
+static bool fwdIsDown(int id) {
+    for (int i = 0; i < maxE * maxF; ++i)
+        if (g_fwdDown[i] && g_fwdIds[i] == id) return true;
+    return false;
+}
+static void fwdMark(int id) {
+    for (int i = 0; i < maxE * maxF; ++i) {
+        if (!g_fwdDown[i]) { g_fwdIds[i] = id; g_fwdDown[i] = true; return; }
+    }
+}
+static void fwdUnmark(int id) {
+    for (int i = 0; i < maxE * maxF; ++i) {
+        if (g_fwdDown[i] && g_fwdIds[i] == id) { g_fwdDown[i] = false; return; }
+    }
+}
+
+// 内核模式透传：把真实物理手指经内核驱动转发给系统（对齐 uinput 模式的 upload() 透传）。
+// 设备被 grab 独占后，真实触摸若不转发，游戏/系统收不到任何触摸；这里用驱动
+// Touch_Down/Move/Up 按真实手指原始 tracking id（hwId）重放，本进程注入的
+// 虚拟/扳机手指（1000/2000）跳过，驱动注入的回读事件按 hwId 去重避免级联。
+static void syncRealFingersKernel() {
+    if (!g_kernelMode || !kdrv_connected()) return;
+    if (g_devices.empty()) return;
+    const int touchMaxX = std::max(1, g_devices[0].absX.maximum);
+    const int touchMaxY = std::max(1, g_devices[0].absY.maximum);
+
+    for (size_t di = 0; di < g_devices.size(); ++di) {
+        for (int fi = 0; fi < maxF; ++fi) {
+            const TouchObj& finger = g_devices[di].fingers[fi];
+            // 跳过本进程注入的虚拟/扳机手指（无论槽位还是 id）
+            bool slotInjected = (di == 0 && (fi == TOUCH_VIRTUAL_SLOT || fi == TOUCH_TRIGGER_SLOT));
+            bool idInjected = (finger.hwId == TOUCH_VIRTUAL_ID || finger.hwId == TOUCH_TRIGGER_ID);
+            if (slotInjected || idInjected) continue;
+
+            int fwdId = (finger.hwId >= 0) ? finger.hwId : finger.id;
+            if (finger.isDown) {
+                int sx = 0, sy = 0;
+                touchToScreen(finger.pos.x, finger.pos.y, touchMaxX, touchMaxY, sx, sy);
+                if (fwdIsDown(fwdId)) kdrv_touch_move(fwdId, sx, sy);
+                else { kdrv_touch_down(fwdId, sx, sy); fwdMark(fwdId); }
+            } else if (fwdIsDown(fwdId)) {
+                kdrv_touch_up(fwdId);
+                fwdUnmark(fwdId);
+            }
+        }
+    }
+}
+
 // ─── Zone detection ─────────────────────────────────────────────────
 
 // ─── Device scanning ────────────────────────────────────────────────
@@ -405,6 +458,8 @@ static void closeTouchLocked() {
     }
     memset(g_inputBuffer.event, 0, sizeof(g_inputBuffer.event));
     g_uploadedFingerDown = {};
+    g_fwdIds = {};
+    g_fwdDown = {};
     g_initialized = false;
     g_devices.clear();
 }
@@ -435,10 +490,12 @@ static void* deviceReader(void* arg) {
                     break;
                 case ABS_MT_TRACKING_ID:
                     if (curSlot >= 0 && curSlot < maxF) {
-                        if (ie.value == -1)
+                        if (ie.value == -1) {
                             dev.fingers[curSlot].isDown = false;
-                        else {
+                            // hwId 保留最后有效 tracking id，供内核转发抬起使用
+                        } else {
                             dev.fingers[curSlot].isDown = true;
+                            dev.fingers[curSlot].hwId = ie.value;
                             dev.fingers[curSlot].id =
                                 static_cast<int>((devIdx * 2 + 1) * maxF + curSlot);
                         }
@@ -461,6 +518,7 @@ static void* deviceReader(void* arg) {
 
             if (ie.type == EV_SYN && ie.code == SYN_REPORT) {
                 upload();
+                syncRealFingersKernel();
             }
         }
     }
@@ -513,10 +571,9 @@ bool touch_init(int screenW, int screenH, int rotation) {
         if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &device.absX) == 0 &&
             ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &device.absY) == 0) {
             device.fd = fd;
-            // 仅 uinput 模式 grab：抓取后由 reader 经 uinput 转发真实触摸，避免与注入双重投递。
-            // 内核模式不 grab——内核驱动在更低层 hook 触摸注入，真实触摸必须照常直达系统，
-            // 否则设备被独占后游戏/其他应用收不到任何触摸（只读不影响 reader 线程取坐标）。
-            if (!g_kernelMode) ioctl(fd, EVIOCGRAB, GRAB);
+            // 两种模式都 grab（独占）：uinput 模式经 uinput 转发，内核模式经驱动转发，
+            // 避免真实事件与注入事件对系统双重投递。grab 后 reader 线程仍能从自身 fd 读到事件。
+            ioctl(fd, EVIOCGRAB, GRAB);
             g_devices.push_back(device);
             LOGD("touch device %s max=%d,%d", path, device.absX.maximum, device.absY.maximum);
         } else {
@@ -707,6 +764,13 @@ bool touch_lift_joystick_finger(void) {
 
             if (pointInZone(g_joystick_zone, sx, sy)) {
                 g_devices[d].fingers[f].isDown = false;
+                // 内核模式：同步向驱动发送抬起，避免游戏里该手指一直按住
+                if (g_kernelMode && kdrv_connected()) {
+                    int fwdId = (g_devices[d].fingers[f].hwId >= 0)
+                                    ? g_devices[d].fingers[f].hwId
+                                    : g_devices[d].fingers[f].id;
+                    if (fwdIsDown(fwdId)) { kdrv_touch_up(fwdId); fwdUnmark(fwdId); }
+                }
                 lifted = true;
                 LOGD("liftJoystickFinger: dev%zu finger%d at (%d,%d)", d, f, sx, sy);
             }
