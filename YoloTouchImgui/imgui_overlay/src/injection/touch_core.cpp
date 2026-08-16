@@ -3,6 +3,7 @@
 // Shared by JNI (Shizuku) and root_daemon (su)
 
 #include "touch_core.h"
+#include "paradise_wrap.h"
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/input.h>
@@ -92,6 +93,13 @@ static Zone g_trigger_zone;
 static Zone g_ads_zone;
 static Zone g_fire_zone;
 static Zone g_joystick_zone;
+
+// 注入模式：0=uinput（默认），1=内核驱动 paradise
+static int g_inject_mode = TOUCH_MODE_UINPUT;
+// 内核驱动注入是否就绪（touch_inject_init 成功后置位）
+static bool g_kernel_inject_ready = false;
+// 内核模式下各槽位按下状态（用于 touch_move 的抬起+重按下模拟）
+static std::array<std::array<bool, maxF>, maxE> g_kernelFingerDown{};
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
@@ -430,6 +438,8 @@ static void closeTouchLocked() {
     }
     memset(g_inputBuffer.event, 0, sizeof(g_inputBuffer.event));
     g_uploadedFingerDown = {};
+    g_kernelFingerDown = {};
+    g_kernel_inject_ready = false;
     g_initialized = false;
     g_devices.clear();
 }
@@ -575,16 +585,63 @@ int  touch_get_output_fd(void)   { return g_outputFd; }
 int  touch_device_count(void)    { return static_cast<int>(g_devices.size()); }
 
 // uinput 注入设备是否已就绪（触摸注入可用）
-bool touch_inject_ready(void) { return g_initialized && g_outputFd > 0; }
+bool touch_inject_ready(void) {
+    if (!g_initialized) return false;
+    if (g_inject_mode == TOUCH_MODE_KERNEL)
+        return g_kernel_inject_ready && paradise_is_connected();
+    return g_outputFd > 0;
+}
 
-// 按需创建 uinput 注入设备（触摸注入就绪）。
+// 关闭注入通道（调用方需已持有 g_mutex）
+static void closeInjectLocked() {
+    if (g_inject_mode == TOUCH_MODE_KERNEL) {
+        // 内核模式：抬起所有已按下的合成手指，停止注入。
+        // 驱动保持连接（供陀螺仪等能力复用），仅复位注入状态。
+        for (size_t e = 0; e < g_kernelFingerDown.size(); ++e)
+            for (size_t f = 0; f < g_kernelFingerDown[e].size(); ++f)
+                if (g_kernelFingerDown[e][f])
+                    paradise_touch_up(static_cast<int>(f));
+        g_kernelFingerDown = {};
+        g_kernel_inject_ready = false;
+        return;
+    }
+    if (g_outputFd > 0) {
+        ioctl(g_outputFd, UI_DEV_DESTROY);
+        close(g_outputFd);
+        g_outputFd = 0;
+    }
+    g_uploadedFingerDown = {};
+}
+
+// 按需创建注入通道（触摸注入就绪）。
 // touch_init 默认不创建；自瞄/扳机/压枪需要注入时由面板“初始化触摸”调用。
+// uinput 模式：创建 /dev/uinput 注入设备；
+// 内核模式：连接 paradise 内核驱动并初始化触摸注入。
 bool touch_inject_init(void) {
     std::lock_guard<std::mutex> guard(g_mutex);
     if (!g_initialized || g_devices.empty()) return false;
-    if (g_outputFd > 0) return true;  // 已就绪
+    if (touch_inject_ready()) return true;  // 已就绪
     const int touchMaxX = std::max(1, g_devices[0].absX.maximum);
     const int touchMaxY = std::max(1, g_devices[0].absY.maximum);
+
+    if (g_inject_mode == TOUCH_MODE_KERNEL) {
+        // 内核驱动模式：连接驱动并初始化触摸注入。
+        // 坐标约定：X 使用短边域，Y 使用长边域（与 screenToTouch 产出的竖屏坐标一致）。
+        if (!paradise_connect()) {
+            LOGE("paradise connect failed (kernel driver not loaded?)");
+            return false;
+        }
+        if (!paradise_touch_init(touchMaxX, touchMaxY)) {
+            LOGE("paradise touch_init failed (kernel driver not loaded?)");
+            return false;
+        }
+        g_kernel_inject_ready = true;
+        g_kernelFingerDown = {};
+        LOGD("touch inject ready (kernel driver)");
+        return true;
+    }
+
+    if (g_outputFd > 0) return true;  // 已就绪
     if (!createUinputDevice(touchMaxX, touchMaxY, g_devices[0].fd)) {
         LOGE("touch inject init failed (need root + /dev/uinput)");
         return false;
@@ -593,17 +650,27 @@ bool touch_inject_init(void) {
     return true;
 }
 
-// 销毁 uinput 注入设备（停止触摸注入）
+// 关闭注入通道（停止触摸注入）
 void touch_inject_close(void) {
     std::lock_guard<std::mutex> guard(g_mutex);
-    if (g_outputFd > 0) {
-        ioctl(g_outputFd, UI_DEV_DESTROY);
-        close(g_outputFd);
-        g_outputFd = 0;
-    }
-    g_uploadedFingerDown = {};
-    LOGD("touch inject closed");
+    closeInjectLocked();
+    LOGD("touch inject closed (mode=%d)", g_inject_mode);
 }
+
+// 注入模式：0=uinput，1=内核驱动 paradise
+void touch_set_inject_mode(int mode) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    if (mode != TOUCH_MODE_UINPUT && mode != TOUCH_MODE_KERNEL) return;
+    if (g_inject_mode == mode) return;
+    closeInjectLocked();
+    g_inject_mode = mode;
+    LOGD("touch inject mode -> %d", g_inject_mode);
+}
+
+int  touch_get_inject_mode(void) { return g_inject_mode; }
+
+// 内核驱动是否已连接（驱动 fd 有效，面板诊断用）
+bool touch_kernel_connected(void) { return paradise_is_connected(); }
 
 void touch_start_readers(void) {
     if (g_running) return;
@@ -643,6 +710,14 @@ void touch_down(int slot, int id, int screenX, int screenY) {
     if (!g_initialized || g_devices.empty()) return;
     float tx, ty;
     screenToTouch(screenX, screenY, tx, ty);
+    if (g_inject_mode == TOUCH_MODE_KERNEL && g_kernel_inject_ready) {
+        // 内核驱动模式：坐标直接为驱动约定的 短边域X / 长边域Y
+        if (slot >= 0 && slot < maxF) {
+            paradise_touch_down(slot, static_cast<int>(tx), static_cast<int>(ty));
+            g_kernelFingerDown[0][slot] = true;
+        }
+        return;
+    }
     g_devices[0].fingers[slot].id = id;
     g_devices[0].fingers[slot].pos = Vec2(tx, ty);
     g_devices[0].fingers[slot].isDown = true;
@@ -654,6 +729,15 @@ void touch_move(int slot, int screenX, int screenY) {
     if (!g_initialized || g_devices.empty()) return;
     float tx, ty;
     screenToTouch(screenX, screenY, tx, ty);
+    if (g_inject_mode == TOUCH_MODE_KERNEL && g_kernel_inject_ready) {
+        // 驱动无 touch_move 接口：用 抬起+重按下 模拟连续拖拽
+        if (slot >= 0 && slot < maxF) {
+            if (g_kernelFingerDown[0][slot]) paradise_touch_up(slot);
+            paradise_touch_down(slot, static_cast<int>(tx), static_cast<int>(ty));
+            g_kernelFingerDown[0][slot] = true;
+        }
+        return;
+    }
     g_devices[0].fingers[slot].pos = Vec2(tx, ty);
     upload();
 }
@@ -661,6 +745,13 @@ void touch_move(int slot, int screenX, int screenY) {
 void touch_up(int slot) {
     std::lock_guard<std::mutex> guard(g_mutex);
     if (!g_initialized || g_devices.empty()) return;
+    if (g_inject_mode == TOUCH_MODE_KERNEL && g_kernel_inject_ready) {
+        if (slot >= 0 && slot < maxF) {
+            paradise_touch_up(slot);
+            g_kernelFingerDown[0][slot] = false;
+        }
+        return;
+    }
     g_devices[0].fingers[slot].isDown = false;
     upload();
 }
