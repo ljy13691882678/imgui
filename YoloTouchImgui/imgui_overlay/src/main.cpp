@@ -260,8 +260,8 @@ static void inferenceLoop() {
             long long now = getTimeNowMs();
             if (now - lastNoFrameLog >= 5000) {
                 lastNoFrameLog = now;
-                printf("[infer] no new frame for 5s, everGotFrame=%d, shmSeq=%u\n",
-                       everGotFrame ? 1 : 0, g_shm->readSeq());
+                printf("[infer] no new frame for 5s, everGotFrame=%d, %s\n",
+                       everGotFrame ? 1 : 0, g_shm->diag().c_str());
             }
             std::this_thread::sleep_for(5ms);
             continue;
@@ -361,6 +361,9 @@ static void drawControlPanel() {
                 g_shm && g_shm->valid() ? g_shm->readSeq() : 0u,
                 (unsigned long long)g_frameCount.load());
     ImGui::Text("最近推理耗时: %lld ms", (long long)g_lastFrameMs.load());
+    if (g_shm && g_shm->valid()) {
+        ImGui::TextWrapped("共享内存: %s", g_shm->diag().c_str());
+    }
     ImGui::Separator();
 
     // 模型选择
@@ -538,11 +541,11 @@ int main(int argc, char* argv[]) {
         if (lastDone > 0 && now - lastDone > 10000 && now - lastWatchdogLog > 10000) {
             lastWatchdogLog = now;
             fprintf(stderr, "[WATCHDOG] inference thread no frame for 10s! "
-                    "engine=%s shmSeq=%u processed=%llu lastFrameMs=%lld\n",
+                    "engine=%s processed=%llu lastFrameMs=%lld shmDiag=%s\n",
                     g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "?",
-                    g_shm ? g_shm->readSeq() : 0u,
                     (unsigned long long)g_frameCount.load(),
-                    (long long)g_lastFrameMs.load());
+                    (long long)g_lastFrameMs.load(),
+                    g_shm && g_shm->valid() ? g_shm->diag().c_str() : "no-shm");
         }
 
         drawBegin();

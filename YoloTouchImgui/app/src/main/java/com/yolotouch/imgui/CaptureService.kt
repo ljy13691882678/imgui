@@ -69,7 +69,13 @@ class CaptureService : Service() {
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    // 拆成两个单线程池：
+    //  - setupExecutor：解压/拉起 imgui（耗时长，秒级）
+    //  - frameExecutor：写帧（毫秒级）
+    // 之前共用 ioExecutor 时，解压期间 writeFrame 被排在其后，imgui 一启动反而
+    // 没有新帧可读（推理 FPS=0）。拆分后 initShm 一完成即开始持续写帧。
+    private val setupExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val frameExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
     private lateinit var mediaProjectionManager: MediaProjectionManager
     private var mediaProjection: MediaProjection? = null
@@ -230,10 +236,21 @@ class CaptureService : Service() {
                 showError("虚拟显示创建失败")
                 return
             }
+            // 尽早创建共享内存文件（在解压/拉起 imgui 之前）。
+            // 之前 initShm 放在 prepareNativeAndRun（ioExecutor 单线程）里，
+            // 解压耗时期间 ImageReader 已产帧，但 shmFile 尚未就绪导致早期帧全被丢弃；
+            // 提前初始化后，录屏帧在悬浮窗拉起前即可持续写入，保证推理侧一启动就有新帧。
+            try {
+                initShm(File(filesDir, "frame.bin"))
+            } catch (e: Exception) {
+                diagLog("ERROR: initShm failed: $e")
+                showError("共享内存初始化失败：${e.message}")
+                return
+            }
             diagLog("virtualDisplay created, capture started")
             updateNotification("录屏中，正在准备悬浮窗...")
 
-            ioExecutor.execute {
+            setupExecutor.execute {
                 try {
                     if (!prepareNativeAndRun()) {
                         // prepareNativeAndRun 内部失败时已 showError 并 stopAll，这里兜底
@@ -244,6 +261,11 @@ class CaptureService : Service() {
                     mainHandler.post { showError("解压/启动原生失败：${e.message}") }
                 }
             }
+
+            // 帧写入看门狗：每 3s 检查共享内存序号是否在增长。
+            // 若长时间不增长 → APK 侧未产帧（录屏/ImageReader 问题），写日志+持久化状态，
+            // 用户无需 adb 即可判断帧源是否卡住。
+            startShmWatchdog()
         } catch (e: Exception) {
             showError("录屏启动异常：${e.javaClass.simpleName} ${e.message}")
         }
@@ -311,9 +333,12 @@ class CaptureService : Service() {
             }
         }
 
-        // 4. 创建共享内存文件（头部 + 双缓冲）
+        // 4. 共享内存文件在 startProjection 里已提前创建（initShm），
+        //    帧写入也已在 frameExecutor 上独立进行。
+        //    这里不能再调用 initShm（会 delete+重建文件）——解压期间可能已有
+        //    帧写入在写该文件，重建会导致文件被删除/截断、与写帧线程竞争。
+        //    只确保 imgui（root 进程）可读可写。
         val shm = File(filesDir, "frame.bin")
-        initShm(shm)
         shm.setReadable(true, false)
         shm.setWritable(true, false)
 
@@ -381,16 +406,42 @@ class CaptureService : Service() {
     // ─── 写帧（由 OnImageAvailableListener 驱动） ─────────────
     private fun onFrameAvailable(reader: ImageReader) {
         if (!running.get()) return
-        // 上一帧还在写（ioExecutor 单线程排队），则跳过本次，
+        // 上一帧还在写（frameExecutor 单线程排队），则跳过本次，
         // 下一帧到达时 acquireLatestImage() 会取到最新一帧，避免堆积。
         if (!frameWriting.compareAndSet(false, true)) return
-        ioExecutor.execute {
+        frameExecutor.execute {
             try {
                 writeFrame(reader)
             } finally {
                 frameWriting.set(false)
             }
         }
+    }
+
+    // 帧写入看门狗：周期性检查共享内存序号是否在增长。
+    // - 增长正常：保持运行状态
+    // - 长时间不增长：帧源卡住（录屏/ImageReader/写帧线程问题），写日志便于诊断
+    private var shmWatchdogSeq = 0L
+    private var shmStallCount = 0
+
+    private fun startShmWatchdog() {
+        mainHandler.post(object : Runnable {
+            override fun run() {
+                if (!running.get()) return
+                val s = lastSeq.get()
+                if (s == shmWatchdogSeq) {
+                    shmStallCount++
+                    if (shmStallCount >= 4) {  // ~12s 无新帧
+                        diagLog("WARN: 帧源序号停滞于 $s（${shmStallCount * 3}s 无新帧）" +
+                            "——录屏/ImageReader 可能未产帧")
+                    }
+                } else {
+                    shmStallCount = 0
+                }
+                shmWatchdogSeq = s
+                mainHandler.postDelayed(this, 3000)
+            }
+        })
     }
 
     private fun writeFrame(reader: ImageReader) {
@@ -476,7 +527,8 @@ class CaptureService : Service() {
 
     override fun onDestroy() {
         stopAll()
-        ioExecutor.shutdownNow()
+        setupExecutor.shutdownNow()
+        frameExecutor.shutdownNow()
         super.onDestroy()
     }
 
