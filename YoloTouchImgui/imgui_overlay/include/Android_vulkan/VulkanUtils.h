@@ -37,6 +37,10 @@ void UploadFonts();
 
 void SwapChainRebuild(int w, int h);
 
+// 旋转/屏幕尺寸变化时：销毁旧 Surface + SwapChain，按新尺寸重建窗口，
+// 并以新的 RenderPass 重建 ImGui Vulkan 渲染后端。
+void RecreateVulkanWindow(ANativeWindow *new_window, int width, int height);
+
 void FrameRender(ImDrawData *draw_data);
 
 void FramePresent();

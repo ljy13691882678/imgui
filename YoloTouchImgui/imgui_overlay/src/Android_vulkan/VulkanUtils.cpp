@@ -239,8 +239,10 @@ void SetupVulkanWindow(ANativeWindow *window, int width, int height) {
     ImGui_ImplVulkanH_CreateOrResizeWindow(g_Instance, g_PhysicalDevice, g_Device, wd, g_QueueFamily, g_Allocator, width, height, g_MinImageCount);
 }
 
-void UploadFonts() {
-    // Setup Platform/Renderer backends
+// 初始化 ImGui Vulkan 渲染后端（含字体上传）。
+// 旋转重建窗口后需要以新 RenderPass 重新调用，否则后端 Pipeline
+// 仍引用已销毁的旧 RenderPass。
+static bool InitImguiVulkan() {
     ImGui_ImplVulkan_InitInfo init_info = {};
     init_info.Instance = g_Instance;
     init_info.PhysicalDevice = g_PhysicalDevice;
@@ -288,6 +290,24 @@ void UploadFonts() {
         check_vk_result(err);
         //ImGui_ImplVulkan_DestroyFontUploadObjects();
     }
+    return true;
+}
+
+void UploadFonts() {
+    InitImguiVulkan();
+}
+
+// 旋转/屏幕尺寸变化时调用：
+// 1. 关闭 ImGui Vulkan 后端（释放绑定旧 RenderPass 的 Pipeline/字体）
+// 2. 销毁旧 Surface + SwapChain
+// 3. 按新尺寸重建 Surface + SwapChain（生成新 RenderPass）
+// 4. 以新 RenderPass 重新初始化 ImGui Vulkan 后端并上传字体
+void RecreateVulkanWindow(ANativeWindow *new_window, int width, int height) {
+    ImGui_ImplVulkan_Shutdown();
+    vkDeviceWaitIdle(g_Device);
+    CleanupVulkanWindow();
+    SetupVulkanWindow(new_window, width, height);
+    InitImguiVulkan();
 }
 
 void SwapChainRebuild(int w, int h) {

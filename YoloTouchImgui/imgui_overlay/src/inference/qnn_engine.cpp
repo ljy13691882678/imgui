@@ -3,6 +3,7 @@
 #include <qnn/TFLiteDelegate/QnnTFLiteDelegate.h>
 #include <dlfcn.h>
 #include <cstdio>
+#include <cstdlib>
 
 //==============================================================================
 //  Helper: Get native library directory
@@ -18,6 +19,27 @@ static const char* getNativeLibDir() {
             strncpy(dir, libPath.substr(0, pos).c_str(), sizeof(dir) - 1);
         }
     }
+    return dir;
+}
+
+// QNN HTP skel 库（libQnnHtpV*Skel.so）所在目录。
+// 优先取 LD_LIBRARY_PATH（APK 启动时注入 .so 目录），该路径才是真正的
+// 库目录；dladdr 拿到的是可执行文件所在目录（<filesDir>/bin），不含 skel 库。
+static const char* getSkelLibDir() {
+    static char dir[512] = {0};
+    if (dir[0]) return dir;
+
+    const char* ld = getenv("LD_LIBRARY_PATH");
+    if (ld && ld[0]) {
+        // LD_LIBRARY_PATH 可能为冒号分隔的多目录，QNN 只接受单个目录，取第一个
+        size_t len = strcspn(ld, ":");
+        if (len > 0 && len < sizeof(dir)) {
+            memcpy(dir, ld, len);
+            dir[len] = '\0';
+            return dir;
+        }
+    }
+    strncpy(dir, getNativeLibDir(), sizeof(dir) - 1);
     return dir;
 }
 
@@ -84,8 +106,8 @@ TfLiteDelegate* QnnEngine::buildDelegate() {
 
     TfLiteQnnDelegateOptions qnn_options = TfLiteQnnDelegateOptionsDefault();
     qnn_options.backend_type = kHtpBackend;
-    qnn_options.skel_library_dir = m_native_lib_dir;
-    qnn_options.cache_dir = "/data/data/com.yolotouchhelp.aimbot/cache/qnn";
+    qnn_options.skel_library_dir = getSkelLibDir();
+    qnn_options.cache_dir = "/data/data/com.yolotouch.imgui/cache/qnn";
     qnn_options.model_token = "yolov8n_htp_v1";
 
     m_delegate = TfLiteQnnDelegateCreate(&qnn_options);

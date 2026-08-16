@@ -147,12 +147,53 @@ void drawBegin() {
     if (::orientation != displayInfo.orientation) {
         ::orientation = displayInfo.orientation;
         UpdateScreenData(displayInfo.width, displayInfo.height, displayInfo.orientation);
-        //touchEnd();
-        g_window->Pos.x = 100;
-        g_window->Pos.y = 125;
-        //Init_touch_config();
-        
-        //cout << " width:" << displayInfo.width << " height:" << displayInfo.height << " orientation:" << displayInfo.orientation << endl;
+
+        // 屏幕旋转后宽高互换，旧的 native window 尺寸不再匹配：
+        // 必须重建 native window，并同步重建渲染上下文与 ImGui 渲染后端，
+        // 否则悬浮窗渲染尺寸错误，旋转后 imgui 消失或直接崩溃。
+        int w = (int)displayInfo.width;
+        int h = (int)displayInfo.height;
+        if (w != native_window_screen_x || h != native_window_screen_y) {
+#ifdef USE_OPENGL
+            // 销毁旧 EGL 上下文与 Surface
+            if (display != EGL_NO_DISPLAY) {
+                eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+                if (context != EGL_NO_CONTEXT) eglDestroyContext(display, context);
+                if (surface != EGL_NO_SURFACE) eglDestroySurface(display, surface);
+                eglTerminate(display);
+                display = EGL_NO_DISPLAY;
+                context = EGL_NO_CONTEXT;
+                surface = EGL_NO_SURFACE;
+            }
+            // init_egl 内部会按新尺寸重建 native window
+            android::ANativeWindowCreator::Destroy(::native_window);
+            if (!init_egl((uint32_t)w, (uint32_t)h, false)) {
+                fprintf(stderr, "init_egl failed after rotation\n");
+            }
+            ImGui_ImplOpenGL3_Shutdown();
+            ImGui_ImplOpenGL3_Init("#version 300 es");
+#else
+            // Vulkan：创建新尺寸的 native window，销毁旧 Surface/SwapChain +
+            // ImGui Vulkan 后端，按新尺寸重建（见 VulkanUtils::RecreateVulkanWindow）
+            ANativeWindow *oldWindow = ::native_window;
+            ANativeWindow *newWindow = android::ANativeWindowCreator::Create("AImGui", w, h, true);
+            if (newWindow) {
+                ::native_window = newWindow;
+                RecreateVulkanWindow(newWindow, w, h);
+                // 释放旧 SurfaceControl（ANativeWindowCreator::Destroy 会断开连接）
+                android::ANativeWindowCreator::Destroy(oldWindow);
+            }
+#endif
+            native_window_screen_x = w;
+            native_window_screen_y = h;
+        }
+
+        // 旋转后把控制面板移到安全位置（g_window 可能为空，先初始化再判空）
+        g_window = ImGui::FindWindowByName("YoloTouch 控制面板");
+        if (g_window) {
+            g_window->Pos.x = 100;
+            g_window->Pos.y = 125;
+        }
     }
 
     #ifdef USE_OPENGL
