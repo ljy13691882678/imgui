@@ -217,8 +217,8 @@ static void drawDetectionOverlay() {
     float sy = native_window_screen_y;
 
     if (g_cfg.showFps) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "FPS: %llu  Det: %zu  Track: %zu",
+        char buf[96];
+        snprintf(buf, sizeof(buf), "帧率: %llu  检测: %zu  跟踪: %zu",
                  (unsigned long long)g_inferFps.load(),
                  g_detections.size(), g_tracks.size());
         draw->AddText(ImVec2(20, 20), IM_COL32(255, 255, 0, 255), buf);
@@ -246,31 +246,31 @@ static void drawDetectionOverlay() {
 
 static void drawControlPanel() {
     ImGui::SetNextWindowPos(ImVec2(20, 80), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(320, 480), ImGuiCond_FirstUseEver);
-    ImGui::Begin("YoloTouch Control", nullptr, ImGuiWindowFlags_NoCollapse);
-    ImGui::Text("Backend: %s", g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "none");
-    ImGui::Text("Frame: %ux%u rot=%d", g_shmWidth, g_shmHeight, g_rotation);
+    ImGui::SetNextWindowSize(ImVec2(340, 520), ImGuiCond_FirstUseEver);
+    ImGui::Begin("YoloTouch 控制面板", nullptr, ImGuiWindowFlags_NoCollapse);
+    ImGui::Text("后端: %s", g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "无");
+    ImGui::Text("帧: %ux%u 旋转=%d", g_shmWidth, g_shmHeight, g_rotation);
     ImGui::Separator();
 
-    ImGui::Checkbox("Enable", &g_cfg.enabled);
-    ImGui::Checkbox("Show Boxes", &g_cfg.showBoxes);
-    ImGui::Checkbox("Show FPS", &g_cfg.showFps);
-    ImGui::SliderFloat("Confidence", &g_cfg.confidence, 0.05f, 0.95f);
+    ImGui::Checkbox("启用", &g_cfg.enabled);
+    ImGui::Checkbox("显示检测框", &g_cfg.showBoxes);
+    ImGui::Checkbox("显示帧率", &g_cfg.showFps);
+    ImGui::SliderFloat("置信度阈值", &g_cfg.confidence, 0.05f, 0.95f);
     ImGui::Separator();
 
-    ImGui::Checkbox("Aimbot", &g_cfg.aimEnabled);
-    ImGui::SliderFloat("Dead Zone", &g_cfg.deadZone, 0.005f, 0.1f);
-    ImGui::SliderFloat("Smooth X", &g_cfg.smoothX, 0.0f, 0.95f);
-    ImGui::SliderFloat("Smooth Y", &g_cfg.smoothY, 0.0f, 0.95f);
-    ImGui::SliderFloat("Aim Speed", &g_cfg.aimSpeed, 0.1f, 3.0f);
-    ImGui::SliderFloat("Predict", &g_cfg.predictGain, 0.0f, 0.2f);
+    ImGui::Checkbox("自瞄", &g_cfg.aimEnabled);
+    ImGui::SliderFloat("死区", &g_cfg.deadZone, 0.005f, 0.1f);
+    ImGui::SliderFloat("X 平滑", &g_cfg.smoothX, 0.0f, 0.95f);
+    ImGui::SliderFloat("Y 平滑", &g_cfg.smoothY, 0.0f, 0.95f);
+    ImGui::SliderFloat("自瞄速度", &g_cfg.aimSpeed, 0.1f, 3.0f);
+    ImGui::SliderFloat("预判", &g_cfg.predictGain, 0.0f, 0.2f);
     ImGui::Separator();
 
-    ImGui::Checkbox("Trigger", &g_cfg.triggerEnabled);
-    ImGui::SliderFloat("Trigger Sens", &g_cfg.triggerSensitivity, 0.1f, 1.0f);
-    ImGui::Checkbox("Trigger Hold", &g_cfg.triggerHold);
+    ImGui::Checkbox("扳机", &g_cfg.triggerEnabled);
+    ImGui::SliderFloat("扳机灵敏度", &g_cfg.triggerSensitivity, 0.1f, 1.0f);
+    ImGui::Checkbox("扳机按住", &g_cfg.triggerHold);
 
-    if (ImGui::Button("Apply Confidence")) {
+    if (ImGui::Button("应用置信度")) {
         if (g_engine) g_engine->setConfidence(g_cfg.confidence);
     }
     ImGui::End();

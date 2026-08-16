@@ -109,8 +109,8 @@ class CaptureService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
         val notif: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("YoloTouchImgui")
-            .setContentText("录屏中，imgui 悬浮窗运行中")
+            .setContentTitle("YoloTouch 自瞄")
+            .setContentText("录屏中，悬浮窗运行中")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentIntent(pi)
             .setOngoing(true)
@@ -349,7 +349,7 @@ class CaptureService : Service() {
     private fun createNotificationChannel() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channel = NotificationChannel(
-            CHANNEL_ID, "YoloTouchImgui 服务", NotificationManager.IMPORTANCE_LOW
+            CHANNEL_ID, "YoloTouch 自瞄服务", NotificationManager.IMPORTANCE_LOW
         )
         nm.createNotificationChannel(channel)
     }
