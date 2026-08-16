@@ -722,16 +722,17 @@ static void drawDetectionOverlay() {
         draw->AddLine(ImVec2(cx, cy - 20), ImVec2(cx, cy + 20), col, 2.0f);
     }
 
-    // 辅助连线：从屏幕中上方向推理框画线，横屏时便于观察目标相对准星的方位。
-    // 锚点取屏幕上沿中部（准星正上方），各推理框用其预判中心连线。
+    // 辅助连线：横屏时从屏幕最上沿边框内（顶部正中）向各推理框的顶部中心画射线，
+    // 便于观察目标相对准星的方位与距离。
     if (g_cfg.showAimLines && g_cfg.showBoxes) {
-        ImVec2 anchor(sx * 0.5f, sy * 0.04f);
+        ImVec2 anchor(sx * 0.5f, 0.0f); // 屏幕最上沿边框内，顶部正中
         draw->AddCircleFilled(anchor, 5.0f, IM_COL32(0, 255, 255, 255), 12);
         for (const auto& t : g_tracks) {
             float pcx = t.cx + t.vx * g_cfg.boxPredictTime;
             float pcy = t.cy + t.vy * g_cfg.boxPredictTime;
-            ImVec2 bc(pcx * sx, pcy * sy);
-            draw->AddLine(anchor, bc, IM_COL32(0, 255, 255, 150), 1.5f);
+            float hh = (t.y2 - t.y1) * 0.5f;
+            ImVec2 boxTop(pcx * sx, (pcy - hh) * sy); // 推理框顶部中心
+            draw->AddLine(anchor, boxTop, IM_COL32(0, 255, 255, 150), 1.5f);
         }
     }
 }

@@ -54,7 +54,7 @@ class CaptureService : Service() {
         private const val SHM_BUFFER_COUNT = 2
 
         // 居中裁剪可选边长（与 C++ CROP_OPTIONS 一致），0=全屏（最大正方形），默认 416
-        private val CROP_OPTIONS = intArrayOf(0, 960, 720, 620, 416, 320, 256)
+        private val CROP_OPTIONS = intArrayOf(0, 1260, 1080, 960, 720, 620, 416, 320, 256)
         private const val CROP_DEFAULT = 416
 
         private const val ASSET_NATIVE_DIR = "native"
