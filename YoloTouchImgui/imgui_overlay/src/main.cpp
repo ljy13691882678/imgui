@@ -68,6 +68,16 @@ static AimConfig g_cfg;
 static bool g_aimActive = false;
 static float g_aimX = 0.5f, g_aimY = 0.5f;
 
+// 类别显示过滤：classEnabled[i]==false 时该类别的框不显示、不参与自瞄/扳机
+static std::vector<bool> g_classEnabled;
+
+// 根据当前引擎的类别数同步 g_classEnabled（引擎初始化/切换模型后调用）
+static void syncClassConfig() {
+    int n = g_engine ? g_engine->getNumClasses() : 0;
+    if (n > 0 && (int)g_classEnabled.size() != n)
+        g_classEnabled.assign((size_t)n, true);
+}
+
 // 控制面板折叠：true 时只显示一个小状态框
 static bool g_panelCollapsed = false;
 
@@ -118,6 +128,7 @@ static bool loadModel(int idx) {
     bool ok = g_engine->init(g_modelList[idx].c_str());
     if (ok) {
         g_engine->setConfidence(g_cfg.confidence);
+        syncClassConfig();
         g_modelIndex = idx;
         printf("switched model -> %s (backend=%s)\n",
                g_modelList[idx].c_str(), g_engine->getBackendType().c_str());
@@ -157,6 +168,18 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         const_cast<uint8_t*>(frame), cropOffX, cropOffY, cropSize, cropSize,
         w, hh,
         (int)h->rowStride, (int)h->pixelStride);
+
+    // 类别过滤：仅保留启用显示的类别（同时影响自瞄/扳机目标选择）
+    if (!g_classEnabled.empty()) {
+        std::vector<Detection> filtered;
+        filtered.reserve(dets.size());
+        for (const auto& d : dets) {
+            int cid = (int)d.classId;
+            if (cid >= 0 && cid < (int)g_classEnabled.size() && g_classEnabled[cid])
+                filtered.push_back(d);
+        }
+        dets = std::move(filtered);
+    }
 
     // 更新检测结果（供绘制）
     {
@@ -366,8 +389,12 @@ static void drawDetectionOverlay() {
         draw->AddRect(p1, p2, IM_COL32(0, 0, 0, 200), 0.0f, 0, (float)outline);
         draw->AddRect(p1, p2, IM_COL32(0, 255, 0, 255), 0.0f, 0, (float)thick);
         if (g_cfg.showBoxLabels) {
-            char lbl[32];
-            snprintf(lbl, sizeof(lbl), "%.2f", d.score);
+            char lbl[64];
+            const char* cname = g_engine ? g_engine->getClassName((int)d.classId) : nullptr;
+            if (cname && cname[0])
+                snprintf(lbl, sizeof(lbl), "%s %.2f", cname, d.score);
+            else
+                snprintf(lbl, sizeof(lbl), "%.2f", d.score);
             // 标签带黑色描边，避免浅色背景下看不清
             draw->AddText(ImVec2(p1.x - 1, p1.y - 1), IM_COL32(0, 0, 0, 220), lbl);
             draw->AddText(ImVec2(p1.x + 1, p1.y + 1), IM_COL32(0, 0, 0, 220), lbl);
@@ -481,6 +508,22 @@ static void drawControlPanel() {
     ImGui::Checkbox("框标签", &g_cfg.showBoxLabels);
     ImGui::Separator();
 
+    // 类别显示过滤（类名来自模型同目录 labels 文件，如 head/body）
+    if (g_engine && g_engineReady && g_engine->getNumClasses() > 0) {
+        syncClassConfig();
+        ImGui::Text("显示类别:");
+        for (int i = 0; i < g_engine->getNumClasses(); ++i) {
+            const char* name = g_engine->getClassName(i);
+            char label[64];
+            if (name && name[0]) snprintf(label, sizeof(label), "%s##c%d", name, i);
+            else snprintf(label, sizeof(label), "类别%d##c%d", i, i);
+            bool on = g_classEnabled[i];
+            if (ImGui::Checkbox(label, &on)) g_classEnabled[i] = on;
+            if (i % 2 == 0) ImGui::SameLine();
+        }
+        ImGui::Separator();
+    }
+
     ImGui::Checkbox("自瞄", &g_cfg.aimEnabled);
     ImGui::SliderFloat("死区", &g_cfg.deadZone, 0.005f, 0.1f);
     ImGui::SliderFloat("X 平滑", &g_cfg.smoothX, 0.0f, 0.95f);
@@ -576,6 +619,7 @@ int main(int argc, char* argv[]) {
     bool engOk = engine->init(modelPath);
     g_engine = engine.get();
     g_engineReady.store(engOk);
+    syncClassConfig();
 
     // 若默认模型在扫描列表中，记录其索引（供面板高亮）
     {

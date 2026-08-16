@@ -566,6 +566,26 @@ bool LiteRtEngine::init(const char* model_path) {
         }
     }
 
+    // 加载类别名称（先从模型同目录 labels 文件加载，失败则 fallback 到数字编号）
+    if (!loadLabelsForModel(model_path)) {
+        // 无 labels 文件时，生成 "class_0", "class_1", ... 作为 fallback
+        m_classNames.clear();
+        for (int i = 0; i < m_num_classes; ++i) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "class_%d", i);
+            m_classNames.push_back(buf);
+        }
+        LOGD("No labels file, using fallback class names (%d classes)", m_num_classes);
+    } else {
+        LOGD("Loaded %zu class names from labels file", m_classNames.size());
+    }
+    // 确保类别名数量与模型输出类别数一致（labels 文件不足时补齐）
+    for (int i = (int)m_classNames.size(); i < m_num_classes; ++i) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "class_%d", i);
+        m_classNames.push_back(buf);
+    }
+
     m_initialized = true;
     LOGD("LiteRT initialized, backend: %s", m_backend_type.c_str());
     appendDiag("最终后端: %s", m_backend_type.c_str());

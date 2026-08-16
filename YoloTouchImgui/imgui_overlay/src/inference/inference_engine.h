@@ -1,7 +1,9 @@
 #pragma once
 
 #include "common.h"
+#include <cstdio>
 #include <string>
+#include <vector>
 
 class InferenceEngine {
 public:
@@ -32,6 +34,39 @@ public:
     virtual void setForceCpu(bool force) { m_force_cpu = force; }
     virtual void setCpuThreads(int threads) { m_cpu_threads = threads; }
 
+    // 类别名称访问
+    virtual int getNumClasses() const { return (int)m_classNames.size(); }
+    virtual const char* getClassName(int classId) const {
+        if (classId >= 0 && classId < (int)m_classNames.size())
+            return m_classNames[classId].c_str();
+        return nullptr;
+    }
+
+    // 加载 labels 文件（模型同目录下的 .txt 文件，每行一个类名）
+    bool loadLabels(const char* labels_path) {
+        m_classNames.clear();
+        FILE* f = fopen(labels_path, "r");
+        if (!f) return false;
+        char buf[256];
+        while (fgets(buf, sizeof(buf), f)) {
+            // 去除行尾换行符/回车
+            char* nl = buf;
+            while (*nl) { if (*nl == '\n' || *nl == '\r') { *nl = '\0'; break; } ++nl; }
+            if (buf[0] != '\0') m_classNames.push_back(buf);
+        }
+        fclose(f);
+        return !m_classNames.empty();
+    }
+
+    // 自动从模型路径推导 labels 文件路径并加载
+    bool loadLabelsForModel(const char* model_path) {
+        std::string labelsPath(model_path);
+        size_t dot = labelsPath.rfind('.');
+        if (dot != std::string::npos) labelsPath = labelsPath.substr(0, dot);
+        labelsPath += ".txt";
+        return loadLabels(labelsPath.c_str());
+    }
+
     static bool isNcnnModel(const char* model_path) {
         std::string path(model_path);
         return path.size() >= 6 && path.substr(path.size() - 6) == ".param";
@@ -46,4 +81,5 @@ protected:
     float m_conf_thresh = 0.25f;
     bool m_force_cpu = false;
     int m_cpu_threads = 4;
+    std::vector<std::string> m_classNames;  // 类别名称列表
 };

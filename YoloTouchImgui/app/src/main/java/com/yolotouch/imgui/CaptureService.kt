@@ -351,11 +351,11 @@ class CaptureService : Service() {
         }
         imgui.setExecutable(true, true)
 
-        // 3. 解压全部模型到 models/ 目录（面板可按需切换）
+        // 3. 解压全部模型到 models/ 目录（面板可按需切换），并解压类别 labels 文件（.txt）
         val modelDir = File(dir, "models").apply { mkdirs() }
         val modelNames = assets.list("$ASSET_NATIVE_DIR/models") ?: emptyArray()
         for (name in modelNames) {
-            if (!name.endsWith(".tflite")) continue
+            if (!name.endsWith(".tflite") && !name.endsWith(".txt")) continue
             val out = File(modelDir, name)
             if (!out.exists() || out.length() == 0L) {
                 assets.open("$ASSET_NATIVE_DIR/models/$name").use { input ->
