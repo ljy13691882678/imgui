@@ -11,6 +11,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
 
@@ -21,6 +22,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var statusText: TextView
     private lateinit var mediaProjectionManager: MediaProjectionManager
+    private val checkExecutor = Executors.newSingleThreadExecutor()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -37,6 +39,28 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.stop_btn).setOnClickListener {
             stopService(Intent(this, CaptureService::class.java))
             statusText.setText(R.string.status_idle)
+        }
+
+        checkRootStatus()
+    }
+
+    override fun onDestroy() {
+        checkExecutor.shutdownNow()
+        super.onDestroy()
+    }
+
+    /** 后台检查 root 环境与授权状态（su 调用可能触发 KernelSU 弹窗，勿在 UI 线程） */
+    private fun checkRootStatus() {
+        checkExecutor.execute {
+            val available = RootHelper.isAvailable()
+            val granted = if (available) RootHelper.hasRootAccess() else false
+            runOnUiThread {
+                statusText.text = when {
+                    !available -> "未检测到 su（请安装 KernelSU/Magisk）"
+                    !granted -> "root 未授权：请在 KernelSU/Magisk 中允许本应用，然后重启应用"
+                    else -> getString(R.string.status_idle)
+                }
+            }
         }
     }
 

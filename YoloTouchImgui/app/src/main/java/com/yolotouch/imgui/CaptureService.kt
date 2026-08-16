@@ -179,6 +179,17 @@ class CaptureService : Service() {
 
     // ─── 解压原生文件 + 拉起 imgui ──────────────────────────
     private fun prepareNativeAndRun(): Boolean {
+        // 0. 检查 root 环境与授权（KernelSU/Magisk）
+        if (!RootHelper.isAvailable()) {
+            Log.e(TAG, "未检测到 su，请确认已安装 KernelSU/Magisk 并授予本应用 root 权限")
+            return false
+        }
+        if (!RootHelper.hasRootAccess()) {
+            Log.e(TAG, "尚未获得 root 授权，请在 KernelSU/Magisk 中允许本应用获取 root 权限")
+            return false
+        }
+        Log.d(TAG, "root 环境正常，已获得 root 授权")
+
         val dir = File(filesDir, "native").apply { mkdirs() }
         val binDir = File(filesDir, "bin").apply { mkdirs() }
 
@@ -220,19 +231,15 @@ class CaptureService : Service() {
         shm.setReadable(true, false)
         shm.setWritable(true, false)
 
-        // 5. 以 root 拉起 imgui
+        // 5. 以 root 拉起 imgui（使用 RootHelper 封装）
         val ldPath = libDir.absolutePath
-        val cmd = "cd ${binDir.absolutePath} && " +
-            "export LD_LIBRARY_PATH=$ldPath && " +
-            "nohup ${imgui.absolutePath} " +
-            "${model.absolutePath} ${shm.absolutePath} " +
-            "${binDir.absolutePath} > /data/local/tmp/imgui.log 2>&1 &"
-        val start = System.currentTimeMillis()
-        val p = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
-        val out = p.inputStream.bufferedReader().readText()
-        val err = p.errorStream.bufferedReader().readText()
-        p.waitFor()
-        Log.d(TAG, "su launched rc=${p.exitValue()} out=$out err=$err took=${System.currentTimeMillis() - start}ms")
+        val result = RootHelper.launchBackground(
+            workDir = binDir.absolutePath,
+            env = mapOf("LD_LIBRARY_PATH" to ldPath),
+            executable = imgui.absolutePath,
+            model.absolutePath, shm.absolutePath, binDir.absolutePath
+        )
+        Log.d(TAG, "root launch: rc=${result.exitCode} out=${result.output} err=${result.error}")
 
         // 启动帧写入循环
         startFrameLoop()
@@ -359,9 +366,7 @@ class CaptureService : Service() {
             mediaProjection?.stop()
         } catch (_: Exception) {}
         // 停止 imgui 进程
-        try {
-            Runtime.getRuntime().exec(arrayOf("su", "-c", "pkill -f 'imgui '"))
-        } catch (_: Exception) {}
+        RootHelper.killByPattern("imgui ")
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
