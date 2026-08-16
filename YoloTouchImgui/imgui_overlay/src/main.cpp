@@ -59,6 +59,7 @@ static std::mutex g_detMutex;
 static std::vector<Detection> g_detections;
 static std::vector<AimTarget> g_tracks;
 static std::atomic<uint64_t> g_inferFps{0};
+static std::atomic<uint64_t> g_srcFps{0};      // APK 帧源写帧速率（帧/s），区分“帧源到顶”和“推理慢”
 static std::atomic<uint64_t> g_frameCount{0};
 // 最近一帧处理耗时（ms，含推理），供面板/日志诊断 QNN 是否过慢
 static std::atomic<long long> g_lastFrameMs{0};
@@ -284,10 +285,27 @@ static void inferenceLoop() {
     long long lastFpsMs = getTimeNowMs();
     long long lastNoFrameLog = getTimeNowMs();
     long long lastStuckLog = getTimeNowMs();
+    long long lastSrcFpsMs = getTimeNowMs();
+    uint64_t lastWriteOk = 0;
     bool everGotFrame = false;
     bool wasEnabled = true;
 
     while (g_inferRunning.load()) {
+        // 帧源速率统计：APK 写帧速率（writeSuccesses 增量/秒）。放在最前，
+        // 这样即使推理被关闭也能持续刷新，用于区分“帧源只产 72 帧”和“推理慢”。
+        {
+            long long now = getTimeNowMs();
+            if (now - lastSrcFpsMs >= 1000) {
+                uint64_t ws = (g_shm && g_shm->valid()) ? g_shm->writeSuccesses() : 0;
+                if (ws >= lastWriteOk)
+                    g_srcFps.store((uint64_t)((ws - lastWriteOk) * 1000 / (now - lastSrcFpsMs)));
+                else
+                    g_srcFps.store(0);  // 共享内存被重建/重置，计数回退
+                lastWriteOk = ws;
+                lastSrcFpsMs = now;
+            }
+        }
+
         if (!g_shm || !g_shm->valid()) {
             std::this_thread::sleep_for(10ms);
             continue;
@@ -445,7 +463,9 @@ static void drawControlPanel() {
     if (ImGui::Button("折叠 ▾")) g_panelCollapsed = true;
     ImGui::SameLine();
     ImGui::Text("后端: %s", g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "无");
-    ImGui::Text("推理: %llu FPS", (unsigned long long)g_inferFps.load());
+    ImGui::Text("帧源: %llu FPS | 推理: %llu FPS",
+                (unsigned long long)g_srcFps.load(),
+                (unsigned long long)g_inferFps.load());
     ImGui::Separator();
 
     // 模型选择

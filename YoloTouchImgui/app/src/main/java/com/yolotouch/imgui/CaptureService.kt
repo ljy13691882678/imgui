@@ -475,7 +475,7 @@ class CaptureService : Service() {
                             lastDiagFlushMs = now
                             flushDiagnostics()
                         }
-                        Thread.sleep(10) // 避免 CPU 空转
+                        Thread.sleep(1) // 避免 CPU 空转（10ms 会让帧源丢帧、把帧率锁到 ~72）
                         continue
                     }
                     writeAttempts.incrementAndGet()
