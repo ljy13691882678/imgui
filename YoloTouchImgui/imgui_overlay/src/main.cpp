@@ -141,6 +141,9 @@ static bool   g_aimFingerDown = false;
 static float  g_aimFingerX = 0.0f, g_aimFingerY = 0.0f;
 // 扳机虚拟手指状态（按住模式需保持按下，并在目标离开/停用时抬起）
 static bool   g_triggerDown = false;
+// 压枪状态：物理手指按在开枪区时计时 + 下拉补偿
+static bool      g_recoilFiring = false;   // 开枪键按住中（用于开始时间计时）
+static long long g_recoilStartMs = 0;      // 本次按住开枪键的起始时刻
 
 // 瞄准点时间平滑（EMA）：抑制检测框抖动传导，尤其锁头部/身体时 Y 轴上下甩
 static float  g_aimSmoothX = -1.0f, g_aimSmoothY = -1.0f;
@@ -414,8 +417,10 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     // 三种算法：0=原版(拖拽+平滑) 1=PID 2=贝塞尔，均由控制器输出每帧增量，
     // 这里保持虚拟手指按下并逐帧移动，模拟人手拖屏转向；目标进入死区后抬起手指。
     // 手指被 clamp 在触控区内。
+    AimOutput out;
+    bool  aimActiveNow = false;
+    float dpx = 0.0f, dpy = 0.0f;
     if (g_touchReady && g_cfg.aimEnabled && g_cfg.enabled && !zoneEditing && aimGateOk) {
-        AimOutput out;
         switch (g_cfg.aimMode) {
         case 1:
             out = g_pidAim.compute(aimTarget, g_cfg, screenCx, screenCy, dt,
@@ -432,8 +437,8 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         if (out.active) {
             // 原版模式应用拖拽灵敏度（dragSens）；PID/贝塞尔内部已含增益，直接使用
             float dragFactor = (g_cfg.aimMode == 0) ? g_cfg.dragSens : 1.0f;
-            float dpx = out.deltaX * scrW * dragFactor;
-            float dpy = out.deltaY * scrH * dragFactor;
+            dpx = out.deltaX * scrW * dragFactor;
+            dpy = out.deltaY * scrH * dragFactor;
             // 原版模式限制单帧最大拖拽像素，避免目标偏离过大时瞬移/抖动
             if (g_cfg.aimMode == 0) {
                 float maxStep = (float)g_cfg.aimMaxStepPx;
@@ -448,38 +453,64 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
                 float step = std::sqrt(dpx*dpx + dpy*dpy);
                 if (step > maxPx) { dpx *= maxPx / step; dpy *= maxPx / step; }
             }
+            aimActiveNow = true;
+        }
+    }
 
-            if (!g_aimFingerDown) {
-                // 手指从触控区中心按下
-                g_aimFingerX = tzCx;
-                g_aimFingerY = tzCy;
-                touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
-                           (int)g_aimFingerX, (int)g_aimFingerY);
-                g_aimFingerDown = true;
-            }
-            g_aimFingerX = std::clamp(g_aimFingerX + dpx, tzLpx, tzRpx);
-            g_aimFingerY = std::clamp(g_aimFingerY + dpy, tzTpx, tzBpx);
-            touch_move(TOUCH_VIRTUAL_SLOT, (int)g_aimFingerX, (int)g_aimFingerY);
-            // 拖到远离触控区中心时抬手回中心再按下，模拟人手重新起指，
-            // 保证目标在屏幕边缘也能持续转向（游戏累积每段拖拽的旋转量）
-            float drift = std::sqrt((g_aimFingerX - tzCx) * (g_aimFingerX - tzCx) +
-                                    (g_aimFingerY - tzCy) * (g_aimFingerY - tzCy));
-            if (drift > std::max(tzRpx - tzLpx, tzBpx - tzTpx) * 0.5f) {
-                touch_up(TOUCH_VIRTUAL_SLOT);
-                g_aimFingerX = tzCx;
-                g_aimFingerY = tzCy;
-                touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
-                           (int)g_aimFingerX, (int)g_aimFingerY);
-            }
-            g_aimActive = true;
+    // ── 压枪（检测物理触摸开枪键，视角自动下拉补偿后坐力）──
+    // 独立功能：不依赖扳机（自动开火）。当检测到物理手指按在“开枪区域”
+    // （fire zone）时启动压枪计时。
+    // 开始时间：开枪键按住持续到 recoilStartMs 后开始下拉；
+    // 力度：每帧下拉 recoilStrength(px/s) × dt 像素，模拟人手持续下拉压枪。
+    // 开枪区只需任一功能（压枪/扳机）启用即同步到 touch_core，供硬件手指检测。
+    if (g_touchReady && g_cfg.enabled &&
+        (g_cfg.recoilEnabled || g_cfg.triggerEnabled)) {
+        int fzL = (int)(g_cfg.fireZoneL * scrW), fzT = (int)(g_cfg.fireZoneT * scrH);
+        int fzR = (int)(g_cfg.fireZoneR * scrW), fzB = (int)(g_cfg.fireZoneB * scrH);
+        touch_set_fire_zone(fzL, fzT, fzR, fzB);
+    }
+    const bool recoilArmed = g_touchReady && g_cfg.enabled && !zoneEditing &&
+                             g_cfg.recoilEnabled && g_cfg.recoilStrength > 0;
+    if (recoilArmed && touch_is_finger_in_fire_zone()) {
+        if (!g_recoilFiring) { g_recoilFiring = true; g_recoilStartMs = now; }
+    } else {
+        g_recoilFiring = false;
+    }
+    const bool recoilPulling = g_recoilFiring &&
+                               (now - g_recoilStartMs >= (long long)g_cfg.recoilStartMs);
+
+    // ── 自瞄/压枪统一输出（触摸视角手指，共用 TOUCH_VIRTUAL_SLOT）──
+    if (aimActiveNow || recoilPulling) {
+        // 视角手指：自瞄增量 + 压枪下拉合并移动
+        float dx = dpx;
+        float dy = dpy;
+        if (recoilPulling) dy += g_cfg.recoilStrength * dt;  // 压枪下拉（px/s × s）
+        if (!g_aimFingerDown) {
+            // 手指从触控区中心按下
+            g_aimFingerX = tzCx;
+            g_aimFingerY = tzCy;
+            touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
+                       (int)g_aimFingerX, (int)g_aimFingerY);
+            g_aimFingerDown = true;
+        }
+        g_aimFingerX = std::clamp(g_aimFingerX + dx, tzLpx, tzRpx);
+        g_aimFingerY = std::clamp(g_aimFingerY + dy, tzTpx, tzBpx);
+        touch_move(TOUCH_VIRTUAL_SLOT, (int)g_aimFingerX, (int)g_aimFingerY);
+        // 拖到远离触控区中心时抬手回中心再按下，模拟人手重新起指，
+        // 保证目标在屏幕边缘也能持续转向（游戏累积每段拖拽的旋转量）
+        float drift = std::sqrt((g_aimFingerX - tzCx) * (g_aimFingerX - tzCx) +
+                                (g_aimFingerY - tzCy) * (g_aimFingerY - tzCy));
+        if (drift > std::max(tzRpx - tzLpx, tzBpx - tzTpx) * 0.5f) {
+            touch_up(TOUCH_VIRTUAL_SLOT);
+            g_aimFingerX = tzCx;
+            g_aimFingerY = tzCy;
+            touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
+                       (int)g_aimFingerX, (int)g_aimFingerY);
+        }
+        g_aimActive = aimActiveNow;
+        if (aimActiveNow) {
             g_aimX = out.targetX;
             g_aimY = out.targetY;
-        } else {
-            g_aimActive = false;
-            if (g_aimFingerDown) {
-                touch_up(TOUCH_VIRTUAL_SLOT);
-                g_aimFingerDown = false;
-            }
         }
     } else {
         if (g_aimFingerDown) {
@@ -1138,6 +1169,13 @@ static void drawControlPanel() {
         ImGui::SliderFloat("收敛阈值(px)", &g_cfg.convergeThresh, 1.0f, 60.0f);
         ImGui::SliderFloat("移动平滑", &g_cfg.aimMoveSmooth, 0.0f, 0.95f);
     }
+    // 压枪（并入自瞄分类）：检测物理手指按在“开枪区”时视角自动下拉补偿后坐力
+    ImGui::Separator();
+    ImGui::Checkbox("压枪", &g_cfg.recoilEnabled);
+    ImGui::TextDisabled("物理手指按在“开枪区”时视角自动下拉补偿后坐力，独立于扳机");
+    ImGui::SliderInt("压枪开始时间(ms)", &g_cfg.recoilStartMs, 0, 2000, "%d");
+    ImGui::SliderInt("压枪力度(px/s)", &g_cfg.recoilStrength, 0, 2000, "%d");
+    if (g_cfg.recoilStrength < 0) g_cfg.recoilStrength = 0;
     }
     ImGui::Separator();
 
