@@ -194,11 +194,15 @@ static void releaseAimFingers() {
 // 注意：陀螺仪模式下游戏内一切操作靠真实手指，仅自瞄/压枪由陀螺仪注入。
 static void applyGyroMode(bool enabled) {
     if (enabled) {
-        if (touch_inject_ready()) {
+        // 先连接驱动并初始化陀螺仪 hook。只当驱动【真正连接成功】才进入纯陀螺仪模式
+        // （屏蔽 uinput）；若驱动未加载/连接失败，保留 uinput 注入作为回退，
+        // 否则勾选“内核陀螺仪”后自瞄/扳机因 uinput 被关闭而全部失效（“对接了也没效果”）。
+        bool gyroOk = touch_kernel_gyro_init();
+        if (gyroOk && touch_inject_ready()) {
             releaseAimFingers();
             touch_inject_close();
         }
-        touch_kernel_gyro_init();
+        printf("applyGyroMode(true) driver_connected=%d\n", (int)touch_kernel_connected());
     } else {
         touch_gyro_stop();
         touch_gyro_disable();
@@ -425,8 +429,12 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
 
     // 内核陀螺仪模式：勾选后惰性连接驱动并初始化陀螺仪 hook。
     // 该模式下屏蔽 uinput（不注入/不初始化触摸），扳机禁用，游戏内其它操作全部真实手指。
-    if (g_cfg.gyroAim && !touch_kernel_connected())
-        touch_kernel_gyro_init();
+    if (g_cfg.gyroAim && !touch_kernel_connected()) {
+        bool gyroOk = touch_kernel_gyro_init();
+        // 驱动连接失败时回退保底：确保 uinput 注入可用，避免自瞄/扳机全部失效
+        if (!gyroOk && g_touchReady && !touch_inject_ready())
+            touch_inject_init();
+    }
     const bool gyroMode = g_cfg.gyroAim && touch_kernel_connected();
 
     // 自瞄触发区/倍镜区门控：开启时物理手指需点在对应区域内才允许自瞄
@@ -1312,15 +1320,20 @@ static void drawControlPanel() {
                                "驱动已连接 v%u", touch_kernel_version());
         else
             ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "驱动未连接");
-        ImGui::TextDisabled(g_cfg.gyroAim
+        ImGui::TextDisabled(g_cfg.gyroAim && touch_kernel_connected()
             ? "陀螺仪模式：自瞄/压枪走内核陀螺仪，uinput 已屏蔽，扳机禁用"
-            : "触摸模式：注入统一走 uinput");
+            : (g_cfg.gyroAim
+                ? "陀螺仪驱动未连接，回退 uinput 注入（自瞄/扳机仍走 uinput）"
+                : "触摸模式：注入统一走 uinput"));
         ImGui::Separator();
 
-        if (g_cfg.gyroAim) {
-            // 陀螺仪模式下屏蔽 uinput 初始化
+        if (g_cfg.gyroAim && !touch_kernel_connected()) {
+            // 陀螺仪勾选但驱动未能连接：显示回退提示，uinput 仍可用
+            ImGui::TextDisabled("内核陀螺仪未连接，已回退 uinput（驱动加载/版本不匹配时请检查）");
+        }
+        if (g_cfg.gyroAim && touch_kernel_connected())
             ImGui::TextDisabled("陀螺仪模式下 uinput 触摸已屏蔽（游戏内操作靠真实手指）");
-        } else {
+        if (!g_cfg.gyroAim || !touch_kernel_connected()) {
             // uinput 注入初始化状态：默认已按需初始化，可停止/重新初始化
             bool injReady = injectReady();
             if (injReady)
@@ -1452,8 +1465,10 @@ int main(int argc, char* argv[]) {
         int fzB = (int)(g_cfg.fireZoneB * native_window_screen_y);
         touch_set_fire_zone(fzL, fzT, fzR, fzB);
         touch_start_readers();
-        // uinput 模式自动创建注入设备；内核陀螺仪模式屏蔽 uinput 初始化
-        if (!g_cfg.gyroAim) touch_inject_init();
+        // uinput 注入设备默认创建；若勾选了“内核陀螺仪”且驱动连接成功，后续
+        // applyGyroMode(true) 会关闭它进入纯陀螺仪模式；若驱动未能连接则保留
+        // uinput 作为回退，避免自瞄/扳机因 uinput 缺失而全部失效。
+        touch_inject_init();
         printf("touch injection ready (gyro=%d)\n", (int)g_cfg.gyroAim);
     } else {
         fprintf(stderr, "touch_init failed (need root + /dev/input)\n");
