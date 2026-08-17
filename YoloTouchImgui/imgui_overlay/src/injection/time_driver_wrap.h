@@ -1,8 +1,6 @@
 // time_driver_wrap.h — 内核驱动（TimeDriver）C 接口封装
 // 把 C++ 类 TimeDriver 封装成 C 函数，供 touch_core / main 调用。
-// 只对接内核陀螺仪（pitch/yaw 旋转注入，用于自瞄转向与压枪）。
-// 不对外暴露内核触摸注入：触摸统一走 uinput，连接驱动后立即 Touch_Disable
-// 关闭驱动触摸接管，避免拦截真实触摸。
+// 支持内核陀螺仪 + 内核触摸（可选）两种注入模式。
 #pragma once
 
 #include <stdbool.h>
@@ -26,6 +24,15 @@ void kdrv_gyro_set(bool enable, float pitch, float yaw,
                    uint32_t type_mask);                // 注入旋转（pitch/yaw 度）
 void kdrv_gyro_stop(uint32_t orientation);             // 停止注入（enable=false）
 void kdrv_gyro_disable(void);
+
+// 内核触摸（TimeDriver 触摸注入，替代 uinput）
+// 调用 Touch_Init 创建虚拟触摸设备，随后 Touch_Disable 关闭触摸接管，
+// 物理触摸不受影响，仅虚拟手指走内核驱动注入。
+bool kdrv_touch_init(int width, int height, int orientation);  // 创建虚拟触摸设备 + 关闭触摸接管
+void kdrv_touch_cleanup(void);                                  // 销毁虚拟触摸设备
+bool kdrv_touch_down(int id, int x, int y);
+bool kdrv_touch_move(int id, int x, int y);
+bool kdrv_touch_up(int id);
 
 #ifdef __cplusplus
 }
