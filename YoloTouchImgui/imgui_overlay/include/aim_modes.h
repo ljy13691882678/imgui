@@ -149,6 +149,7 @@ public:
             m_prevMoveX = 0.0f; m_prevMoveY = 0.0f;
             m_mover.cancel();
             m_lastTrackId = t.trackId;
+            m_cooldownUntil = 0;
             return out;
         }
 
@@ -157,34 +158,62 @@ public:
             m_mover.cancel();
             m_lastX = 0.0f; m_lastY = 0.0f;
             m_prevMoveX = 0.0f; m_prevMoveY = 0.0f;
+            m_cooldownUntil = 0;
         }
         m_lastTrackId = t.trackId;
 
+        long long now = nowMs();
+
+        // 冷却期：过冲后 50ms 内不响应方向反转，防止来回晃悠
+        if (now < m_cooldownUntil) {
+            // 在冷却期内，平滑输出但不改变方向
+            if (!m_mover.isActive()) {
+                float dist = std::sqrt(errX * errX + errY * errY);
+                long long dur = (long long)(cfg.bezierDuration * 5.0f + dist * 0.2f);
+                dur = std::clamp(dur, 100LL, 500LL);
+                m_mover.start(now, now + dur);
+            }
+            float ratio = m_mover.tickRatio(now);
+            float moveX = errX * ratio;
+            float moveY = errY * ratio;
+
+            // 强 EMA 平滑（sm=0.7），减少抖动
+            float sm = 0.7f;
+            moveX = m_lastX * sm + moveX * (1.0f - sm);
+            moveY = m_lastY * sm + moveY * (1.0f - sm);
+            m_lastX = moveX; m_lastY = moveY;
+
+            out.active = true;
+            out.deltaX = moveX / scrW;
+            out.deltaY = moveY / scrH;
+            out.targetX = px;
+            out.targetY = py;
+            return out;
+        }
+
         // 过冲/方向反转检测：
-        // 当误差方向与上帧移动方向相反时（且误差足够大），
-        // 说明目标切换或过冲，重置 mover 让贝塞尔从零重新起步
-        // 关键：不清空 prevMove 状态，不 return，只取消 mover
-        // 这样本帧仍会输出移动量，避免自瞄断帧
+        // 死区增加到 15 像素，过滤检测框抖动
         if (m_prevMoveX != 0.0f || m_prevMoveY != 0.0f) {
             float absErrX = std::fabs(errX);
             float absErrY = std::fabs(errY);
-            // 死区：误差小于 5 像素时忽略方向反转（检测框抖动）
-            if (absErrX > 5.0f || absErrY > 5.0f) {
+            if (absErrX > 15.0f || absErrY > 15.0f) {
                 bool overshotX = (errX > 0 && m_prevMoveX < 0) || (errX < 0 && m_prevMoveX > 0);
                 bool overshotY = (errY > 0 && m_prevMoveY < 0) || (errY < 0 && m_prevMoveY > 0);
 
                 if (overshotX || overshotY) {
-                    // 只取消 mover，让新方向的贝塞尔从零起步
-                    // 不清空 lastX/lastY，让 EMA 平滑过渡
+                    // 过冲处理：
+                    // 1. 取消 mover，让贝塞尔从零起步
+                    // 2. 清空 lastX/lastY，防止惯性累积
+                    // 3. 设置 50ms 冷却期，防止连续反转
+                    // 4. 本帧输出大幅衰减的移动量
                     m_mover.cancel();
-                    // 记录新方向符号，防止连续误触发
-                    m_prevMoveX = (errX >= 0) ? 1.0f : -1.0f;
-                    m_prevMoveY = (errY >= 0) ? 1.0f : -1.0f;
+                    m_lastX *= 0.1f;  // 快速衰减旧惯性
+                    m_lastY *= 0.1f;
+                    m_cooldownUntil = now + 50;  // 50ms 冷却期
                 }
             }
         }
 
-        long long now = nowMs();
         if (!m_mover.isActive()) {
             float dist = std::sqrt(errX * errX + errY * errY);
             long long dur = (long long)(cfg.bezierDuration * 5.0f + dist * 0.2f);
@@ -196,13 +225,13 @@ public:
         float moveX = errX * ratio;
         float moveY = errY * ratio;
 
-        // 输出平滑：极弱 EMA，防止惯性累积但不阻断输出
-        float sm = std::clamp(cfg.aimMoveSmooth * 0.3f, 0.0f, 0.3f);
+        // 输出 EMA 平滑：使用较弱的平滑（sm=0.4），保持响应速度
+        float sm = 0.4f;
         moveX = m_lastX * sm + moveX * (1.0f - sm);
         moveY = m_lastY * sm + moveY * (1.0f - sm);
         m_lastX = moveX; m_lastY = moveY;
 
-        // 记录移动方向符号用于下帧过疏检测
+        // 记录移动方向符号（基于实际输出方向，而非目标方向）
         if (std::fabs(moveX) > 0.001f)
             m_prevMoveX = (moveX >= 0) ? 1.0f : -1.0f;
         if (std::fabs(moveY) > 0.001f)
@@ -221,6 +250,7 @@ public:
         m_lastX = 0.0f; m_lastY = 0.0f;
         m_prevMoveX = 0.0f; m_prevMoveY = 0.0f;
         m_lastTrackId = -1;
+        m_cooldownUntil = 0;
     }
 
 private:
@@ -233,4 +263,5 @@ private:
     float m_lastX = 0.0f, m_lastY = 0.0f;
     float m_prevMoveX = 0.0f, m_prevMoveY = 0.0f;
     int   m_lastTrackId = -1;
+    long long m_cooldownUntil = 0;  // 过冲后冷却截止时间
 };

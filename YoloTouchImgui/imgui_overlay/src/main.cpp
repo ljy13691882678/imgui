@@ -638,11 +638,8 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             g_gyroLastTargetYaw = yaw;
             
             // 分离自瞄和压枪的限幅：
-            // 1. 自瞄 Yaw 限幅（移动时需要更大 Yaw，使用独立限幅）
-            // 2. 自瞄 Pitch 限幅
-            // 3. 压枪 Pitch 独立叠加，不受限幅影响
             float maxDeg = g_cfg.gyroMaxDeg;
-            float maxYawDeg = maxDeg * 1.5f;  // Yaw 允许更大限幅，跟上移动
+            float maxYawDeg = maxDeg * 1.5f;
 
             // 自瞄 Yaw 限幅
             if (std::fabs(yaw) > maxYawDeg) {
@@ -653,22 +650,23 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
                 pitch = (pitch > 0) ? maxDeg : -maxDeg;
             }
 
-            // 压枪独立叠加到 Pitch（在限幅之后，确保压枪不受限幅影响）
-            float recoilPitch = 0.0f;
-            if (recoilPulling) {
-                recoilPitch = -g_cfg.recoilDegPerSec * dt;
-                // 移动时（人物有速度）增加额外压枪补偿
-                // 检测目标是否在移动：从自瞄输出的 dpx/dpy 幅度判断
-                float moveSpeed = std::sqrt(dpx*dpx + dpy*dpy);
-                if (moveSpeed > 50.0f) {  // 50 像素以上视为移动
-                    float boost = std::min(moveSpeed / 200.0f, 1.0f);  // 最大 100% 加成
-                    recoilPitch *= (1.0f + boost * 0.5f);  // 最多额外 50% 压枪
-                }
-            }
-            float finalPitch = pitch + recoilPitch;
-
-            if (g_cfg.gyroInvertPitch) finalPitch = -finalPitch;
+            // 反转在压枪之前应用
+            if (g_cfg.gyroInvertPitch) pitch = -pitch;
             if (g_cfg.gyroInvertYaw)   yaw = -yaw;
+
+            // 压枪：在反转之后应用，确保方向始终往下压
+            // 使用 -= 确保压枪方向不受反转设置影响
+            if (recoilPulling) {
+                float recoilDt = g_cfg.recoilDegPerSec * dt;
+                // 移动时额外压枪补偿
+                float moveSpeed = std::sqrt(dpx*dpx + dpy*dpy);
+                if (moveSpeed > 50.0f) {
+                    float boost = std::min(moveSpeed / 200.0f, 1.0f);
+                    recoilDt *= (1.0f + boost * 0.5f);
+                }
+                pitch -= recoilDt;
+            }
+            float finalPitch = pitch;
 
             {
                 std::lock_guard<std::mutex> lock(g_gyroMutex);
