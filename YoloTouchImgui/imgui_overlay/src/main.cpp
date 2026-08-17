@@ -413,7 +413,7 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         return;
     }
 
-    // 选择目标
+    // 选择目标（使用速度预判补偿推理延迟，与绘制一致）
     const AimTarget* pick = nullptr;
     float bestScore = -1.0f;
     float screenCx = 0.5f, screenCy = 0.5f;
@@ -421,9 +421,13 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         // 类别锁定：若 aimClass≥0，仅选择该类目标
         if (g_cfg.aimClass >= 0 && (int)t.classId != g_cfg.aimClass) continue;
 
+        // 预判位置：与绘制用相同的 boxPredictTime 补偿“捕获→推理→自瞄”延迟
+        float pcx = t.cx + t.vx * g_cfg.boxPredictTime;
+        float pcy = t.cy + t.vy * g_cfg.boxPredictTime;
+
         float score;
-        float dx = t.cx - screenCx;
-        float dy = t.cy - screenCy;
+        float dx = pcx - screenCx;
+        float dy = pcy - screenCy;
         switch (g_cfg.selectMode) {
         case 1: score = (t.x2 - t.x1) * (t.y2 - t.y1); break;  // 最大框
         case 2: score = -std::sqrt(dx*dx + dy*dy); break;        // 最接近准星
@@ -437,11 +441,23 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         return;
     }
 
-    // 按锁定部位调整瞄准点（复制目标，把中心替换为 head/body/center 点）
+    // 按锁定部位调整瞄准点（使用速度预判补偿延迟）
     AimTarget aimTarget = *pick;
     {
+        // 对选择的目标也应用速度预判，与绘制/选择保持一致
+        AimTarget predicted = *pick;
+        predicted.cx = pick->cx + pick->vx * g_cfg.boxPredictTime;
+        predicted.cy = pick->cy + pick->vy * g_cfg.boxPredictTime;
+        // 框尺寸也简单平移（不改变大小）
+        float dx = predicted.cx - pick->cx;
+        float dy = predicted.cy - pick->cy;
+        predicted.x1 = pick->x1 + dx;
+        predicted.y1 = pick->y1 + dy;
+        predicted.x2 = pick->x2 + dx;
+        predicted.y2 = pick->y2 + dy;
+
         float ax, ay;
-        computeAimPoint(*pick, g_cfg.aimPart, &ax, &ay);
+        computeAimPoint(predicted, g_cfg.aimPart, &ax, &ay);
         // 自瞄瞄准点微调：在锁定部位计算出的瞄准点上叠加偏移，
         // 用于微调锁点位置（如锁头时略向下，避免顶到头顶 / 打偏）
         ax += g_cfg.aimOffsetX;
