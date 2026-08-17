@@ -20,6 +20,23 @@ bool touch_init(int screenW, int screenH);
 void touch_close(void);
 bool touch_is_initialized(void);
 int  touch_get_output_fd(void);
+int  touch_device_count(void);
+
+// uinput 注入设备生命周期（触摸注入统一走 uinput）
+// touch_init 只做设备扫描/坐标准备（供 ImGui 交互、区域判断），不创建 uinput；
+// 需要自瞄/扳机/压枪时调用 touch_inject_init 创建注入设备。
+// 内核陀螺仪模式下屏蔽 uinput 注入及初始化（不调用 touch_inject_init）。
+bool touch_inject_ready(void);   // uinput 注入设备是否就绪
+bool touch_inject_init(void);    // 按需创建 uinput 注入设备（幂等）
+void touch_inject_close(void);   // 销毁 uinput 注入设备
+
+// 内核陀螺仪（TimeDriver，仅陀螺仪；触摸注入统一走 uinput）
+bool     touch_kernel_gyro_init(void);   // 连接驱动 + 关闭触摸接管 + 初始化陀螺仪 hook（幂等）
+bool     touch_kernel_connected(void);   // 驱动是否已连接
+uint32_t touch_kernel_version(void);     // 驱动版本号
+void     touch_gyro_apply(bool enable, float pitch, float yaw);  // 注入旋转（pitch/yaw 度）
+void     touch_gyro_stop(void);          // 停止注入（enable=false）
+void     touch_gyro_disable(void);       // 关闭陀螺仪 hook
 
 // Reader threads (for zone detection)
 void touch_start_readers(void);

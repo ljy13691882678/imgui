@@ -3,6 +3,8 @@
 // Shared by JNI (Shizuku) and root_daemon (su)
 
 #include "touch_core.h"
+#include "time_driver_wrap.h"
+#include "time_driver.h"   // TIME_GYRO_MASK_ALL 等常量
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/input.h>
@@ -512,10 +514,10 @@ bool touch_init(int screenW, int screenH) {
 
     int touchMaxX = g_devices[0].absX.maximum;
     int touchMaxY = g_devices[0].absY.maximum;
-    if (!createUinputDevice(touchMaxX, touchMaxY, g_devices[0].fd)) {
-        closeTouchLocked();
-        return false;
-    }
+
+    // touch_init 只做设备扫描与坐标准备（供 ImGui 交互/区域判断），不创建 uinput
+    // 注入设备——需要自瞄/扳机/压枪时由面板调用 touch_inject_init。
+    // 触摸注入统一走 uinput（真实手指自然透传系统，合成手指经 uinput 注入）。
 
     for (auto& device : g_devices) {
         device.s2tx = static_cast<float>(touchMaxX) / std::max(1, device.absX.maximum);
@@ -539,6 +541,65 @@ void touch_close(void) {
 
 bool touch_is_initialized(void) { return g_initialized; }
 int  touch_get_output_fd(void)   { return g_outputFd; }
+int  touch_device_count(void)    { return static_cast<int>(g_devices.size()); }
+
+// ─── uinput 注入设备生命周期 ───
+// uinput 注入设备是否已就绪（触摸注入可用）
+bool touch_inject_ready(void) { return g_initialized && g_outputFd > 0; }
+
+// 按需创建 uinput 注入设备（触摸注入就绪）。幂等：已就绪直接返回 true。
+// 触摸注入统一走 uinput；内核陀螺仪模式下不调用本函数（屏蔽 uinput 初始化）。
+bool touch_inject_init(void) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    if (!g_initialized || g_devices.empty()) return false;
+    if (g_outputFd > 0) return true;  // 已就绪
+    const int touchMaxX = std::max(1, g_devices[0].absX.maximum);
+    const int touchMaxY = std::max(1, g_devices[0].absY.maximum);
+    if (!createUinputDevice(touchMaxX, touchMaxY, g_devices[0].fd)) {
+        LOGE("touch inject init failed (need root + /dev/uinput)");
+        return false;
+    }
+    LOGD("touch inject ready (uinput)");
+    return true;
+}
+
+// 销毁 uinput 注入设备（停止触摸注入）
+void touch_inject_close(void) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    if (g_outputFd > 0) {
+        ioctl(g_outputFd, UI_DEV_DESTROY);
+        close(g_outputFd);
+        g_outputFd = 0;
+    }
+    g_uploadedFingerDown = {};
+    LOGD("touch inject closed");
+}
+
+// ─── 内核陀螺仪（TimeDriver，仅陀螺仪；触摸注入统一走 uinput） ───
+bool touch_kernel_gyro_init(void) {
+    // 惰性连接驱动 + 关闭触摸接管 + 初始化陀螺仪 hook（内部已做幂等）
+    return kdrv_gyro_init();
+}
+
+void touch_gyro_apply(bool enable, float pitch, float yaw) {
+    // 重要：陀螺仪注入【不依赖 uinput】。陀螺仪模式正是要屏蔽 uinput 的触摸及初始化，
+    // 若此处以 g_initialized（uinput 初始化状态）门控，uinput 未初始化时注入会被静默
+    // 跳过，导致“对接了也没效果”。这里只依赖驱动连接状态。
+    if (!kdrv_connected() && !touch_kernel_gyro_init()) return;
+    kdrv_gyro_set(enable, pitch, yaw, (uint32_t)g_rotation, 1, TIME_GYRO_MASK_ALL);
+}
+
+void touch_gyro_stop(void) {
+    kdrv_gyro_stop((uint32_t)g_rotation);
+}
+
+void touch_gyro_disable(void) {
+    kdrv_gyro_disable();
+}
+
+bool touch_kernel_connected(void) { return kdrv_connected(); }
+
+uint32_t touch_kernel_version(void) { return kdrv_version(); }
 
 void touch_start_readers(void) {
     if (g_running) return;
