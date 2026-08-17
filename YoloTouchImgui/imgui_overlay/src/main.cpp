@@ -1497,9 +1497,9 @@ static void drawControlPanel() {
     // 算法相关参数：仅在对应模式激活时显示
     if (g_cfg.aimMode == 0) {
         ImGui::Text("PID 参数");
-        ImGui::SliderFloat("P##pidKp", &g_cfg.pidKp, 0.01f, 2.0f);
-        ImGui::SliderFloat("I##pidKi", &g_cfg.pidKi, 0.0f, 0.2f);
-        ImGui::SliderFloat("D##pidKd", &g_cfg.pidKd, 0.0f, 0.5f);
+        ImGui::SliderFloat("P##pidKp", &g_cfg.pidKp, 0.0f, 0.050f);
+        ImGui::SliderFloat("I##pidKi", &g_cfg.pidKi, 0.0f, 0.020f);
+        ImGui::SliderFloat("D##pidKd", &g_cfg.pidKd, 0.0f, 0.010f);
         ImGui::SliderFloat("采样周期(ms)", &g_cfg.pidSamplePeriodMs, 1.0f, 50.0f);
     }
     if (g_cfg.aimMode == 1) {
