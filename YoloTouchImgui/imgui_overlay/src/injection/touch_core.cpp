@@ -695,6 +695,14 @@ bool touch_is_finger_in_joystick_zone(void) {
     return isAnyPhysicalFingerInZoneLocked(g_joystick_zone);
 }
 
+// 通用区域检测：遍历所有手指，只要有任何一个手指在区域内就返回 true
+bool touch_is_any_finger_in_zone(int l, int t, int r, int b) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    Zone zone;
+    zone.l = l; zone.t = t; zone.r = r; zone.b = b;
+    return isAnyPhysicalFingerInZoneLocked(zone);
+}
+
 bool touch_lift_joystick_finger(void) {
     std::lock_guard<std::mutex> guard(g_mutex);
     if (!g_initialized || g_devices.empty()) return false;

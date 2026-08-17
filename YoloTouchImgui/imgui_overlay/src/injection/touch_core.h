@@ -63,6 +63,9 @@ bool touch_is_finger_in_ads_zone(void);
 bool touch_is_finger_in_fire_zone(void);
 bool touch_is_finger_in_joystick_zone(void);
 
+// 通用区域检测：遍历所有手指，只要有任何一个手指在区域内就返回 true
+bool touch_is_any_finger_in_zone(int l, int t, int r, int b);
+
 // Lift physical finger in joystick zone
 bool touch_lift_joystick_finger(void);
 

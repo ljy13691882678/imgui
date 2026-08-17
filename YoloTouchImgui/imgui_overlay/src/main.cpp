@@ -288,16 +288,16 @@ static void applyKernelTouchMode(bool enabled) {
 
 // 检查物理手指是否按下并位于指定区域（归一化坐标）。无手指/未按下返回 false。
 // 用于自瞄触发区/倍镜区门控：只有手指点在对应区域内才允许自瞄。
+// 检查是否有任何手指在指定区域内（支持多点触控）
 static bool isFingerInZone(float zL, float zT, float zR, float zB,
                            int scrW, int scrH) {
     if (!g_touchReady) return false;
-    int mx = 0, my = 0;
-    bool down = false;
-    if (!touch_get_primary_finger(&mx, &my, &down)) return false;
-    if (!down) return false;
-    float nx = (float)mx / (float)scrW;
-    float ny = (float)my / (float)scrH;
-    return nx >= zL && nx <= zR && ny >= zT && ny <= zB;
+    int l = (int)(zL * scrW);
+    int t = (int)(zT * scrH);
+    int r = (int)(zR * scrW);
+    int b = (int)(zB * scrH);
+    // 遍历所有手指，只要有一个在区域内就返回 true
+    return touch_is_any_finger_in_zone(l, t, r, b);
 }
 
 // ---------------------------------------------------------------------------
