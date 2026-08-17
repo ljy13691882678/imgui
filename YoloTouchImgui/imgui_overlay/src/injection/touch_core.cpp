@@ -324,7 +324,9 @@ static bool createUinputDevice(int screenX, int screenY, int sourceFd) {
     uiDev.id.product = rand() % 10 + 5;
     uiDev.id.version = rand() % 10 + 5;
 
-    ioctl(g_outputFd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
+    ioctl(g_outputFd, UI_SET_PROPBIT, INPUT_PROP_POINTER);
+    // 不使用 INPUT_PROP_DIRECT，否则游戏会优先处理虚拟触摸，忽略物理触摸
+    // 使用 POINTER 属性，让虚拟手指被识别为指针设备，不干扰物理手指
     ioctl(g_outputFd, UI_SET_EVBIT, EV_ABS);
     ioctl(g_outputFd, UI_SET_ABSBIT, ABS_X);
     ioctl(g_outputFd, UI_SET_ABSBIT, ABS_Y);
