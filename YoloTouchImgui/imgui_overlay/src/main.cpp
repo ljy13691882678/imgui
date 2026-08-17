@@ -113,6 +113,8 @@ static float g_gyroTargetPitch = 0.0f;   // 推理线程写入的目标 pitch
 static float g_gyroTargetYaw   = 0.0f;   // 推理线程写入的目标 yaw
 static float g_gyroSmoothPitch = 0.0f;   // 主线程平滑后的实际注入 pitch
 static float g_gyroSmoothYaw   = 0.0f;   // 主线程平滑后的实际注入 yaw
+static float g_gyroLastTargetPitch = 0.0f; // 上一帧目标 pitch（用于变化率限制）
+static float g_gyroLastTargetYaw   = 0.0f; // 上一帧目标 yaw（用于变化率限制）
 static bool  g_gyroTargetActive = false;  // 推理线程是否有有效目标
 
 // 配置文件路径（工作目录下）+ 上次保存副本（用于自动保存差异检测）
@@ -231,6 +233,8 @@ static void releaseAimFingers() {
         g_gyroTargetActive = false;
         g_gyroSmoothPitch = 0.0f;
         g_gyroSmoothYaw   = 0.0f;
+        g_gyroLastTargetPitch = 0.0f;
+        g_gyroLastTargetYaw   = 0.0f;
         touch_gyro_stop();
     }
 }
@@ -617,6 +621,21 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             // 屏幕增量（像素）→ 角度：Y 增量 → pitch（俯仰），X 增量 → yaw（偏航）
             float pitch = dpy * g_cfg.gyroSens;
             float yaw   = dpx * g_cfg.gyroSens;
+            
+            // 高灵敏度下限制单帧角度跳变，防止检测框抖动导致乱甩
+            // 灵敏度越高，允许的单帧最大变化越小（自适应）
+            float maxChange = 3.0f / (g_cfg.gyroSens + 0.5f);
+            float dp = pitch - g_gyroLastTargetPitch;
+            float dy = yaw - g_gyroLastTargetYaw;
+            float changeMag = std::sqrt(dp*dp + dy*dy);
+            if (changeMag > maxChange) {
+                float k = maxChange / changeMag;
+                pitch = g_gyroLastTargetPitch + dp * k;
+                yaw = g_gyroLastTargetYaw + dy * k;
+            }
+            g_gyroLastTargetPitch = pitch;
+            g_gyroLastTargetYaw = yaw;
+            
             // 单帧最大注入角度限幅，避免目标偏离过大时视角瞬移
             float mag = std::sqrt(pitch * pitch + yaw * yaw);
             if (mag > g_cfg.gyroMaxDeg) {
@@ -644,6 +663,8 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             {
                 std::lock_guard<std::mutex> lock(g_gyroMutex);
                 g_gyroTargetActive = false;
+                g_gyroLastTargetPitch = 0.0f;
+                g_gyroLastTargetYaw = 0.0f;
             }
             g_aimActive = false;
         }
@@ -1746,12 +1767,15 @@ int main(int argc, char* argv[]) {
         // ── 陀螺仪平滑注入（主线程）──
         // 推理线程每帧（~50ms）写入目标 pitch/yaw 到 g_gyroTarget*
         // 主线程每帧（~1ms）用指数移动平均（EMA）平滑插值后注入
-        // 平滑系数：alpha 越大越跟随目标（灵敏），越小越平滑（迟缓）
-        // 这里用 0.15 的 EMA 系数，在 1ms 间隔下可实现 ~15ms 的平滑时间常数
+        // 高灵敏度时使用更低的 alpha，增加平滑时间常数，减少抖动
         {
             std::lock_guard<std::mutex> lock(g_gyroMutex);
             if (g_gyroTargetActive && g_cfg.gyroAim && touch_kernel_connected()) {
-                float alpha = 0.15f;  // EMA 平滑系数
+                // 灵敏度越高，alpha 越低（更平滑）
+                float sens = g_cfg.gyroSens;
+                float alpha = 0.20f - sens * 0.08f;  // sens=0→0.20, sens=2→0.04
+                if (alpha < 0.02f) alpha = 0.02f;
+                
                 g_gyroSmoothPitch += alpha * (g_gyroTargetPitch - g_gyroSmoothPitch);
                 g_gyroSmoothYaw   += alpha * (g_gyroTargetYaw   - g_gyroSmoothYaw);
                 touch_gyro_apply(true, g_gyroSmoothPitch, g_gyroSmoothYaw);
@@ -1793,6 +1817,8 @@ int main(int argc, char* argv[]) {
         g_gyroTargetActive = false;
         g_gyroSmoothPitch = 0.0f;
         g_gyroSmoothYaw   = 0.0f;
+        g_gyroLastTargetPitch = 0.0f;
+        g_gyroLastTargetYaw   = 0.0f;
         touch_gyro_stop();
     }
     if (g_touchReady) touch_close();
