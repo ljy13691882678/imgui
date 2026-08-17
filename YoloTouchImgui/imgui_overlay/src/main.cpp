@@ -558,32 +558,23 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     // uinput 模式下仍要求 g_touchReady。
     if ((gyroMode || g_touchReady || kernelTouchModeOn) && g_cfg.aimEnabled && g_cfg.enabled && !zoneEditing && aimGateOk) {
         switch (g_cfg.aimMode) {
-        case 1:
+        case 0:
             out = g_pidAim.compute(aimTarget, g_cfg, screenCx, screenCy, dt,
                                    (float)scrW, (float)scrH);
             break;
-        case 2:
+        case 1:
             out = g_bezierAim.compute(aimTarget, g_cfg, screenCx, screenCy, dt,
                                       (float)scrW, (float)scrH);
             break;
         default:
-            out = g_aim.compute(aimTarget, g_cfg, screenCx, screenCy, dt);
+            out = g_pidAim.compute(aimTarget, g_cfg, screenCx, screenCy, dt,
+                                   (float)scrW, (float)scrH);
             break;
         }
         if (out.active) {
-            // 原版模式应用拖拽灵敏度（dragSens）；PID/贝塞尔内部已含增益，直接使用
-            float dragFactor = (g_cfg.aimMode == 0) ? g_cfg.dragSens : 1.0f;
-            dpx = out.deltaX * scrW * dragFactor;
-            dpy = out.deltaY * scrH * dragFactor;
-            // 原版模式限制单帧最大拖拽像素，避免目标偏离过大时瞬移/抖动
-            if (g_cfg.aimMode == 0) {
-                float maxStep = (float)g_cfg.aimMaxStepPx;
-                float step = std::sqrt(dpx*dpx + dpy*dpy);
-                if (step > maxStep) { dpx *= maxStep / step; dpy *= maxStep / step; }
-            }
-            // 自瞄回正速度限制：归一化每帧最大瞄准点移动距离。目标在裁剪框边缘时
-            // 距离准星很远，若直接一帧甩过去准星会被甩飞；用该值限制每帧最大移动量，
-            // 让准星平滑地回正（0=关闭限制）
+            dpx = out.deltaX * scrW;
+            dpy = out.deltaY * scrH;
+            // 自瞄回正速度限制：归一化每帧最大瞄准点移动距离
             if (g_cfg.aimApproachSpeed > 0.0f) {
                 float maxPx = g_cfg.aimApproachSpeed * (float)std::min(scrW, scrH);
                 float step = std::sqrt(dpx*dpx + dpy*dpy);
@@ -1319,21 +1310,19 @@ static void drawControlPanel() {
         // 自瞄算法切换：0=原版(拖拽+平滑) 1=PID 2=贝塞尔
         {
             static int lastMode = -1;
-            const char* modes[] = {"原版(拖拽+平滑)", "PID", "贝塞尔"};
+            const char* modes[] = {"PID", "贝塞尔"};
             int cur = g_cfg.aimMode;
-            if (cur < 0 || cur > 2) cur = 0;
+            if (cur < 0 || cur > 1) cur = 0;
             if (ImGui::BeginCombo("自瞄算法", modes[cur])) {
-                for (int i = 0; i < 3; ++i) {
+                for (int i = 0; i < 2; ++i) {
                     if (ImGui::Selectable(modes[i], i == cur)) g_cfg.aimMode = i;
                     if (i == cur) ImGui::SetItemDefaultFocus();
                 }
                 ImGui::EndCombo();
             }
-            // 切换算法时重置对应控制器内部状态，避免跨算法串扰
             if (g_cfg.aimMode != lastMode) {
-                if (g_cfg.aimMode == 1) g_pidAim.reset();
-                else if (g_cfg.aimMode == 2) g_bezierAim.reset();
-                else g_aim.reset();
+                if (g_cfg.aimMode == 0) g_pidAim.reset();
+                else if (g_cfg.aimMode == 1) g_bezierAim.reset();
                 lastMode = g_cfg.aimMode;
             }
         }
@@ -1396,25 +1385,23 @@ static void drawControlPanel() {
     ImGui::SliderFloat("Y 平滑", &g_cfg.smoothY, 0.0f, 0.95f);
     ImGui::SliderFloat("瞄准点平滑", &g_cfg.aimPointSmooth, 0.0f, 0.95f);
     ImGui::SliderFloat("自瞄速度", &g_cfg.aimSpeed, 0.1f, 3.0f);
-    ImGui::SliderFloat("拖拽灵敏度", &g_cfg.dragSens, 0.1f, 2.0f);
-    ImGui::SliderInt("最大步长(px)", &g_cfg.aimMaxStepPx, 4, 160);
     ImGui::SliderFloat("预判", &g_cfg.predictGain, 0.0f, 0.2f);
     // 自瞄回正速度（归一化每帧最大瞄准点移动距离）：目标在裁剪框边缘时防止准星甩飞
     ImGui::SliderFloat("回正速度", &g_cfg.aimApproachSpeed, 0.0f, 0.1f, "%.4f");
     // 算法相关参数：仅在对应模式激活时显示
-    if (g_cfg.aimMode == 1) {
+    if (g_cfg.aimMode == 0) {
         ImGui::Text("PID 参数");
         ImGui::SliderFloat("P##pidKp", &g_cfg.pidKp, 0.01f, 2.0f);
         ImGui::SliderFloat("I##pidKi", &g_cfg.pidKi, 0.0f, 0.2f);
         ImGui::SliderFloat("D##pidKd", &g_cfg.pidKd, 0.0f, 0.5f);
         ImGui::SliderFloat("采样周期(ms)", &g_cfg.pidSamplePeriodMs, 1.0f, 50.0f);
     }
-    if (g_cfg.aimMode == 2) {
+    if (g_cfg.aimMode == 1) {
         ImGui::Text("贝塞尔参数");
         ImGui::SliderFloat("时长系数", &g_cfg.bezierDuration, 5.0f, 100.0f);
     }
     // PID/贝塞尔共用参数
-    if (g_cfg.aimMode == 1 || g_cfg.aimMode == 2) {
+    if (g_cfg.aimMode == 0 || g_cfg.aimMode == 1) {
         ImGui::SliderFloat("收敛阈值(px)", &g_cfg.convergeThresh, 1.0f, 60.0f);
         ImGui::SliderFloat("移动平滑", &g_cfg.aimMoveSmooth, 0.0f, 0.95f);
     }
@@ -1604,7 +1591,7 @@ int main(int argc, char* argv[]) {
         // 加载后钳制数组索引（模型/裁剪/算法等），防止越界
         int cropN = (int)(sizeof(CROP_OPTIONS) / sizeof(CROP_OPTIONS[0]));
         if (g_cfg.cropIndex < 0 || g_cfg.cropIndex >= cropN) g_cfg.cropIndex = 6;
-        if (g_cfg.aimMode < 0 || g_cfg.aimMode > 2) g_cfg.aimMode = 0;
+        if (g_cfg.aimMode < 0 || g_cfg.aimMode > 1) g_cfg.aimMode = 0;
         if (g_cfg.aimPart < 0 || g_cfg.aimPart > 2) g_cfg.aimPart = 0;
         if (g_cfg.selectMode < 0 || g_cfg.selectMode > 2) g_cfg.selectMode = 0;
         if (g_cfg.zoneEditTarget < 0 || g_cfg.zoneEditTarget > 4) g_cfg.zoneEditTarget = 0;

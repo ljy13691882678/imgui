@@ -64,14 +64,10 @@ struct AimConfig {
     // 用于微调锁点位置（如锁头时略向下，避免顶到头顶 / 打偏）
     float aimOffsetX = 0.0f;       // X 偏移（正=右）
     float aimOffsetY = 0.0f;       // Y 偏移（正=下）
-    // 自瞄拖拽灵敏度（拖动视角式）：归一化增量 × 屏幕 × dragSens → 每帧拖拽像素
-    float dragSens = 0.35f;
-    // 自瞄单帧最大拖拽像素（防止瞬移/抖动）
-    int   aimMaxStepPx = 24;
     // 瞄准点时间平滑（EMA，0~1）：同一跟踪目标对瞄准点做指数移动平均，
     // 压掉检测框抖动/拖视角反馈振荡（越大越平滑，0=关闭）
     float aimPointSmooth = 0.75f;
-    // 自瞄算法：0=原版(拖拽+平滑) 1=PID 2=贝塞尔（移植自 YoloTouchHelp）
+    // 自瞄算法：0=PID 1=贝塞尔
     int   aimMode = 0;
     // PID 参数（executeAimingPid 移植）
     float pidKp = 0.30f;          // 比例系数
