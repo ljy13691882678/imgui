@@ -1261,7 +1261,7 @@ static void drawControlPanel() {
     ImGui::Separator();
     ImGui::TextDisabled("陀螺仪自瞄参数（内核陀螺仪模式下生效）");
     ImGui::SliderFloat("陀螺仪灵敏度", &g_cfg.gyroSens, 0.001f, 0.05f, "%.3f");
-    ImGui::SliderFloat("单帧最大角度(°)", &g_cfg.gyroMaxDeg, 0.5f, 60.0f, "%.1f");
+    ImGui::SliderFloat("单帧最大角度(°)", &g_cfg.gyroMaxDeg, 0.0f, 250.0f, "%.1f");
     ImGui::Checkbox("反转 Pitch", &g_cfg.gyroInvertPitch);
     ImGui::Checkbox("反转 Yaw", &g_cfg.gyroInvertYaw);
     }
