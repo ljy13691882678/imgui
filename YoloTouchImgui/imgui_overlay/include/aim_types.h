@@ -42,7 +42,7 @@ struct AimConfig {
     int   boxThickness = 2;
     bool  showBoxLabels = true;
     // 检测框显示预判（秒）：用目标速度把框前移，补偿“捕获→绘制”延迟，快速转动不掉框
-    float boxPredictTime = 0.02f;
+    float boxPredictTime = 0.05f;
     // 在悬浮窗上绘制裁剪区域边框（让用户看到推理输入范围）
     bool  showCropBox = true;
     // 推理帧率上限（FPS，0=不限制；可选 60/90/120/144）

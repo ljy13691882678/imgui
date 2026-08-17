@@ -16,13 +16,20 @@ public:
         float px = m_x + m_vx * dt;
         float py = m_y + m_vy * dt;
 
-        // 更新速度（EMA 平滑速度增量）
-        m_vx = m_vx * 0.9f + (mx - px) / dt * 0.1f;
-        m_vy = m_vy * 0.9f + (my - py) / dt * 0.1f;
+        // 更新速度：增大响应权重(0.3)，让速度估算快速跟踪快速移动的目标
+        m_vx = m_vx * 0.7f + (mx - px) / dt * 0.3f;
+        m_vy = m_vy * 0.7f + (my - py) / dt * 0.3f;
 
-        // 更新位置（简化固定增益）
-        m_x = px + (mx - px) * 0.5f;
-        m_y = py + (my - py) * 0.5f;
+        // 限制速度最大值（归一化坐标/秒），防止速度估算异常导致预测过度
+        const float maxV = 15.0f;
+        if (m_vx > maxV) m_vx = maxV;
+        if (m_vx < -maxV) m_vx = -maxV;
+        if (m_vy > maxV) m_vy = maxV;
+        if (m_vy < -maxV) m_vy = -maxV;
+
+        // 更新位置（增大响应权重，让位置更快跟随测量值）
+        m_x = px + (mx - px) * 0.7f;
+        m_y = py + (my - py) * 0.7f;
     }
 
     float x() const { return m_x; }

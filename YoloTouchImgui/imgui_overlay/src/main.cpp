@@ -1231,7 +1231,7 @@ static void drawControlPanel() {
         ImGui::Checkbox("框标签", &g_cfg.showBoxLabels);
         // 检测框速度预判（毫秒）：调大让框更超前，补偿快速转动时的捕获→绘制延迟
         float boxPredictMs = g_cfg.boxPredictTime * 1000.0f;
-        if (ImGui::SliderFloat("框预判(ms)", &boxPredictMs, 0.0f, 80.0f, "%.0f"))
+        if (ImGui::SliderFloat("框预判(ms)", &boxPredictMs, 0.0f, 200.0f, "%.0f"))
             g_cfg.boxPredictTime = boxPredictMs / 1000.0f;
 
         // 类别显示过滤（类名来自模型同目录 labels 文件，如 head/body）
