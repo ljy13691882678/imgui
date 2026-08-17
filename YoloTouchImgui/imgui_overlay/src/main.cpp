@@ -413,7 +413,13 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         return;
     }
 
-    // 选择目标（使用速度预判补偿推理延迟，与绘制一致）
+    // 选择目标（使用实时推理延迟+boxPredictTime 补偿，与绘制一致）
+    // 预测时长 = 平滑推理延迟 + 额外前瞻（补偿主循环注入延迟），限制在 0-200ms
+    float aimPredictMs = g_inferLatencyMs.load() + g_cfg.boxPredictTime;
+    if (aimPredictMs < 0.0f) aimPredictMs = 0.0f;
+    if (aimPredictMs > 200.0f) aimPredictMs = 200.0f;
+    float aimPredictSec = aimPredictMs * 0.001f;
+
     const AimTarget* pick = nullptr;
     float bestScore = -1.0f;
     float screenCx = 0.5f, screenCy = 0.5f;
@@ -421,9 +427,9 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         // 类别锁定：若 aimClass≥0，仅选择该类目标
         if (g_cfg.aimClass >= 0 && (int)t.classId != g_cfg.aimClass) continue;
 
-        // 预判位置：与绘制用相同的 boxPredictTime 补偿“捕获→推理→自瞄”延迟
-        float pcx = t.cx + t.vx * g_cfg.boxPredictTime;
-        float pcy = t.cy + t.vy * g_cfg.boxPredictTime;
+        // 预判位置：用实时推理延迟+boxPredictTime 补偿“捕获→推理→自瞄”延迟
+        float pcx = t.cx + t.vx * aimPredictSec;
+        float pcy = t.cy + t.vy * aimPredictSec;
 
         float score;
         float dx = pcx - screenCx;
@@ -441,13 +447,13 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         return;
     }
 
-    // 按锁定部位调整瞄准点（使用速度预判补偿延迟）
+    // 按锁定部位调整瞄准点（使用实时推理延迟+boxPredictTime 补偿延迟）
     AimTarget aimTarget = *pick;
     {
         // 对选择的目标也应用速度预判，与绘制/选择保持一致
         AimTarget predicted = *pick;
-        predicted.cx = pick->cx + pick->vx * g_cfg.boxPredictTime;
-        predicted.cy = pick->cy + pick->vy * g_cfg.boxPredictTime;
+        predicted.cx = pick->cx + pick->vx * aimPredictSec;
+        predicted.cy = pick->cy + pick->vy * aimPredictSec;
         // 框尺寸也简单平移（不改变大小）
         float dx = predicted.cx - pick->cx;
         float dy = predicted.cy - pick->cy;
@@ -699,6 +705,11 @@ static std::atomic<bool> g_inferRunning{false};
 
 // 最近一次 processFrame 完成时刻（ms），用于主循环诊断推理是否卡死
 static std::atomic<long long> g_lastFrameDoneMs{0};
+// 最近一帧推理完成的时间戳（ms），用于绘制时精确补偿推理延迟
+// 绘制时用 (now - g_lastFrameTimestamp) 作为预测时长，自动适配不同模型/设备的推理耗时
+static std::atomic<long long> g_lastFrameTimestamp{0};
+// 平滑后的推理延迟（ms），用于 UI 显示和预测（EMA 避免抖动）
+static std::atomic<float> g_inferLatencyMs{0.0f};
 
 static void inferenceLoop() {
     uint64_t frames = 0;
@@ -766,8 +777,14 @@ static void inferenceLoop() {
 
         long long frameStart = getTimeNowMs();
         processFrame(frame, g_shm->freshHeader());
-        g_lastFrameMs.store(getTimeNowMs() - frameStart);
-        g_lastFrameDoneMs.store(getTimeNowMs());
+        long long frameDone = getTimeNowMs();
+        g_lastFrameMs.store(frameDone - frameStart);
+        g_lastFrameDoneMs.store(frameDone);
+        g_lastFrameTimestamp.store(frameDone);
+        // EMA 平滑推理延迟（用于绘制时的预测补偿，避免跳变）
+        float latMs = (float)(frameDone - frameStart);
+        float oldLat = g_inferLatencyMs.load();
+        g_inferLatencyMs.store(oldLat * 0.7f + latMs * 0.3f);
         frames++;
 
         // 推理帧率上限（节流）：达到上限后等待到下一帧时隙，避免无谓的 CPU/耗电
@@ -883,21 +900,31 @@ static void drawDetectionOverlay() {
     }
 
     if (g_cfg.showFps) {
-        char buf[96];
-        snprintf(buf, sizeof(buf), "帧率: %llu  检测: %zu  跟踪: %zu",
+        char buf[128];
+        snprintf(buf, sizeof(buf), "帧率: %llu  检测: %zu  跟踪: %zu  推理延迟: %.1fms",
                  (unsigned long long)g_inferFps.load(),
-                 g_detections.size(), g_tracks.size());
+                 g_detections.size(), g_tracks.size(),
+                 g_inferLatencyMs.load());
         draw->AddText(ImVec2(20, 20), IM_COL32(255, 255, 0, 255), buf);
     }
 
     std::lock_guard<std::mutex> lock(g_detMutex);
     // 用跟踪结果绘制：真实框尺寸 + 速度预判，消除快速转动时的脱框。
-    // 原始 g_detections 是最新检测快照，但不含跨帧平滑/预判，绘制会滞后。
+    // 使用实时推理延迟（EMA 平滑）+ boxPredictTime 作为总预测时长：
+    //   - 自动补偿模型推理耗时（无论快慢都能跟上）
+    //   - boxPredictTime 作为额外前瞻量，补偿主循环绘制与触摸注入间的微小延迟
+    //   - 限制在 0-200ms 防止极端情况预测过度
+    float predictMs = g_inferLatencyMs.load() + g_cfg.boxPredictTime;
+    if (predictMs < 0.0f) predictMs = 0.0f;
+    if (predictMs > 200.0f) predictMs = 200.0f;
+    float predictSec = predictMs * 0.001f;
+
     if (g_cfg.showBoxes) {
         for (const auto& t : g_tracks) {
-            // 预判位置：用目标速度把框前移 boxPredictTime，补偿“捕获→推理→绘制”延迟
-            float pcx = t.cx + t.vx * g_cfg.boxPredictTime;
-            float pcy = t.cy + t.vy * g_cfg.boxPredictTime;
+            // 预判位置：用目标速度把框前移 (inferLatency + boxPredictTime)，
+            // 自动补偿“捕获→推理→绘制”的实际延迟，与实时画面保持同步
+            float pcx = t.cx + t.vx * predictSec;
+            float pcy = t.cy + t.vy * predictSec;
             float hw = (t.x2 - t.x1) * 0.5f;
             float hh = (t.y2 - t.y1) * 0.5f;
             ImVec2 p1((pcx - hw) * sx, (pcy - hh) * sy);
