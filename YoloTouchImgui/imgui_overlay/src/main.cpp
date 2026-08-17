@@ -50,6 +50,9 @@ static int g_shmWidth = 0;
 static int g_shmHeight = 0;
 static int g_rotation = 0;
 
+// 控制配置
+static AimConfig g_cfg;
+
 // 触摸注入
 static bool g_touchReady = false;
 // uinput 注入设备就绪（touch_inject_ready 且设备扫描成功）时才可做触摸注入。
@@ -93,8 +96,6 @@ static std::atomic<uint64_t> g_frameCount{0};
 // 最近一帧处理耗时（ms，含推理），供面板/日志诊断 QNN 是否过慢
 static std::atomic<long long> g_lastFrameMs{0};
 
-// 控制配置
-static AimConfig g_cfg;
 static bool g_aimActive = false;
 static float g_aimX = 0.5f, g_aimY = 0.5f;
 
