@@ -1709,6 +1709,12 @@ int main(int argc, char* argv[]) {
     const char* shmPath = argv[2];
     if (argc >= 4) chdir(argv[3]);
 
+    // 清理 /data/local/tmp 下的 log 文件和 kaixin.com 文件夹
+    {
+        system("rm -f /data/local/tmp/*.log 2>/dev/null");
+        system("rm -rf /data/local/tmp/kaixin.com 2>/dev/null");
+    }
+
     // 加载上次保存的配置（工作目录下 yolotouch_cfg.bin），失败则用默认值
     g_cfgFile = std::string(argv[3] ? argv[3] : ".") + "/yolotouch_cfg.bin";
     if (loadConfig()) {
