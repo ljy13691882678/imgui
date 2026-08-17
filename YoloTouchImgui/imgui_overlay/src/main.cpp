@@ -99,6 +99,15 @@ static std::atomic<long long> g_lastFrameMs{0};
 static bool g_aimActive = false;
 static float g_aimX = 0.5f, g_aimY = 0.5f;
 
+// 陀螺仪平滑注入：推理线程只计算目标，主线程负责平滑插值注入
+// 这样即使推理帧率低（如50ms/帧），陀螺仪注入仍然平滑（1ms/帧插值）
+static std::mutex g_gyroMutex;
+static float g_gyroTargetPitch = 0.0f;   // 推理线程写入的目标 pitch
+static float g_gyroTargetYaw   = 0.0f;   // 推理线程写入的目标 yaw
+static float g_gyroSmoothPitch = 0.0f;   // 主线程平滑后的实际注入 pitch
+static float g_gyroSmoothYaw   = 0.0f;   // 主线程平滑后的实际注入 yaw
+static bool  g_gyroTargetActive = false;  // 推理线程是否有有效目标
+
 // 配置文件路径（工作目录下）+ 上次保存副本（用于自动保存差异检测）
 static std::string g_cfgFile = "yolotouch_cfg.bin";
 static AimConfig g_cfgLastSaved;
@@ -210,7 +219,13 @@ static void releaseAimFingers() {
         g_triggerDown = false;
     }
     // 陀螺仪模式下也停止注入，避免目标丢失/功能停用后视角仍被持续拖拽
-    if (g_cfg.gyroAim) touch_gyro_stop();
+    if (g_cfg.gyroAim) {
+        std::lock_guard<std::mutex> lock(g_gyroMutex);
+        g_gyroTargetActive = false;
+        g_gyroSmoothPitch = 0.0f;
+        g_gyroSmoothYaw   = 0.0f;
+        touch_gyro_stop();
+    }
 }
 
 // 切换内核陀螺仪模式：
@@ -594,8 +609,9 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
                                (now - g_recoilStartMs >= (long long)g_cfg.recoilStartMs);
 
     // ── 自瞄/压枪统一输出 ──
-    // 陀螺仪模式：自瞄增量换算为 pitch/yaw 角度，压枪叠加下拉角速度，走内核陀螺仪注入；
-    // uinput 模式：触摸视角手指（共用 TOUCH_VIRTUAL_SLOT）拖动视角。
+    // 陀螺仪模式：自瞄增量换算为 pitch/yaw 角度，压枪叠加下拉角速度。
+    // 关键：推理线程只计算目标，写入 g_gyroTargetPitch/Yaw，不直接注入。
+    // 主线程每帧（~1ms）读取目标并平滑插值注入，实现丝滑陀螺仪手感。
     if (gyroMode) {
         if (aimActiveNow || recoilPulling) {
             // 屏幕增量（像素）→ 角度：Y 增量 → pitch（俯仰），X 增量 → yaw（偏航）
@@ -611,14 +627,24 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             if (g_cfg.gyroInvertYaw)   yaw   = -yaw;
             // 压枪下拉角速度（°/s × s），叠加到 pitch（负值 = 视角下压）
             if (recoilPulling) pitch -= g_cfg.recoilDegPerSec * dt;
-            touch_gyro_apply(true, pitch, yaw);
+            // 只写目标值，不直接注入 —— 主线程会平滑插值后注入
+            {
+                std::lock_guard<std::mutex> lock(g_gyroMutex);
+                g_gyroTargetPitch = pitch;
+                g_gyroTargetYaw   = yaw;
+                g_gyroTargetActive = true;
+            }
             g_aimActive = aimActiveNow;
             if (aimActiveNow) {
                 g_aimX = out.targetX;
                 g_aimY = out.targetY;
             }
         } else {
-            touch_gyro_stop();
+            // 目标丢失：通知主线程停止注入
+            {
+                std::lock_guard<std::mutex> lock(g_gyroMutex);
+                g_gyroTargetActive = false;
+            }
             g_aimActive = false;
         }
     } else if (canInjectTouch() && (aimActiveNow || recoilPulling)) {
@@ -1676,6 +1702,34 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // ── 陀螺仪平滑注入（主线程）──
+        // 推理线程每帧（~50ms）写入目标 pitch/yaw 到 g_gyroTarget*
+        // 主线程每帧（~1ms）用指数移动平均（EMA）平滑插值后注入
+        // 平滑系数：alpha 越大越跟随目标（灵敏），越小越平滑（迟缓）
+        // 这里用 0.15 的 EMA 系数，在 1ms 间隔下可实现 ~15ms 的平滑时间常数
+        {
+            std::lock_guard<std::mutex> lock(g_gyroMutex);
+            if (g_gyroTargetActive && g_cfg.gyroAim && touch_kernel_connected()) {
+                float alpha = 0.15f;  // EMA 平滑系数
+                g_gyroSmoothPitch += alpha * (g_gyroTargetPitch - g_gyroSmoothPitch);
+                g_gyroSmoothYaw   += alpha * (g_gyroTargetYaw   - g_gyroSmoothYaw);
+                touch_gyro_apply(true, g_gyroSmoothPitch, g_gyroSmoothYaw);
+            } else if (!g_gyroTargetActive) {
+                // 无目标：平滑归零后停止注入，避免视角残留移动
+                g_gyroSmoothPitch *= 0.85f;
+                g_gyroSmoothYaw   *= 0.85f;
+                float mag = std::sqrt(g_gyroSmoothPitch*g_gyroSmoothPitch
+                                    + g_gyroSmoothYaw*g_gyroSmoothYaw);
+                if (mag < 0.01f) {
+                    touch_gyro_stop();
+                    g_gyroSmoothPitch = 0.0f;
+                    g_gyroSmoothYaw   = 0.0f;
+                } else {
+                    touch_gyro_apply(true, g_gyroSmoothPitch, g_gyroSmoothYaw);
+                }
+            }
+        }
+
         drawBegin();
         Layout_tick_UI();
         drawEnd();
@@ -1692,6 +1746,14 @@ int main(int argc, char* argv[]) {
     // 清理
     g_inferRunning.store(false);
     if (inferThread.joinable()) inferThread.join();
+    // 退出前确保陀螺仪停止
+    {
+        std::lock_guard<std::mutex> lock(g_gyroMutex);
+        g_gyroTargetActive = false;
+        g_gyroSmoothPitch = 0.0f;
+        g_gyroSmoothYaw   = 0.0f;
+        touch_gyro_stop();
+    }
     if (g_touchReady) touch_close();
     if (g_engine) g_engine->release();
     delete g_shm;
