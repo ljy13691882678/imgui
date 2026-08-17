@@ -449,31 +449,24 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         return;
     }
 
-    // 选择目标（使用实时时间戳动态预测）
-    long long aimTimeUs = getTimeNowUs();
-
+    // 选择目标（硬锁定：使用检测位置）
     const AimTarget* pick = nullptr;
     float bestScore = -1.0f;
     float screenCx = 0.5f, screenCy = 0.5f;
     for (const auto& t : tracks) {
         if (g_cfg.aimClass >= 0 && (int)t.classId != g_cfg.aimClass) continue;
 
-        // 实时预测：计算当前时间与检测时间的差值
-        float aimDelayMs = (float)(aimTimeUs - t.timestamp) * 0.001f;
-        if (aimDelayMs < 0.0f) aimDelayMs = 0.0f;
-        if (aimDelayMs > 500.0f) aimDelayMs = 500.0f;
-        float aimDelaySec = aimDelayMs * 0.001f;
-
-        float pcx = t.cx + t.vx * aimDelaySec;
-        float pcy = t.cy + t.vy * aimDelaySec;
+        // 硬锁定：直接使用检测位置做选择
+        float pcx = t.cx;
+        float pcy = t.cy;
 
         float score;
         float dx = pcx - screenCx;
         float dy = pcy - screenCy;
         switch (g_cfg.selectMode) {
-        case 1: score = (t.x2 - t.x1) * (t.y2 - t.y1); break;  // 最大框
-        case 2: score = -std::sqrt(dx*dx + dy*dy); break;        // 最接近准星
-        default: score = -std::sqrt(dx*dx + dy*dy); break;       // 最近中心
+        case 1: score = (t.x2 - t.x1) * (t.y2 - t.y1); break;
+        case 2: score = -std::sqrt(dx*dx + dy*dy); break;
+        default: score = -std::sqrt(dx*dx + dy*dy); break;
         }
         if (score > bestScore) { bestScore = score; pick = &t; }
     }
@@ -483,30 +476,12 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         return;
     }
 
-    // 按锁定部位调整瞄准点（使用实时时间戳动态补偿延迟）
+    // 按锁定部位调整瞄准点（硬锁定：直接使用检测位置）
     AimTarget aimTarget = *pick;
     {
-        // 实时预测
-        float aimDelayMs = (float)(aimTimeUs - pick->timestamp) * 0.001f;
-        if (aimDelayMs < 0.0f) aimDelayMs = 0.0f;
-        if (aimDelayMs > 500.0f) aimDelayMs = 500.0f;
-        float aimDelaySec = aimDelayMs * 0.001f;
-
-        AimTarget predicted = *pick;
-        predicted.cx = pick->cx + pick->vx * aimDelaySec;
-        predicted.cy = pick->cy + pick->vy * aimDelaySec;
-        // 框尺寸也简单平移（不改变大小）
-        float dx = predicted.cx - pick->cx;
-        float dy = predicted.cy - pick->cy;
-        predicted.x1 = pick->x1 + dx;
-        predicted.y1 = pick->y1 + dy;
-        predicted.x2 = pick->x2 + dx;
-        predicted.y2 = pick->y2 + dy;
-
+        // 直接使用检测位置，不做预测偏移
         float ax, ay;
-        computeAimPoint(predicted, g_cfg.aimPart, &ax, &ay);
-        // 自瞄瞄准点微调：在锁定部位计算出的瞄准点上叠加偏移，
-        // 用于微调锁点位置（如锁头时略向下，避免顶到头顶 / 打偏）
+        computeAimPoint(*pick, g_cfg.aimPart, &ax, &ay);
         ax += g_cfg.aimOffsetX;
         ay += g_cfg.aimOffsetY;
         // 瞄准点时间平滑（EMA）：同一跟踪目标用指数移动平均压掉检测框抖动，
@@ -962,100 +937,101 @@ static void drawDetectionOverlay() {
 
     std::lock_guard<std::mutex> lock(g_detMutex);
 
-    // 实时零延迟跟随：带多级防抖的稳定预测
+    // 硬锁定跟随：框位置 = 检测位置 + 自适应微补偿
     long long renderTimeUs = getTimeNowUs();
 
-    // 每个 trackId 独立的稳定状态
-    struct StableState {
-        float cx = 0, cy = 0;        // 平滑后的显示位置
-        float vx = 0, vy = 0;        // 平滑后的速度
-        float lastCx = 0, lastCy = 0; // 上一帧检测位置
-        int64_t lastTimestamp = 0;    // 上一帧检测时间
-        int frameCount = 0;           // 连续帧数
+    // 每个 trackId 独立的状态
+    struct TrackState {
+        float vx = 0, vy = 0;        // 平滑速度
+        float lastCx = 0, lastCy = 0;
+        int64_t lastTs = 0;
+        int frameCount = 0;
     };
-    static std::unordered_map<int, StableState> g_stableStates;
+    static std::unordered_map<int, TrackState> g_trackStates;
 
     if (g_cfg.showBoxes) {
-        std::unordered_set<int> currentTrackIds;
+        std::unordered_set<int> currentIds;
 
         for (const auto& t : g_tracks) {
-            currentTrackIds.insert(t.trackId);
+            currentIds.insert(t.trackId);
             float hw = (t.x2 - t.x1) * 0.5f;
             float hh = (t.y2 - t.y1) * 0.5f;
             float boxW = hw * 2.0f;
             float boxH = hh * 2.0f;
 
-            auto& state = g_stableStates[t.trackId];
+            auto& st = g_trackStates[t.trackId];
 
-            // 计算原始速度（用检测位置差）
-            float rawVx = 0, rawVy = 0;
-            if (state.frameCount > 0 && state.lastTimestamp > 0) {
-                float dtSec = (float)(t.timestamp - state.lastTimestamp) * 0.000001f;
+            // 计算速度
+            if (st.frameCount > 0 && st.lastTs > 0) {
+                float dtSec = (float)(t.timestamp - st.lastTs) * 0.000001f;
                 if (dtSec > 0.001f && dtSec < 1.0f) {
-                    rawVx = (t.cx - state.lastCx) / dtSec;
-                    rawVy = (t.cy - state.lastCy) / dtSec;
+                    float rvx = (t.cx - st.lastCx) / dtSec;
+                    float rvy = (t.cy - st.lastCy) / dtSec;
+                    // EMA 平滑速度
+                    st.vx += 0.4f * (rvx - st.vx);
+                    st.vy += 0.4f * (rvy - st.vy);
                 }
             }
 
-            // 平滑速度（EMA，更稳定）
-            float velAlpha = 0.3f;  // 速度平滑系数
-            state.vx += velAlpha * (rawVx - state.vx);
-            state.vy += velAlpha * (rawVy - state.vy);
+            // 限制速度（归一化/秒）
+            float maxV = 2.0f;
+            if (st.vx > maxV) st.vx = maxV;
+            if (st.vx < -maxV) st.vx = -maxV;
+            if (st.vy > maxV) st.vy = maxV;
+            if (st.vy < -maxV) st.vy = -maxV;
 
-            // 限制速度范围（每归一化秒最大移动 3.0，防止异常值）
-            float maxVel = 3.0f;
-            if (state.vx > maxVel) state.vx = maxVel;
-            if (state.vx < -maxVel) state.vx = -maxVel;
-            if (state.vy > maxVel) state.vy = maxVel;
-            if (state.vy < -maxVel) state.vy = -maxVel;
+            // 更新历史
+            st.lastCx = t.cx;
+            st.lastCy = t.cy;
+            st.lastTs = t.timestamp;
+            st.frameCount++;
 
-            // 更新历史记录
-            state.lastCx = t.cx;
-            state.lastCy = t.cy;
-            state.lastTimestamp = t.timestamp;
-            state.frameCount++;
+            // === 核心：硬锁定检测位置 ===
+            float pcx = t.cx;
+            float pcy = t.cy;
 
-            // 计算预测位置（限制最大预测时间）
-            float delayMs = (float)(renderTimeUs - t.timestamp) * 0.001f;
-            if (delayMs < 0.0f) delayMs = 0.0f;
-            if (delayMs > 50.0f) delayMs = 50.0f;  // 只补偿最多 50ms
+            // === 自适应微补偿 ===
+            if (st.frameCount >= 2) {
+                float speedMag = sqrtf(st.vx * st.vx + st.vy * st.vy);
 
-            float predictSec = delayMs * 0.001f;
-            float predictedCx = t.cx + state.vx * predictSec;
-            float predictedCy = t.cy + state.vy * predictSec;
-
-            // 限制预测偏移距离（不超过框宽/高的 30%）
-            float maxOffX = boxW * 0.3f;
-            float maxOffY = boxH * 0.3f;
-            float offX = predictedCx - t.cx;
-            float offY = predictedCy - t.cy;
-            if (offX > maxOffX) predictedCx = t.cx + maxOffX;
-            if (offX < -maxOffX) predictedCx = t.cx - maxOffX;
-            if (offY > maxOffY) predictedCy = t.cy + maxOffY;
-            if (offY < -maxOffY) predictedCy = t.cy - maxOffY;
-
-            // 位置 EMA 平滑（更保守）
-            if (state.frameCount == 1) {
-                state.cx = predictedCx;
-                state.cy = predictedCy;
-            } else {
-                float posAlpha = 0.25f;  // 位置平滑系数：越小越稳定
-                state.cx += posAlpha * (predictedCx - state.cx);
-                state.cy += posAlpha * (predictedCy - state.cy);
-
-                // 死区：如果差异很小，不做更新（防抖）
-                float diffX = fabsf(predictedCx - state.cx);
-                float diffY = fabsf(predictedCy - state.cy);
-                float deadX = boxW * 0.02f;  // 2% 框宽的死区
-                float deadY = boxH * 0.02f;
-                if (diffX < deadX && diffY < deadY) {
-                    // 差异在死区内，保持上次位置
+                // 自适应补偿系数：
+                // - 速度慢（<0.3/秒）：补偿 80% 的延迟 → 几乎跟随预测
+                // - 速度快（>1.0/秒）：补偿 30% 的延迟 → 信任检测位置
+                // 速度越快，预测越不可靠，越应该直接跟随检测位置
+                float compRatio;
+                if (speedMag < 0.3f) {
+                    compRatio = 0.8f;  // 慢速：多补偿
+                } else if (speedMag < 1.0f) {
+                    compRatio = 0.6f;  // 中速：中等补偿
+                } else {
+                    compRatio = 0.25f;  // 快速：少补偿
                 }
+
+                // 计算延迟并限制
+                float delayMs = (float)(renderTimeUs - t.timestamp) * 0.001f;
+                if (delayMs < 0.0f) delayMs = 0.0f;
+                if (delayMs > 16.0f) delayMs = 16.0f;  // 最多补偿 16ms（约1帧）
+
+                float compSec = delayMs * 0.001f * compRatio;
+
+                // 计算补偿偏移
+                float offX = st.vx * compSec;
+                float offY = st.vy * compSec;
+
+                // 硬限制：补偿偏移不超过框宽/高的 3%（极小值）
+                float maxOffX = boxW * 0.03f;
+                float maxOffY = boxH * 0.03f;
+                if (offX > maxOffX) offX = maxOffX;
+                if (offX < -maxOffX) offX = -maxOffX;
+                if (offY > maxOffY) offY = maxOffY;
+                if (offY < -maxOffY) offY = -maxOffY;
+
+                // 应用补偿
+                pcx += offX;
+                pcy += offY;
             }
 
-            float pcx = state.cx;
-            float pcy = state.cy;
-
+            // === 绘制 ===
             ImVec2 p1((pcx - hw) * sx, (pcy - hh) * sy);
             ImVec2 p2((pcx + hw) * sx, (pcy + hh) * sy);
             int thick = std::max(1, g_cfg.boxThickness);
@@ -1075,12 +1051,11 @@ static void drawDetectionOverlay() {
             }
         }
 
-        // 清理已不存在的目标
-        for (auto it = g_stableStates.begin(); it != g_stableStates.end(); ) {
-            if (currentTrackIds.find(it->first) == currentTrackIds.end())
-                it = g_stableStates.erase(it);
-            else
-                ++it;
+        // 清理
+        for (auto it = g_trackStates.begin(); it != g_trackStates.end(); ) {
+            if (currentIds.find(it->first) == currentIds.end())
+                it = g_trackStates.erase(it);
+            else ++it;
         }
     }
 
@@ -1092,21 +1067,13 @@ static void drawDetectionOverlay() {
         draw->AddLine(ImVec2(cx, cy - 20), ImVec2(cx, cy + 20), col, 2.0f);
     }
 
-    // 辅助连线：横屏时从屏幕最上沿边框内（顶部正中）向各推理框的顶部中心画射线，
-    // 便于观察目标相对准星的方位与距离。
+    // 辅助连线：使用检测位置（硬锁定，不做预测补偿）
     if (g_cfg.showAimLines && g_cfg.showBoxes) {
-        ImVec2 anchor(sx * 0.5f, 0.0f); // 屏幕最上沿边框内，顶部正中
+        ImVec2 anchor(sx * 0.5f, 0.0f);
         draw->AddCircleFilled(anchor, 5.0f, IM_COL32(0, 255, 255, 255), 12);
         for (const auto& t : g_tracks) {
-            // 实时预测位置（与检测框绘制逻辑一致）
-            float delayMs = (float)(renderTimeUs - t.timestamp) * 0.001f;
-            if (delayMs < 0.0f) delayMs = 0.0f;
-            if (delayMs > 500.0f) delayMs = 500.0f;
-            float delaySec = delayMs * 0.001f;
-            float pcx = t.cx + t.vx * delaySec;
-            float pcy = t.cy + t.vy * delaySec;
             float hh = (t.y2 - t.y1) * 0.5f;
-            ImVec2 boxTop(pcx * sx, (pcy - hh) * sy); // 推理框顶部中心
+            ImVec2 boxTop(t.cx * sx, (t.cy - hh) * sy);
             draw->AddLine(anchor, boxTop, IM_COL32(0, 255, 255, 150), 1.5f);
         }
     }
