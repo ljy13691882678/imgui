@@ -25,17 +25,54 @@ public:
         // 1. 标记所有轨迹为新帧丢失
         for (auto& t : m_tracks) t.lost++;
 
-        // 2. 关联：贪心匹配（按 IoU）
+        // 2. 关联：贪心匹配
+        //    优先用中心距离门控（比固定框 IoU 更稳定，适应快速移动的目标）
+        //    中心距离 < gate * (track_size + det_size) 时直接关联，不依赖 IoU
+        //    中心距离 > 远距离门限时用宽松 IoU 兜底
         std::vector<bool> matchedDets(detections.size(), false);
         for (auto& t : m_tracks) {
             int bestIdx = -1;
-            float bestIoU = 0.25f;  // 关联阈值
+            float bestScore = -1.0f;
+            float trackHalfX = std::max(0.01f, t.w * 0.5f);
+            float trackHalfY = std::max(0.01f, t.h * 0.5f);
+
             for (size_t i = 0; i < detections.size(); ++i) {
                 if (matchedDets[i]) continue;
-                float iou = computeIoU(t.kf.x(), t.kf.y(),
-                                       detections[i].cx, detections[i].cy);
-                if (iou > bestIoU) {
-                    bestIoU = iou;
+
+                // 中心距离门控（归一化像素距离）
+                float dx = detections[i].cx - t.kf.x();
+                float dy = detections[i].cy - t.kf.y();
+                float dist = std::sqrt(dx*dx + dy*dy);
+
+                float detW = detections[i].x2 - detections[i].x1;
+                float detH = detections[i].y2 - detections[i].y1;
+                float detHalfX = std::max(0.01f, detW * 0.5f);
+                float detHalfY = std::max(0.01f, detH * 0.5f);
+
+                // 宽松门限：目标框对角线长度的 2 倍（归一化值）
+                float gateX = (trackHalfX + detHalfX) * 1.2f;
+                float gateY = (trackHalfY + detHalfY) * 1.2f;
+
+                float matchScore = -1.0f;
+                if (std::fabs(dx) <= gateX && std::fabs(dy) <= gateY) {
+                    // 在门控内：用 IoU 精确评分
+                    float iou = computeIoU(t.kf.x(), t.kf.y(),
+                                           detections[i].cx, detections[i].cy,
+                                           trackHalfX, trackHalfY,
+                                           detHalfX, detHalfY);
+                    if (iou > 0.08f) matchScore = iou;
+                    else matchScore = 0.5f;  // 距离很近但 IoU 低时仍关联（容忍框大小抖动）
+                } else {
+                    // 距离较远：用宽松 IoU 兜底（阈值降低到 0.12）
+                    float iou = computeIoU(t.kf.x(), t.kf.y(),
+                                           detections[i].cx, detections[i].cy,
+                                           trackHalfX, trackHalfY,
+                                           detHalfX, detHalfY);
+                    if (iou > 0.12f) matchScore = iou;
+                }
+
+                if (matchScore > bestScore) {
+                    bestScore = matchScore;
                     bestIdx = static_cast<int>(i);
                 }
             }
@@ -49,7 +86,7 @@ public:
                 float nw = detections[bestIdx].x2 - detections[bestIdx].x1;
                 float nh = detections[bestIdx].y2 - detections[bestIdx].y1;
                 if (t.w <= 0.0f) { t.w = nw; t.h = nh; }
-                else { t.w = t.w * 0.7f + nw * 0.3f; t.h = t.h * 0.7f + nh * 0.3f; }
+                else { t.w = t.w * 0.6f + nw * 0.4f; t.h = t.h * 0.6f + nh * 0.4f; }
                 t.active = true;
             }
         }
@@ -68,16 +105,17 @@ public:
             m_tracks.push_back(tr);
         }
 
-        // 4. 清理丢失过久的轨迹
+        // 4. 清理丢失过久的轨迹（延长丢失容忍到 20 帧，避免偶发丢失导致闪框）
         m_tracks.erase(std::remove_if(m_tracks.begin(), m_tracks.end(),
-            [](const Track& t) { return t.lost > 15; }), m_tracks.end());
+            [](const Track& t) { return t.lost > 20; }), m_tracks.end());
     }
 
     // 返回活跃轨迹（转为 AimTarget）
     std::vector<AimTarget> activeTargets() const {
         std::vector<AimTarget> out;
         for (const auto& t : m_tracks) {
-            if (t.lost > 3 || !t.active) continue;
+            // 延长丢失容忍到 6 帧（原 3 帧），让偶发丢失/漏帧的目标不闪框
+            if (t.lost > 6 || !t.active) continue;
             AimTarget a;
             a.trackId = t.id;
             a.classId = t.classId;
@@ -86,7 +124,7 @@ public:
             a.cy = t.kf.y();
             a.vx = t.kf.vx();
             a.vy = t.kf.vy();
-            // 用跟踪器保存的原始检测框尺寸（而非固定 0.03），保证框大小与目标一致
+            // 用跟踪器保存的 EMA 平滑后的框尺寸，保证框大小稳定
             float hw = t.w * 0.5f, hh = t.h * 0.5f;
             a.x1 = t.kf.x() - hw; a.y1 = t.kf.y() - hh;
             a.x2 = t.kf.x() + hw; a.y2 = t.kf.y() + hh;
@@ -98,17 +136,18 @@ public:
     void reset() { m_tracks.clear(); m_nextId = 0; }
 
 private:
-    static float computeIoU(float kx, float ky, float dx, float dy) {
-        // 简化为距离相似度（用固定小框的 IoU 近似）
-        const float half = 0.03f;
-        float x1 = std::max(kx - half, dx - half);
-        float y1 = std::max(ky - half, dy - half);
-        float x2 = std::min(kx + half, dx + half);
-        float y2 = std::min(ky + half, dy + half);
+    // 计算 IoU，允许指定两个框的半宽半高（更精确）
+    static float computeIoU(float kx, float ky, float dx, float dy,
+                            float khx, float khy, float dhx, float dhy) {
+        float x1 = std::max(kx - khx, dx - dhx);
+        float y1 = std::max(ky - khy, dy - dhy);
+        float x2 = std::min(kx + khx, dx + dhx);
+        float y2 = std::min(ky + khy, dy + dhy);
         float inter = std::max(0.0f, x2 - x1) * std::max(0.0f, y2 - y1);
-        float area = (2*half)*(2*half);
-        float uni = 2*area - inter;
-        return uni > 0 ? inter / uni : 0.0f;
+        float areaA = (2*khx) * (2*khy);
+        float areaB = (2*dhx) * (2*dhy);
+        float uni = areaA + areaB - inter;
+        return uni > 0.0f ? inter / uni : 0.0f;
     }
 
     std::vector<Track> m_tracks;

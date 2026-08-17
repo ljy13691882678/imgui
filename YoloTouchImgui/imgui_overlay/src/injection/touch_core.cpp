@@ -230,45 +230,48 @@ static void touchToScreen(float devX, float devY, int touchMaxX, int touchMaxY, 
 }
 
 // ─── Upload (from native_touch.cpp) ─────────────────────────────────
-
+// 重要：只注入虚拟手指（自瞄/扳机等合成触摸），不重新注入物理手指。
+// 物理触摸事件由 Android 原生输入管线直接送达系统/游戏，reader 线程仅被动读取
+// 手指状态用于区域判断/自瞄触发门控，不再重新注入物理触摸。
+// 这样避免了“抓取设备→重新注入”的链路延迟与冲突，物理触摸与 ImGui 都能稳定工作。
 static void upload() {
     if (g_outputFd <= 0) return;
     int count = 0;
-    int activeFingerCount = 0;
-    bool hasActiveFinger = false;
-    size_t deviceCount = std::min(g_devices.size(), static_cast<size_t>(maxE));
+    int activeVirtualCount = 0;
+    bool hasActiveVirtualFinger = false;
 
-    for (size_t di = 0; di < deviceCount; ++di) {
-        for (int fi = 0; fi < maxF; ++fi) {
-            const TouchObj& finger = g_devices[di].fingers[fi];
-            bool wasUploaded = g_uploadedFingerDown[di][fi];
-            int slot = static_cast<int>(di * maxF + fi);
+    // 只遍历虚拟手指槽位：TOUCH_VIRTUAL_SLOT(8), TOUCH_TRIGGER_SLOT(9)
+    // 不重新注入物理手指（它们已通过原生输入管线到达系统）
+    for (int fi = 0; fi < maxF; ++fi) {
+        if (fi != TOUCH_VIRTUAL_SLOT && fi != TOUCH_TRIGGER_SLOT) continue;
 
-            if (finger.isDown) {
-                hasActiveFinger = true;
-                ++activeFingerCount;
-                pushEvent(count, EV_ABS, ABS_MT_SLOT, slot);
-                if (!wasUploaded)
-                    pushEvent(count, EV_ABS, ABS_MT_TRACKING_ID, finger.id);
-                pushEvent(count, EV_ABS, ABS_MT_POSITION_X, static_cast<int>(finger.pos.x));
-                pushEvent(count, EV_ABS, ABS_MT_POSITION_Y, static_cast<int>(finger.pos.y));
-                pushEvent(count, EV_ABS, ABS_X, static_cast<int>(finger.pos.x));
-                pushEvent(count, EV_ABS, ABS_Y, static_cast<int>(finger.pos.y));
-                g_uploadedFingerDown[di][fi] = true;
-            } else if (wasUploaded) {
-                pushEvent(count, EV_ABS, ABS_MT_SLOT, slot);
-                pushEvent(count, EV_ABS, ABS_MT_TRACKING_ID, -1);
-                g_uploadedFingerDown[di][fi] = false;
-            }
+        const TouchObj& finger = g_devices[0].fingers[fi];
+        bool wasUploaded = g_uploadedFingerDown[0][fi];
+
+        if (finger.isDown) {
+            hasActiveVirtualFinger = true;
+            ++activeVirtualCount;
+            pushEvent(count, EV_ABS, ABS_MT_SLOT, fi);
+            if (!wasUploaded)
+                pushEvent(count, EV_ABS, ABS_MT_TRACKING_ID, finger.id);
+            pushEvent(count, EV_ABS, ABS_MT_POSITION_X, static_cast<int>(finger.pos.x));
+            pushEvent(count, EV_ABS, ABS_MT_POSITION_Y, static_cast<int>(finger.pos.y));
+            pushEvent(count, EV_ABS, ABS_X, static_cast<int>(finger.pos.x));
+            pushEvent(count, EV_ABS, ABS_Y, static_cast<int>(finger.pos.y));
+            g_uploadedFingerDown[0][fi] = true;
+        } else if (wasUploaded) {
+            pushEvent(count, EV_ABS, ABS_MT_SLOT, fi);
+            pushEvent(count, EV_ABS, ABS_MT_TRACKING_ID, -1);
+            g_uploadedFingerDown[0][fi] = false;
         }
     }
 
-    pushEvent(count, EV_KEY, BTN_TOUCH, hasActiveFinger ? 1 : 0);
-    pushEvent(count, EV_KEY, BTN_TOOL_FINGER, activeFingerCount == 1 ? 1 : 0);
-    pushEvent(count, EV_KEY, BTN_TOOL_DOUBLETAP, activeFingerCount == 2 ? 1 : 0);
-    pushEvent(count, EV_KEY, BTN_TOOL_TRIPLETAP, activeFingerCount == 3 ? 1 : 0);
-    pushEvent(count, EV_KEY, BTN_TOOL_QUADTAP, activeFingerCount == 4 ? 1 : 0);
-    pushEvent(count, EV_KEY, BTN_TOOL_QUINTTAP, activeFingerCount >= 5 ? 1 : 0);
+    pushEvent(count, EV_KEY, BTN_TOUCH, hasActiveVirtualFinger ? 1 : 0);
+    pushEvent(count, EV_KEY, BTN_TOOL_FINGER, activeVirtualCount == 1 ? 1 : 0);
+    pushEvent(count, EV_KEY, BTN_TOOL_DOUBLETAP, activeVirtualCount == 2 ? 1 : 0);
+    pushEvent(count, EV_KEY, BTN_TOOL_TRIPLETAP, activeVirtualCount == 3 ? 1 : 0);
+    pushEvent(count, EV_KEY, BTN_TOOL_QUADTAP, activeVirtualCount == 4 ? 1 : 0);
+    pushEvent(count, EV_KEY, BTN_TOOL_QUINTTAP, activeVirtualCount >= 5 ? 1 : 0);
     pushEvent(count, EV_SYN, SYN_REPORT, 0);
     write(g_outputFd, g_inputBuffer.event, sizeof(input_event) * count);
 }
@@ -393,7 +396,6 @@ static bool createUinputDevice(int screenX, int screenY, int sourceFd) {
 static void closeTouchLocked() {
     if (!g_initialized) return;
     for (auto& device : g_devices) {
-        ioctl(device.fd, EVIOCGRAB, UNGRAB);
         close(device.fd);
         device.fd = 0;
     }
@@ -501,9 +503,14 @@ bool touch_init(int screenW, int screenH) {
         if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &device.absX) == 0 &&
             ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &device.absY) == 0) {
             device.fd = fd;
-            ioctl(fd, EVIOCGRAB, GRAB);
+            // 不再使用 EVIOCGRAB 抓取触摸设备。
+            // 抓取会阻断 Android 原生输入管线，需要重新注入物理触摸，
+            // 带来延迟/丢帧，导致“物理触摸有时不工作”甚至与 ImGui 冲突。
+            // 改为被动监听（open 读模式）：物理触摸自然流向系统/游戏，
+            // reader 线程仅用于读取手指状态供区域判断/自瞄触发门控，
+            // 虚拟手指（aim/trigger）仍走 uinput 注入。
             g_devices.push_back(device);
-            LOGD("touch device %s max=%d,%d", path, device.absX.maximum, device.absY.maximum);
+            LOGD("touch device %s max=%d,%d (passive monitor)", path, device.absX.maximum, device.absY.maximum);
         } else {
             close(fd);
         }
