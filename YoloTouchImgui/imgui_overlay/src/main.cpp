@@ -20,6 +20,8 @@
 #include <thread>
 #include <chrono>
 #include <algorithm>
+#include <unordered_map>
+#include <unordered_set>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -307,6 +309,12 @@ static long long getTimeNowMs() {
     return tv.tv_sec * 1000LL + tv.tv_usec / 1000;
 }
 
+static long long getTimeNowUs() {
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    return tv.tv_sec * 1000000LL + tv.tv_usec;
+}
+
 // ---------------------------------------------------------------------------
 // 模型管理
 // ---------------------------------------------------------------------------
@@ -410,6 +418,7 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     if (!g_cfg.enabled) return;
 
     // 转为 AimTarget 并跟踪
+    long long detectTimeUs = getTimeNowUs();
     std::vector<AimTarget> targets;
     for (const auto& d : dets) {
         AimTarget t;
@@ -417,6 +426,7 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         t.score = d.score; t.classId = (int)d.classId;
         t.cx = (d.x1 + d.x2) * 0.5f;
         t.cy = (d.y1 + d.y2) * 0.5f;
+        t.timestamp = detectTimeUs;
         targets.push_back(t);
     }
 
@@ -439,16 +449,8 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         return;
     }
 
-    // 选择目标
-    float aimPredictSec;
-    if (g_cfg.boxDirectFollow) {
-        aimPredictSec = 0.0f;
-    } else {
-        float aimPredictMs = g_inferLatencyMs.load() + g_cfg.boxPredictTime;
-        if (aimPredictMs < 0.0f) aimPredictMs = 0.0f;
-        if (aimPredictMs > 200.0f) aimPredictMs = 200.0f;
-        aimPredictSec = aimPredictMs * 0.001f;
-    }
+    // 选择目标（使用实时时间戳动态预测）
+    long long aimTimeUs = getTimeNowUs();
 
     const AimTarget* pick = nullptr;
     float bestScore = -1.0f;
@@ -456,8 +458,14 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     for (const auto& t : tracks) {
         if (g_cfg.aimClass >= 0 && (int)t.classId != g_cfg.aimClass) continue;
 
-        float pcx = t.cx + t.vx * aimPredictSec;
-        float pcy = t.cy + t.vy * aimPredictSec;
+        // 实时预测：计算当前时间与检测时间的差值
+        float aimDelayMs = (float)(aimTimeUs - t.timestamp) * 0.001f;
+        if (aimDelayMs < 0.0f) aimDelayMs = 0.0f;
+        if (aimDelayMs > 500.0f) aimDelayMs = 500.0f;
+        float aimDelaySec = aimDelayMs * 0.001f;
+
+        float pcx = t.cx + t.vx * aimDelaySec;
+        float pcy = t.cy + t.vy * aimDelaySec;
 
         float score;
         float dx = pcx - screenCx;
@@ -475,13 +483,18 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         return;
     }
 
-    // 按锁定部位调整瞄准点（使用实时推理延迟+boxPredictTime 补偿延迟）
+    // 按锁定部位调整瞄准点（使用实时时间戳动态补偿延迟）
     AimTarget aimTarget = *pick;
     {
-        // 对选择的目标也应用速度预判，与绘制/选择保持一致
+        // 实时预测
+        float aimDelayMs = (float)(aimTimeUs - pick->timestamp) * 0.001f;
+        if (aimDelayMs < 0.0f) aimDelayMs = 0.0f;
+        if (aimDelayMs > 500.0f) aimDelayMs = 500.0f;
+        float aimDelaySec = aimDelayMs * 0.001f;
+
         AimTarget predicted = *pick;
-        predicted.cx = pick->cx + pick->vx * aimPredictSec;
-        predicted.cy = pick->cy + pick->vy * aimPredictSec;
+        predicted.cx = pick->cx + pick->vx * aimDelaySec;
+        predicted.cy = pick->cy + pick->vy * aimDelaySec;
         // 框尺寸也简单平移（不改变大小）
         float dx = predicted.cx - pick->cx;
         float dy = predicted.cy - pick->cy;
@@ -949,22 +962,40 @@ static void drawDetectionOverlay() {
 
     std::lock_guard<std::mutex> lock(g_detMutex);
 
+    // 实时零延迟跟随：计算当前时间与检测时间的差值，动态预测框位置
+    long long renderTimeUs = getTimeNowUs();
+
+    // 每个 trackId 独立的平滑状态
+    struct SmoothState { float cx = 0, cy = 0; };
+    static std::unordered_map<int, SmoothState> g_smoothStates;
+
     if (g_cfg.showBoxes) {
+        std::unordered_set<int> currentTrackIds;
+
         for (const auto& t : g_tracks) {
-            float pcx, pcy;
-            if (g_cfg.boxDirectFollow) {
-                // 直接跟随模式：使用最新检测位置，响应最快，跟随人物移动速度
-                pcx = t.cx;
-                pcy = t.cy;
+            // 动态计算延迟：当前渲染时间 - 检测时间
+            float delayMs = (float)(renderTimeUs - t.timestamp) * 0.001f;
+            if (delayMs < 0.0f) delayMs = 0.0f;
+            if (delayMs > 500.0f) delayMs = 500.0f;  // 限制最大预测
+
+            // 用速度补偿延迟，预测当前位置
+            float delaySec = delayMs * 0.001f;
+            float pcx = t.cx + t.vx * delaySec;
+            float pcy = t.cy + t.vy * delaySec;
+
+            // EMA 平滑：防止预测抖动，跟随目标移动
+            currentTrackIds.insert(t.trackId);
+            auto it = g_smoothStates.find(t.trackId);
+            if (it == g_smoothStates.end()) {
+                g_smoothStates[t.trackId] = {pcx, pcy};
             } else {
-                // 预测模式：用目标速度把框前移，补偿延迟
-                float predictMs = g_inferLatencyMs.load() + g_cfg.boxPredictTime;
-                if (predictMs < 0.0f) predictMs = 0.0f;
-                if (predictMs > 200.0f) predictMs = 200.0f;
-                float predictSec = predictMs * 0.001f;
-                pcx = t.cx + t.vx * predictSec;
-                pcy = t.cy + t.vy * predictSec;
+                float alpha = 0.6f;  // 平滑系数：越大越平滑但延迟越高
+                it->second.cx += alpha * (pcx - it->second.cx);
+                it->second.cy += alpha * (pcy - it->second.cy);
+                pcx = it->second.cx;
+                pcy = it->second.cy;
             }
+
             float hw = (t.x2 - t.x1) * 0.5f;
             float hh = (t.y2 - t.y1) * 0.5f;
             ImVec2 p1((pcx - hw) * sx, (pcy - hh) * sy);
@@ -985,6 +1016,14 @@ static void drawDetectionOverlay() {
                 draw->AddText(p1, IM_COL32(0, 255, 0, 255), lbl);
             }
         }
+
+        // 清理已不存在的目标的平滑状态
+        for (auto it = g_smoothStates.begin(); it != g_smoothStates.end(); ) {
+            if (currentTrackIds.find(it->first) == currentTrackIds.end())
+                it = g_smoothStates.erase(it);
+            else
+                ++it;
+        }
     }
 
     // 准星
@@ -1001,8 +1040,13 @@ static void drawDetectionOverlay() {
         ImVec2 anchor(sx * 0.5f, 0.0f); // 屏幕最上沿边框内，顶部正中
         draw->AddCircleFilled(anchor, 5.0f, IM_COL32(0, 255, 255, 255), 12);
         for (const auto& t : g_tracks) {
-            float pcx = t.cx + t.vx * g_cfg.boxPredictTime;
-            float pcy = t.cy + t.vy * g_cfg.boxPredictTime;
+            // 实时预测位置（与检测框绘制逻辑一致）
+            float delayMs = (float)(renderTimeUs - t.timestamp) * 0.001f;
+            if (delayMs < 0.0f) delayMs = 0.0f;
+            if (delayMs > 500.0f) delayMs = 500.0f;
+            float delaySec = delayMs * 0.001f;
+            float pcx = t.cx + t.vx * delaySec;
+            float pcy = t.cy + t.vy * delaySec;
             float hh = (t.y2 - t.y1) * 0.5f;
             ImVec2 boxTop(pcx * sx, (pcy - hh) * sy); // 推理框顶部中心
             draw->AddLine(anchor, boxTop, IM_COL32(0, 255, 255, 150), 1.5f);

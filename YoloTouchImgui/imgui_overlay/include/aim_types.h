@@ -15,6 +15,7 @@ struct AimTarget {
     float vy = 0.0f;
     int   trackId = -1;     // 跟踪 ID
     int   lostCount = 0;    // 丢失帧数
+    int64_t timestamp = 0;  // 推理完成时间戳（微秒），用于实时延迟补偿
 };
 
 // 自瞄控制器输出（归一化增量，相对屏幕；deltaX/deltaY 为屏幕占比）
