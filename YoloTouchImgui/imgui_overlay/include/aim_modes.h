@@ -143,6 +143,15 @@ public:
         float errX = (px - screenCx) * scrW;
         float errY = (py - screenCy) * scrH;
 
+        // 收敛：进入像素阈值框内停止拖拽
+        if (std::fabs(errX) < cfg.convergeThresh && std::fabs(errY) < cfg.convergeThresh) {
+            m_lastX = 0.0f; m_lastY = 0.0f;
+            m_prevMoveX = 0.0f; m_prevMoveY = 0.0f;
+            m_mover.cancel();
+            m_lastTrackId = t.trackId;
+            return out;
+        }
+
         // 目标切换检测：trackId 变化立即重置所有状态
         if (t.trackId != m_lastTrackId && m_lastTrackId >= 0) {
             m_mover.cancel();
@@ -151,29 +160,27 @@ public:
         }
         m_lastTrackId = t.trackId;
 
-        // 收敛：进入像素阈值框内停止拖拽
-        if (std::fabs(errX) < cfg.convergeThresh && std::fabs(errY) < cfg.convergeThresh) {
-            m_lastX = 0.0f; m_lastY = 0.0f;
-            m_prevMoveX = 0.0f; m_prevMoveY = 0.0f;
-            m_mover.cancel();
-            return out;
-        }
-
-        // 过冲检测：上帧移动方向与当前误差方向相反 → 立即收敛
-        // 防止"过冲后甩回"的振荡
+        // 过冲/方向反转检测：
+        // 当误差方向与上帧移动方向相反时（且误差足够大），
+        // 说明目标切换或过冲，重置 mover 让贝塞尔从零重新起步
+        // 关键：不清空 prevMove 状态，不 return，只取消 mover
+        // 这样本帧仍会输出移动量，避免自瞄断帧
         if (m_prevMoveX != 0.0f || m_prevMoveY != 0.0f) {
-            bool overshotX = (errX > 0 && m_prevMoveX < 0) || (errX < 0 && m_prevMoveX > 0);
-            bool overshotY = (errY > 0 && m_prevMoveY < 0) || (errY < 0 && m_prevMoveY > 0);
+            float absErrX = std::fabs(errX);
+            float absErrY = std::fabs(errY);
+            // 死区：误差小于 5 像素时忽略方向反转（检测框抖动）
+            if (absErrX > 5.0f || absErrY > 5.0f) {
+                bool overshotX = (errX > 0 && m_prevMoveX < 0) || (errX < 0 && m_prevMoveX > 0);
+                bool overshotY = (errY > 0 && m_prevMoveY < 0) || (errY < 0 && m_prevMoveY > 0);
 
-            if (overshotX || overshotY) {
-                // 强制归零：方向反转时直接清零旧惯性
-                m_mover.cancel();
-                m_lastX = 0.0f;
-                m_lastY = 0.0f;
-                m_prevMoveX = 0.0f;
-                m_prevMoveY = 0.0f;
-                // 过冲时不输出移动，让自然的贝塞尔重新起步
-                return out;
+                if (overshotX || overshotY) {
+                    // 只取消 mover，让新方向的贝塞尔从零起步
+                    // 不清空 lastX/lastY，让 EMA 平滑过渡
+                    m_mover.cancel();
+                    // 记录新方向符号，防止连续误触发
+                    m_prevMoveX = (errX >= 0) ? 1.0f : -1.0f;
+                    m_prevMoveY = (errY >= 0) ? 1.0f : -1.0f;
+                }
             }
         }
 
@@ -189,15 +196,17 @@ public:
         float moveX = errX * ratio;
         float moveY = errY * ratio;
 
-        // 输出平滑：仅用极弱 EMA，防止惯性累积
+        // 输出平滑：极弱 EMA，防止惯性累积但不阻断输出
         float sm = std::clamp(cfg.aimMoveSmooth * 0.3f, 0.0f, 0.3f);
         moveX = m_lastX * sm + moveX * (1.0f - sm);
         moveY = m_lastY * sm + moveY * (1.0f - sm);
         m_lastX = moveX; m_lastY = moveY;
 
-        // 记录移动方向用于下帧过冲检测（取移动方向符号）
-        m_prevMoveX = moveX >= 0 ? 1.0f : -1.0f;
-        m_prevMoveY = moveY >= 0 ? 1.0f : -1.0f;
+        // 记录移动方向符号用于下帧过疏检测
+        if (std::fabs(moveX) > 0.001f)
+            m_prevMoveX = (moveX >= 0) ? 1.0f : -1.0f;
+        if (std::fabs(moveY) > 0.001f)
+            m_prevMoveY = (moveY >= 0) ? 1.0f : -1.0f;
 
         out.active = true;
         out.deltaX = moveX / scrW;
