@@ -20,12 +20,12 @@
 #include <thread>
 #include <chrono>
 #include <algorithm>
+#include <cmath>
 #include <unordered_map>
 #include <unordered_set>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
-#include <cmath>
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/time.h>
@@ -613,10 +613,8 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             float yaw   = dpx * g_cfg.gyroSens;
             
             // 方向反转检测：当前目标方向与上帧注入方向相反
-            // 这意味着目标切换或过冲，跳过变化率限制让准星快速到位
             bool dirReversed = false;
             {
-                // 锁外计算，避免长时间持锁
                 float prevPitch = g_gyroLastTargetPitch;
                 float prevYaw = g_gyroLastTargetYaw;
                 bool signRevPitch = (pitch > 0 && prevPitch < 0) || (pitch < 0 && prevPitch > 0);
@@ -625,7 +623,7 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             }
 
             if (!dirReversed) {
-                // 高灵敏度下限制单帧角度跳变，防止检测框抖动导致乱甩
+                // 限制变化率
                 float maxChange = 3.0f / (g_cfg.gyroSens + 0.5f);
                 float dp = pitch - g_gyroLastTargetPitch;
                 float dy = yaw - g_gyroLastTargetYaw;
@@ -639,21 +637,44 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             g_gyroLastTargetPitch = pitch;
             g_gyroLastTargetYaw = yaw;
             
-            // 单帧最大注入角度限幅
-            float mag = std::sqrt(pitch * pitch + yaw * yaw);
-            if (mag > g_cfg.gyroMaxDeg) {
-                float k = g_cfg.gyroMaxDeg / mag;
-                pitch *= k; yaw *= k;
+            // 分离自瞄和压枪的限幅：
+            // 1. 自瞄 Yaw 限幅（移动时需要更大 Yaw，使用独立限幅）
+            // 2. 自瞄 Pitch 限幅
+            // 3. 压枪 Pitch 独立叠加，不受限幅影响
+            float maxDeg = g_cfg.gyroMaxDeg;
+            float maxYawDeg = maxDeg * 1.5f;  // Yaw 允许更大限幅，跟上移动
+
+            // 自瞄 Yaw 限幅
+            if (std::fabs(yaw) > maxYawDeg) {
+                yaw = (yaw > 0) ? maxYawDeg : -maxYawDeg;
             }
-            if (g_cfg.gyroInvertPitch) pitch = -pitch;
-            if (g_cfg.gyroInvertYaw)   yaw   = -yaw;
-            if (recoilPulling) pitch -= g_cfg.recoilDegPerSec * dt;
+            // 自瞄 Pitch 限幅
+            if (std::fabs(pitch) > maxDeg) {
+                pitch = (pitch > 0) ? maxDeg : -maxDeg;
+            }
+
+            // 压枪独立叠加到 Pitch（在限幅之后，确保压枪不受限幅影响）
+            float recoilPitch = 0.0f;
+            if (recoilPulling) {
+                recoilPitch = -g_cfg.recoilDegPerSec * dt;
+                // 移动时（人物有速度）增加额外压枪补偿
+                // 检测目标是否在移动：从自瞄输出的 dpx/dpy 幅度判断
+                float moveSpeed = std::sqrt(dpx*dpx + dpy*dpy);
+                if (moveSpeed > 50.0f) {  // 50 像素以上视为移动
+                    float boost = std::min(moveSpeed / 200.0f, 1.0f);  // 最大 100% 加成
+                    recoilPitch *= (1.0f + boost * 0.5f);  // 最多额外 50% 压枪
+                }
+            }
+            float finalPitch = pitch + recoilPitch;
+
+            if (g_cfg.gyroInvertPitch) finalPitch = -finalPitch;
+            if (g_cfg.gyroInvertYaw)   yaw = -yaw;
+
             {
                 std::lock_guard<std::mutex> lock(g_gyroMutex);
-                g_gyroTargetPitch = pitch;
+                g_gyroTargetPitch = finalPitch;
                 g_gyroTargetYaw   = yaw;
                 g_gyroTargetActive = true;
-                // 方向反转标记：主线程 EMA 检测到后会用快速收敛
                 g_gyroTargetDirReversed = dirReversed;
             }
             g_aimActive = aimActiveNow;
@@ -1852,23 +1873,42 @@ int main(int argc, char* argv[]) {
         // ── 陀螺仪平滑注入（主线程）──
         // 推理线程每帧（~50ms）写入目标 pitch/yaw 到 g_gyroTarget*
         // 主线程每帧（~1ms）用指数移动平均（EMA）平滑插值后注入
-        // 高灵敏度时使用更低的 alpha，增加平滑时间常数，减少抖动
-        // 方向反转时使用高 alpha 快速收敛到新方向，防止过冲振荡
         {
             std::lock_guard<std::mutex> lock(g_gyroMutex);
             if (g_gyroTargetActive && g_cfg.gyroAim && touch_kernel_connected()) {
                 float sens = g_cfg.gyroSens;
-                float alpha = 0.20f - sens * 0.08f;
-                if (alpha < 0.02f) alpha = 0.02f;
+                float baseAlpha = 0.20f - sens * 0.08f;
+                if (baseAlpha < 0.02f) baseAlpha = 0.02f;
 
-                // 方向反转时：使用高 alpha 快速收敛，让准星直接锁定新目标
+                // 分离 Pitch 和 Yaw 的 alpha：
+                // - Yaw（移动跟踪）：更高 alpha，快速响应人物移动
+                // - Pitch（压枪）：检测到压枪时更高 alpha
+                float pitchAlpha = baseAlpha;
+                float yawAlpha = baseAlpha;
+
+                // 方向反转时：使用高 alpha 快速收敛
                 if (g_gyroTargetDirReversed) {
-                    alpha = 0.65f;  // 快速收敛
+                    pitchAlpha = 0.65f;
+                    yawAlpha = 0.65f;
                     g_gyroTargetDirReversed = false;
                 }
+
+                // 检测压枪：目标 Pitch 比平滑 Pitch 低很多（压枪下拉）
+                float pitchDiff = g_gyroTargetPitch - g_gyroSmoothPitch;
+                if (pitchDiff < -1.0f) {  // 目标下拉超过 1°
+                    // 压枪时使用更高 alpha，快速跟随后坐力
+                    pitchAlpha = std::max(pitchAlpha, 0.55f);
+                }
+
+                // 检测快速移动：Yaw 目标变化大
+                float yawDiff = g_gyroTargetYaw - g_gyroSmoothYaw;
+                if (std::fabs(yawDiff) > 2.0f) {  // Yaw 变化超过 2°
+                    // 移动时使用更高 alpha，跟上人物移动
+                    yawAlpha = std::max(yawAlpha, 0.50f);
+                }
                 
-                g_gyroSmoothPitch += alpha * (g_gyroTargetPitch - g_gyroSmoothPitch);
-                g_gyroSmoothYaw   += alpha * (g_gyroTargetYaw   - g_gyroSmoothYaw);
+                g_gyroSmoothPitch += pitchAlpha * pitchDiff;
+                g_gyroSmoothYaw   += yawAlpha * yawDiff;
                 touch_gyro_apply(true, g_gyroSmoothPitch, g_gyroSmoothYaw);
             } else if (!g_gyroTargetActive) {
                 g_gyroSmoothPitch *= 0.85f;
