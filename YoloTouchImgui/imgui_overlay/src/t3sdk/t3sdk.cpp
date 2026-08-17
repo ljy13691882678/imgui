@@ -38,8 +38,8 @@
         #include <sys/sysctl.h>
         #include <net/if_dl.h>
     #else
-        #include <linux/if_packet.h>
-        #include <ifaddrs.h>
+        #include <dirent.h>
+        #include <cctype>
     #endif
 #endif
 
@@ -827,27 +827,37 @@ std::string getMachineCode() {
     }
     #else
     /* Android / Linux：
-       遍历所有网卡，优先取 wlan0，否则取第一个带 MAC 的接口；
-       小写无冒号十六进制 → MD5 大写。
-       与 Java 侧 T3Verify.getMachineCode() 完全一致，保证 APK 与 native 绑定同一设备码。 */
+       从 /sys/class/net 下各接口的 address 文件读取网卡 MAC（getifaddrs 在
+       bionic 中需 __ANDROID_API__ >= 24，而本项目 APP_PLATFORM=android-21，
+       故改为直接读 sysfs，任意 API 级别可用）。优先取 wlan0，否则取第一个非空 MAC。
+       小写无冒号十六进制 -> MD5 大写，与 Java 侧 T3Verify.getMachineCode() 一致，
+       保证 APK 与 native 绑定同一设备码。 */
     {
-        struct ifaddrs* ifa_list = nullptr;
-        if (getifaddrs(&ifa_list) == 0) {
+        DIR* dir = opendir("/sys/class/net");
+        if (dir) {
+            struct dirent* ent;
             std::string firstMac;
-            for (struct ifaddrs* ifa = ifa_list; ifa; ifa = ifa->ifa_next) {
-                if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_PACKET) continue;
-                struct sockaddr_ll* sll = (struct sockaddr_ll*)ifa->ifa_addr;
-                if (sll->sll_halen == 0) continue;
-                char tmp[64] = {0};
-                for (unsigned int j = 0; j < sll->sll_halen && j < 8; j++)
-                    snprintf(tmp + j * 2, sizeof(tmp) - j * 2, "%02x", sll->sll_addr[j]);
-                if (std::string("wlan0") == (ifa->ifa_name ? ifa->ifa_name : "")) {
-                    macStr = tmp;
-                    break;
+            while ((ent = readdir(dir)) != nullptr) {
+                if (ent->d_name[0] == '.') continue;
+                std::string path = std::string("/sys/class/net/") + ent->d_name + "/address";
+                FILE* f = fopen(path.c_str(), "r");
+                if (!f) continue;
+                char buf[32] = {0};
+                if (fgets(buf, sizeof(buf), f)) {
+                    // 归一化：去冒号、去空白、转小写
+                    std::string clean;
+                    for (const char* p = buf; *p; p++) {
+                        if (*p == ':' || *p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') continue;
+                        clean += (char)tolower((unsigned char)*p);
+                    }
+                    if (!clean.empty() && clean != "000000000000") {
+                        if (std::string("wlan0") == ent->d_name) { macStr = clean; break; }
+                        if (firstMac.empty()) firstMac = clean;
+                    }
                 }
-                if (firstMac.empty()) firstMac = tmp;
+                fclose(f);
             }
-            freeifaddrs(ifa_list);
+            closedir(dir);
             if (macStr.empty()) macStr = firstMac;
         }
     }
