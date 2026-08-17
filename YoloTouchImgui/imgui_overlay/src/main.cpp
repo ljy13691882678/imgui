@@ -122,6 +122,15 @@ static float g_gyroLastTargetYaw   = 0.0f; // 上一帧目标 yaw（用于变化
 static bool  g_gyroTargetActive = false;  // 推理线程是否有有效目标
 static bool  g_gyroTargetDirReversed = false; // 目标方向反转标记（主线程快速收敛）
 
+// T3 卡密验证状态（防破解：验证通过后才启用推理/自瞄/注入）
+static std::atomic<bool> g_t3Verified{false};   // 是否已通过卡密验证
+static std::atomic<bool> g_t3LoggingIn{false};  // 正在登录（避免重复提交）
+static std::string       g_t3Card;              // 验证通过的卡密
+static std::string       g_t3Statecode;         // 心跳需要的 statecode
+static std::mutex        g_t3MsgMutex;          // 保护 g_t3Message
+static std::string       g_t3Message;           // 登录状态提示（成功/失败原因）
+static char              g_t3InputBuf[128] = {0}; // 悬浮窗输入框内容
+
 // 配置文件路径（工作目录下）+ 上次保存副本（用于自动保存差异检测）
 static std::string g_cfgFile = "yolotouch_cfg.bin";
 static AimConfig g_cfgLastSaved;
@@ -806,9 +815,9 @@ static void inferenceLoop() {
             continue;
         }
 
-        // 推理启动开关：关闭时完全停止推理（不再 detect），并清空显示结果，
-        // 让 FPS 归零、检测框消失，而不是只停自瞄
-        if (!g_cfg.enabled) {
+        // 推理启动开关：关闭或未通过卡密验证时完全停止推理（不再 detect），
+        // 并清空显示结果，让 FPS 归零、检测框消失，而不是只停自瞄
+        if (!g_cfg.enabled || !g_t3Verified.load()) {
             if (wasEnabled) {
                 wasEnabled = false;
                 std::lock_guard<std::mutex> lock(g_detMutex);
@@ -1690,8 +1699,16 @@ static void drawMiniPanel() {
     ImGui::End();
 }
 
+// 卡密登录窗口（定义见下方 t3auth 辅助函数之后）
+static void drawLoginWindow();
+
 // 模板要求的 UI 回调
 void Layout_tick_UI() {
+    // 未验证通过：只显示卡密登录窗口，隐藏控制面板 / 推理 / 检测框 / 区域编辑
+    if (!g_t3Verified.load()) {
+        drawLoginWindow();
+        return;
+    }
     if (g_panelCollapsed) drawMiniPanel();
     else drawControlPanel();
     drawDetectionOverlay();
@@ -1701,44 +1718,120 @@ void Layout_tick_UI() {
 // ---------------------------------------------------------------------------
 // T3 卡密验证（防破解）
 // 与 APK 侧使用同一套调用码 + APPKEY + RSA 公钥（见 t3auth.cpp），验证同一张卡密。
-// 卡密来源优先级：命令行参数 argv[4] > 工作目录 .t3card 文件。
-// 验证失败直接返回 false → main 返回 -1，进程退出，悬浮窗起不来
-// （APK 侧 checkImguiAlive 会把 imgui.log 的错误带到通知栏）。
+// 在悬浮窗提供 输入框 + 粘贴 + 登录，验证通过后才启用推理功能。
+// 防破解双保险：即使 APK 被绕过，native 也会在悬浮窗独立要求登录。
 // ---------------------------------------------------------------------------
-static bool t3auth_verify_at_startup(int argc, char* argv[]) {
-    std::string card;
-    if (argc >= 5 && argv[4] && argv[4][0]) {
-        card = argv[4];
-    } else {
-        std::ifstream ifs(".t3card");
-        if (ifs.is_open()) std::getline(ifs, card);
-    }
-    // 去除首尾空白
-    while (!card.empty() && (card.back() == '\r' || card.back() == '\n' || card.back() == ' '))
-        card.pop_back();
-    while (!card.empty() && (card.front() == ' ' || card.front() == '\t'))
-        card.erase(card.begin());
 
-    if (card.empty()) {
-        printf("[T3验证] 未提供卡密（命令行参数或 .t3card 文件），拒绝启动\n");
-        fflush(stdout);
-        return false;
-    }
+static void t3auth_set_message(const std::string& m) {
+    std::lock_guard<std::mutex> lk(g_t3MsgMutex);
+    g_t3Message = m;
+}
+static std::string t3auth_get_message() {
+    std::lock_guard<std::mutex> lk(g_t3MsgMutex);
+    return g_t3Message;
+}
 
+// 同步登录：成功返回 true 并输出 statecode；失败返回 false 并输出错误信息
+static bool t3auth_try_login(const std::string& card, std::string& statecodeOut, std::string& errOut) {
     std::string imei = t3auth_machine_code();
     printf("[T3验证] 正在验证卡密，机器码=%s ...\n", imei.c_str());
     fflush(stdout);
-
     T3AuthResult r = t3auth_login(card, imei);
     if (!r.ok) {
-        printf("[T3验证] 卡密验证失败: %s\n", r.error.c_str());
+        errOut = r.error.empty() ? "未知错误" : r.error;
+        printf("[T3验证] 卡密验证失败: %s\n", errOut.c_str());
         fflush(stdout);
         return false;
     }
-    printf("[T3验证] 卡密验证通过，已启动心跳保活\n");
+    statecodeOut = r.statecode;
+    printf("[T3验证] 卡密验证通过\n");
     fflush(stdout);
-    t3auth_start_heartbeat(card, r.statecode);
     return true;
+}
+
+// 异步登录（悬浮窗“登录”按钮调用）：成功后置 g_t3Verified 并启动心跳
+static void t3auth_do_login_async(const std::string& card) {
+    if (g_t3LoggingIn.exchange(true)) return;  // 已在登录中则忽略本次
+    t3auth_set_message("正在验证卡密...");
+    std::thread([card]() {
+        std::string statecode, err;
+        if (t3auth_try_login(card, statecode, err)) {
+            g_t3Card = card;
+            g_t3Statecode = statecode;
+            g_t3Verified.store(true);
+            t3auth_start_heartbeat(card, statecode);
+            t3auth_set_message("验证通过，推理功能已启用");
+            printf("[T3验证] 悬浮窗登录成功，已启动心跳保活\n");
+        } else {
+            t3auth_set_message("验证失败: " + err);
+        }
+        g_t3LoggingIn.store(false);
+    }).detach();
+}
+
+// 通过 root shell 读取 Android 剪贴板（用于“粘贴”按钮）
+static std::string t3auth_read_clipboard() {
+    FILE* p = popen("cmd clipboard get-primary-clip 2>/dev/null", "r");
+    if (!p) return "";
+    std::string out;
+    char buf[256];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), p)) > 0) out.append(buf, n);
+    int rc = pclose(p);
+    // 命令失败或输出是错误提示时视为无法读取
+    if (rc != 0 || out.empty()) return "";
+    if (out.find("Denial") != std::string::npos ||
+        out.find("denial") != std::string::npos ||
+        out.find("Exception") != std::string::npos ||
+        out.find("exception") != std::string::npos) return "";
+    // 去除首尾空白/换行
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r' || out.back() == ' ' || out.back() == '\t'))
+        out.pop_back();
+    while (!out.empty() && (out.front() == ' ' || out.front() == '\t')) out.erase(out.begin());
+    return out;
+}
+
+// 卡密登录窗口：未验证时在悬浮窗显示，提供 输入框 + 粘贴 + 登录
+static void drawLoginWindow() {
+    ImGui::SetNextWindowPos(ImVec2(20, 80), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(360, 230), ImGuiCond_FirstUseEver);
+    ImGui::Begin("花来ai 卡密验证", nullptr,
+                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
+
+    ImGui::TextWrapped("请输入卡密登录后，才能启用推理功能");
+    ImGui::TextWrapped("（与 APK 同一套卡密验证，防止破解）");
+    ImGui::Separator();
+
+    ImGui::InputText("卡密", g_t3InputBuf, sizeof(g_t3InputBuf));
+
+    if (ImGui::Button("粘贴")) {
+        std::string clip = t3auth_read_clipboard();
+        if (!clip.empty()) {
+            snprintf(g_t3InputBuf, sizeof(g_t3InputBuf), "%s", clip.c_str());
+            t3auth_set_message("已粘贴，请点击登录");
+        } else {
+            t3auth_set_message("剪贴板为空或无法读取");
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("登录", ImVec2(160, 0))) {
+        std::string card(g_t3InputBuf);
+        // 去除首尾空白
+        while (!card.empty() && (card.back() == '\r' || card.back() == '\n' || card.back() == ' '))
+            card.pop_back();
+        while (!card.empty() && (card.front() == ' ' || card.front() == '\t'))
+            card.erase(card.begin());
+        if (card.empty()) {
+            t3auth_set_message("请输入卡密");
+        } else {
+            t3auth_do_login_async(card);
+        }
+    }
+
+    std::string msg = t3auth_get_message();
+    if (!msg.empty()) ImGui::TextWrapped("%s", msg.c_str());
+
+    ImGui::End();
 }
 
 // ---------------------------------------------------------------------------
@@ -1754,9 +1847,41 @@ int main(int argc, char* argv[]) {
     const char* shmPath = argv[2];
     if (argc >= 4) chdir(argv[3]);
 
-    // 卡密验证（防破解）：失败即退出，不启动 GUI / 推理 / 触摸注入
-    if (!t3auth_verify_at_startup(argc, argv)) {
-        return -1;
+    // 卡密验证（防破解）：
+    // 优先尝试用 APK 传入的 argv[4] 或工作目录 .t3card 自动登录；
+    // 失败不退出，悬浮窗会显示 输入框+粘贴+登录 界面，验证通过后才启用推理。
+    {
+        std::string card;
+        if (argc >= 5 && argv[4] && argv[4][0]) {
+            card = argv[4];
+        } else {
+            std::ifstream ifs(".t3card");
+            if (ifs.is_open()) std::getline(ifs, card);
+        }
+        // 去除首尾空白
+        while (!card.empty() && (card.back() == '\r' || card.back() == '\n' || card.back() == ' '))
+            card.pop_back();
+        while (!card.empty() && (card.front() == ' ' || card.front() == '\t'))
+            card.erase(card.begin());
+
+        if (!card.empty()) {
+            std::string statecode, err;
+            if (t3auth_try_login(card, statecode, err)) {
+                g_t3Card = card;
+                g_t3Statecode = statecode;
+                g_t3Verified.store(true);
+                t3auth_start_heartbeat(card, statecode);
+                t3auth_set_message("验证通过，推理功能已启用");
+                printf("[T3验证] 自动登录成功，已启动心跳保活\n");
+            } else {
+                // 自动登录失败：把卡密预填到输入框，等待用户在悬浮窗重试
+                snprintf(g_t3InputBuf, sizeof(g_t3InputBuf), "%s", card.c_str());
+                t3auth_set_message("自动登录失败: " + err);
+                printf("[T3验证] 自动登录失败，等待悬浮窗手动登录: %s\n", err.c_str());
+            }
+        } else {
+            t3auth_set_message("请输入卡密并登录");
+        }
     }
 
     // 清理 /data/local/tmp 下的 log 文件和 kaixin.com 文件夹
@@ -1929,7 +2054,7 @@ int main(int argc, char* argv[]) {
         // 主线程每帧（~1ms）用指数移动平均（EMA）平滑插值后注入
         {
             std::lock_guard<std::mutex> lock(g_gyroMutex);
-            if (g_gyroTargetActive && g_cfg.gyroAim && touch_kernel_connected()) {
+            if (g_gyroTargetActive && g_cfg.gyroAim && touch_kernel_connected() && g_t3Verified.load()) {
                 float sens = g_cfg.gyroSens;
                 float baseAlpha = 0.20f - sens * 0.08f;
                 if (baseAlpha < 0.02f) baseAlpha = 0.02f;
