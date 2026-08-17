@@ -587,8 +587,8 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             }
             if (g_cfg.gyroInvertPitch) pitch = -pitch;
             if (g_cfg.gyroInvertYaw)   yaw   = -yaw;
-            // 压枪下拉角速度（°/s × s），叠加到 pitch
-            if (recoilPulling) pitch += g_cfg.recoilDegPerSec * dt;
+            // 压枪下拉角速度（°/s × s），叠加到 pitch（负值 = 视角下压）
+            if (recoilPulling) pitch -= g_cfg.recoilDegPerSec * dt;
             touch_gyro_apply(true, pitch, yaw);
             g_aimActive = aimActiveNow;
             if (aimActiveNow) {
