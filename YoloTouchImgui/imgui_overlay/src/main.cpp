@@ -1134,11 +1134,58 @@ static void exitImgui() {
 static void drawControlPanel() {
     ImGui::SetNextWindowPos(ImVec2(20, 80), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(360, 580), ImGuiCond_FirstUseEver);
-    ImGui::Begin("YoloTouch 控制面板", nullptr, ImGuiWindowFlags_NoCollapse);
-    // 顶部：折叠 + 退出（并列），下方显示状态
-    if (ImGui::Button("折叠 ▾")) g_panelCollapsed = true;
+    
+    // 使用无标题栏模式，自行绘制标题栏（左侧折叠/展开，右侧保存/删除/退出）
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+    bool windowOpen = true;
+    ImGui::Begin("YoloTouch 控制面板", &windowOpen, flags);
+    if (!windowOpen) { exitImgui(); return; }
+    
+    // 自定义标题栏区域
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.2f, 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.3f, 0.7f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.15f, 0.15f, 0.5f));
+    
+    // 标题栏左部分：窗口名 + 折叠按钮
+    ImGui::Text("YoloTouch");
+    ImGui::SameLine(100);
+    if (ImGui::Button(g_panelCollapsed ? "▲" : "▼")) g_panelCollapsed = !g_panelCollapsed;
+    
+    // 标题栏右部分：保存/删除/退出
+    ImGui::SameLine(280);
+    if (ImGui::Button("保存")) {
+        saveConfig();
+        g_cfgLastSaved = g_cfg;
+        printf("config saved\n");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("删除")) {
+        // 删除配置文件并恢复默认值
+        remove(g_cfgFile.c_str());
+        g_cfg = AimConfig(); // 恢复默认
+        // 重置其他状态
+        g_aimSmoothTrack = -1;
+        g_classEnabled.clear();
+        syncClassConfig();
+        printf("config deleted, reset to defaults\n");
+    }
     ImGui::SameLine();
     if (ImGui::Button("退出")) exitImgui();
+    
+    ImGui::PopStyleColor(3);
+    ImGui::Separator();
+    
+    // 如果折叠，只显示状态信息
+    if (g_panelCollapsed) {
+        ImGui::Text("后端: %s", g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "无");
+        ImGui::Text("帧源: %llu FPS | 推理: %llu FPS",
+                    (unsigned long long)g_srcFps.load(),
+                    (unsigned long long)g_inferFps.load());
+        ImGui::End();
+        return;
+    }
+    
+    // 展开状态下显示完整控制面板
     ImGui::Text("后端: %s", g_engine && g_engineReady ? g_engine->getBackendType().c_str() : "无");
     ImGui::Text("帧源: %llu FPS | 推理: %llu FPS",
                 (unsigned long long)g_srcFps.load(),
