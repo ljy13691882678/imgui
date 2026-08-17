@@ -276,7 +276,8 @@ TfLiteDelegate* QnnEngine::buildDelegate() {
     }
 
     // QNN HTP context binary cache 目录必须存在，否则 backend 初始化失败
-    const char* cachePath = "/data/data/com.yolotouch.imgui/cache/qnn";
+    // 注意：目录需与 APK 的 applicationId 一致（当前为 hualai.yolo）
+    const char* cachePath = "/data/data/hualai.yolo/cache/qnn";
     ensureDir(cachePath);
     appendDiag("[QNN] cache 目录: %s", cachePath);
 

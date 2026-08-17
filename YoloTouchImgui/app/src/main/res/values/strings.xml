@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">YoloTouch 自瞄</string>
-    <string name="app_title">YoloTouch 自瞄</string>
+    <string name="app_name">花来ai</string>
+    <string name="app_title">花来ai</string>
     <string name="status_idle">未运行，点击下方按钮开始录屏</string>
     <string name="status_running">录屏中，悬浮窗已启动</string>
     <string name="start_capture">开始录屏并启动</string>

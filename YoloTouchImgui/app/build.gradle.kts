@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.yolotouch.imgui"
+    namespace = "hualai.yolo"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.yolotouch.imgui"
+        applicationId = "hualai.yolo"
         minSdk = 29
         targetSdk = 34
         versionCode = 1

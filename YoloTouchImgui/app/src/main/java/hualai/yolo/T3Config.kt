@@ -1,4 +1,4 @@
-package com.yolotouch.imgui
+package hualai.yolo
 
 /**
  * T3 网络验证 - APK 侧配置

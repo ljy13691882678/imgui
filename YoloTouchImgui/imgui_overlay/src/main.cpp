@@ -1256,7 +1256,7 @@ static void drawControlPanel() {
     // 使用无标题栏模式，自行绘制标题栏（左侧折叠/展开，右侧保存/删除/退出）
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
     bool windowOpen = true;
-    ImGui::Begin("YoloTouch 控制面板", &windowOpen, flags);
+    ImGui::Begin("花来ai 控制面板", &windowOpen, flags);
     if (!windowOpen) { exitImgui(); return; }
     
     // 自定义标题栏区域
@@ -1265,7 +1265,7 @@ static void drawControlPanel() {
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.15f, 0.15f, 0.5f));
     
     // 标题栏左部分：窗口名 + 折叠按钮
-    ImGui::Text("YoloTouch");
+    ImGui::Text("花来ai");
     ImGui::SameLine(100);
     if (ImGui::Button(g_panelCollapsed ? "▲" : "▼")) g_panelCollapsed = !g_panelCollapsed;
     
@@ -1677,7 +1677,7 @@ static void drawControlPanel() {
 // 折叠后的小状态框：可拖动，点击/按钮展开回控制面板
 static void drawMiniPanel() {
     ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
-    ImGui::Begin("YoloTouch", nullptr,
+    ImGui::Begin("花来ai", nullptr,
                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize);
     // 展开 + 退出 并列，便于折叠状态下也能快速退出
     if (ImGui::Button("展开 ▶")) g_panelCollapsed = false;

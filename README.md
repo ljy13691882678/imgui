@@ -1,5 +1,7 @@
 # YoloTouch ImGui — 安卓自瞄悬浮窗
 
+应用名：**花来ai**，包名：**hualai.yolo**
+
 基于 Android NDK + Dear ImGui + TFLite/QNN 的安卓原生自瞄辅助应用。
 
 - **APK 层**（Kotlin/Java）：MediaProjection 录屏 → 共享内存传帧 + 卡密验证
@@ -13,7 +15,7 @@
 YoloTouchImgui/
 ├── app/                          # Android APK 模块（Kotlin）
 │   └── src/main/
-│       ├── java/com/yolotouch/imgui/
+│       ├── java/hualai/yolo/
 │       │   ├── MainActivity.kt   # 主界面：卡密验证 + 录屏授权 + 启动/停止
 │       │   ├── CaptureService.kt # 前台服务：录屏 → 共享内存 → 解压并拉起 native（传卡密）
 │       │   ├── T3AuthManager.kt  # 卡密登录 / 持久化 / 心跳保活封装

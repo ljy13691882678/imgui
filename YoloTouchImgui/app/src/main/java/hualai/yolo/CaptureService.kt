@@ -1,4 +1,4 @@
-package com.yolotouch.imgui
+package hualai.yolo
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -154,7 +154,7 @@ class CaptureService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("YoloTouch 自瞄")
+            .setContentTitle("花来ai")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentIntent(pi)
@@ -685,7 +685,7 @@ class CaptureService : Service() {
     private fun createNotificationChannel() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channel = NotificationChannel(
-            CHANNEL_ID, "YoloTouch 自瞄服务", NotificationManager.IMPORTANCE_LOW
+            CHANNEL_ID, "花来ai服务", NotificationManager.IMPORTANCE_LOW
         )
         nm.createNotificationChannel(channel)
     }
