@@ -41,7 +41,9 @@ struct AimConfig {
     // 检测框描边粗细（像素）
     int   boxThickness = 2;
     bool  showBoxLabels = true;
-    // 检测框显示预判（秒）：用目标速度把框前移，补偿“捕获→绘制”延迟，快速转动不掉框
+    // 检测框跟随模式：true=直接跟随检测位置（无预测，响应最快）；false=速度预测跟随（更平滑但有延迟）
+    bool  boxDirectFollow = true;
+    // 检测框显示预判（秒）：仅在 boxDirectFollow=false 时生效
     float boxPredictTime = 0.05f;
     // 在悬浮窗上绘制裁剪区域边框（让用户看到推理输入范围）
     bool  showCropBox = true;

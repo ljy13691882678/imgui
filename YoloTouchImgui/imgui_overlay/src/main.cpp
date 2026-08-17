@@ -435,21 +435,23 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         return;
     }
 
-    // 选择目标（使用实时推理延迟+boxPredictTime 补偿，与绘制一致）
-    // 预测时长 = 平滑推理延迟 + 额外前瞻（补偿主循环注入延迟），限制在 0-200ms
-    float aimPredictMs = g_inferLatencyMs.load() + g_cfg.boxPredictTime;
-    if (aimPredictMs < 0.0f) aimPredictMs = 0.0f;
-    if (aimPredictMs > 200.0f) aimPredictMs = 200.0f;
-    float aimPredictSec = aimPredictMs * 0.001f;
+    // 选择目标
+    float aimPredictSec;
+    if (g_cfg.boxDirectFollow) {
+        aimPredictSec = 0.0f;
+    } else {
+        float aimPredictMs = g_inferLatencyMs.load() + g_cfg.boxPredictTime;
+        if (aimPredictMs < 0.0f) aimPredictMs = 0.0f;
+        if (aimPredictMs > 200.0f) aimPredictMs = 200.0f;
+        aimPredictSec = aimPredictMs * 0.001f;
+    }
 
     const AimTarget* pick = nullptr;
     float bestScore = -1.0f;
     float screenCx = 0.5f, screenCy = 0.5f;
     for (const auto& t : tracks) {
-        // 类别锁定：若 aimClass≥0，仅选择该类目标
         if (g_cfg.aimClass >= 0 && (int)t.classId != g_cfg.aimClass) continue;
 
-        // 预判位置：用实时推理延迟+boxPredictTime 补偿“捕获→推理→自瞄”延迟
         float pcx = t.cx + t.vx * aimPredictSec;
         float pcy = t.cy + t.vy * aimPredictSec;
 
@@ -934,27 +936,27 @@ static void drawDetectionOverlay() {
     }
 
     std::lock_guard<std::mutex> lock(g_detMutex);
-    // 用跟踪结果绘制：真实框尺寸 + 速度预判，消除快速转动时的脱框。
-    // 使用实时推理延迟（EMA 平滑）+ boxPredictTime 作为总预测时长：
-    //   - 自动补偿模型推理耗时（无论快慢都能跟上）
-    //   - boxPredictTime 作为额外前瞻量，补偿主循环绘制与触摸注入间的微小延迟
-    //   - 限制在 0-200ms 防止极端情况预测过度
-    float predictMs = g_inferLatencyMs.load() + g_cfg.boxPredictTime;
-    if (predictMs < 0.0f) predictMs = 0.0f;
-    if (predictMs > 200.0f) predictMs = 200.0f;
-    float predictSec = predictMs * 0.001f;
 
     if (g_cfg.showBoxes) {
         for (const auto& t : g_tracks) {
-            // 预判位置：用目标速度把框前移 (inferLatency + boxPredictTime)，
-            // 自动补偿“捕获→推理→绘制”的实际延迟，与实时画面保持同步
-            float pcx = t.cx + t.vx * predictSec;
-            float pcy = t.cy + t.vy * predictSec;
+            float pcx, pcy;
+            if (g_cfg.boxDirectFollow) {
+                // 直接跟随模式：使用最新检测位置，响应最快，跟随人物移动速度
+                pcx = t.cx;
+                pcy = t.cy;
+            } else {
+                // 预测模式：用目标速度把框前移，补偿延迟
+                float predictMs = g_inferLatencyMs.load() + g_cfg.boxPredictTime;
+                if (predictMs < 0.0f) predictMs = 0.0f;
+                if (predictMs > 200.0f) predictMs = 200.0f;
+                float predictSec = predictMs * 0.001f;
+                pcx = t.cx + t.vx * predictSec;
+                pcy = t.cy + t.vy * predictSec;
+            }
             float hw = (t.x2 - t.x1) * 0.5f;
             float hh = (t.y2 - t.y1) * 0.5f;
             ImVec2 p1((pcx - hw) * sx, (pcy - hh) * sy);
             ImVec2 p2((pcx + hw) * sx, (pcy + hh) * sy);
-            // 描边：先画一圈黑色粗边框，再画亮色内框，保证任何背景下都清晰可见
             int thick = std::max(1, g_cfg.boxThickness);
             int outline = thick + 3;
             draw->AddRect(p1, p2, IM_COL32(0, 0, 0, 200), 0.0f, 0, (float)outline);
@@ -966,7 +968,6 @@ static void drawDetectionOverlay() {
                     snprintf(lbl, sizeof(lbl), "%s %.2f", cname, t.score);
                 else
                     snprintf(lbl, sizeof(lbl), "%.2f", t.score);
-                // 标签带黑色描边，避免浅色背景下看不清
                 draw->AddText(ImVec2(p1.x - 1, p1.y - 1), IM_COL32(0, 0, 0, 220), lbl);
                 draw->AddText(ImVec2(p1.x + 1, p1.y + 1), IM_COL32(0, 0, 0, 220), lbl);
                 draw->AddText(p1, IM_COL32(0, 255, 0, 255), lbl);
@@ -1229,10 +1230,17 @@ static void drawControlPanel() {
         // 检测框描边粗细
         ImGui::SliderInt("框描边", &g_cfg.boxThickness, 1, 4);
         ImGui::Checkbox("框标签", &g_cfg.showBoxLabels);
-        // 检测框速度预判（毫秒）：调大让框更超前，补偿快速转动时的捕获→绘制延迟
-        float boxPredictMs = g_cfg.boxPredictTime * 1000.0f;
-        if (ImGui::SliderFloat("框预判(ms)", &boxPredictMs, 0.0f, 200.0f, "%.0f"))
-            g_cfg.boxPredictTime = boxPredictMs / 1000.0f;
+        // 检测框跟随模式
+        ImGui::Checkbox("框直接跟随", &g_cfg.boxDirectFollow);
+        if (g_cfg.boxDirectFollow) {
+            ImGui::TextDisabled("当前：直接跟随检测位置（最快响应）");
+        } else {
+            // 检测框速度预判（毫秒）：仅在预测模式下生效
+            float boxPredictMs = g_cfg.boxPredictTime * 1000.0f;
+            if (ImGui::SliderFloat("框预判(ms)", &boxPredictMs, 0.0f, 200.0f, "%.0f"))
+                g_cfg.boxPredictTime = boxPredictMs / 1000.0f;
+            ImGui::TextDisabled("当前：速度预测模式（平滑但有延迟）");
+        }
 
         // 类别显示过滤（类名来自模型同目录 labels 文件，如 head/body）
         if (g_engine && g_engineReady && g_engine->getNumClasses() > 0) {
