@@ -962,42 +962,100 @@ static void drawDetectionOverlay() {
 
     std::lock_guard<std::mutex> lock(g_detMutex);
 
-    // 实时零延迟跟随：计算当前时间与检测时间的差值，动态预测框位置
+    // 实时零延迟跟随：带多级防抖的稳定预测
     long long renderTimeUs = getTimeNowUs();
 
-    // 每个 trackId 独立的平滑状态
-    struct SmoothState { float cx = 0, cy = 0; };
-    static std::unordered_map<int, SmoothState> g_smoothStates;
+    // 每个 trackId 独立的稳定状态
+    struct StableState {
+        float cx = 0, cy = 0;        // 平滑后的显示位置
+        float vx = 0, vy = 0;        // 平滑后的速度
+        float lastCx = 0, lastCy = 0; // 上一帧检测位置
+        int64_t lastTimestamp = 0;    // 上一帧检测时间
+        int frameCount = 0;           // 连续帧数
+    };
+    static std::unordered_map<int, StableState> g_stableStates;
 
     if (g_cfg.showBoxes) {
         std::unordered_set<int> currentTrackIds;
 
         for (const auto& t : g_tracks) {
-            // 动态计算延迟：当前渲染时间 - 检测时间
-            float delayMs = (float)(renderTimeUs - t.timestamp) * 0.001f;
-            if (delayMs < 0.0f) delayMs = 0.0f;
-            if (delayMs > 500.0f) delayMs = 500.0f;  // 限制最大预测
-
-            // 用速度补偿延迟，预测当前位置
-            float delaySec = delayMs * 0.001f;
-            float pcx = t.cx + t.vx * delaySec;
-            float pcy = t.cy + t.vy * delaySec;
-
-            // EMA 平滑：防止预测抖动，跟随目标移动
             currentTrackIds.insert(t.trackId);
-            auto it = g_smoothStates.find(t.trackId);
-            if (it == g_smoothStates.end()) {
-                g_smoothStates[t.trackId] = {pcx, pcy};
-            } else {
-                float alpha = 0.6f;  // 平滑系数：越大越平滑但延迟越高
-                it->second.cx += alpha * (pcx - it->second.cx);
-                it->second.cy += alpha * (pcy - it->second.cy);
-                pcx = it->second.cx;
-                pcy = it->second.cy;
-            }
-
             float hw = (t.x2 - t.x1) * 0.5f;
             float hh = (t.y2 - t.y1) * 0.5f;
+            float boxW = hw * 2.0f;
+            float boxH = hh * 2.0f;
+
+            auto& state = g_stableStates[t.trackId];
+
+            // 计算原始速度（用检测位置差）
+            float rawVx = 0, rawVy = 0;
+            if (state.frameCount > 0 && state.lastTimestamp > 0) {
+                float dtSec = (float)(t.timestamp - state.lastTimestamp) * 0.000001f;
+                if (dtSec > 0.001f && dtSec < 1.0f) {
+                    rawVx = (t.cx - state.lastCx) / dtSec;
+                    rawVy = (t.cy - state.lastCy) / dtSec;
+                }
+            }
+
+            // 平滑速度（EMA，更稳定）
+            float velAlpha = 0.3f;  // 速度平滑系数
+            state.vx += velAlpha * (rawVx - state.vx);
+            state.vy += velAlpha * (rawVy - state.vy);
+
+            // 限制速度范围（每归一化秒最大移动 3.0，防止异常值）
+            float maxVel = 3.0f;
+            if (state.vx > maxVel) state.vx = maxVel;
+            if (state.vx < -maxVel) state.vx = -maxVel;
+            if (state.vy > maxVel) state.vy = maxVel;
+            if (state.vy < -maxVel) state.vy = -maxVel;
+
+            // 更新历史记录
+            state.lastCx = t.cx;
+            state.lastCy = t.cy;
+            state.lastTimestamp = t.timestamp;
+            state.frameCount++;
+
+            // 计算预测位置（限制最大预测时间）
+            float delayMs = (float)(renderTimeUs - t.timestamp) * 0.001f;
+            if (delayMs < 0.0f) delayMs = 0.0f;
+            if (delayMs > 50.0f) delayMs = 50.0f;  // 只补偿最多 50ms
+
+            float predictSec = delayMs * 0.001f;
+            float predictedCx = t.cx + state.vx * predictSec;
+            float predictedCy = t.cy + state.vy * predictSec;
+
+            // 限制预测偏移距离（不超过框宽/高的 30%）
+            float maxOffX = boxW * 0.3f;
+            float maxOffY = boxH * 0.3f;
+            float offX = predictedCx - t.cx;
+            float offY = predictedCy - t.cy;
+            if (offX > maxOffX) predictedCx = t.cx + maxOffX;
+            if (offX < -maxOffX) predictedCx = t.cx - maxOffX;
+            if (offY > maxOffY) predictedCy = t.cy + maxOffY;
+            if (offY < -maxOffY) predictedCy = t.cy - maxOffY;
+
+            // 位置 EMA 平滑（更保守）
+            if (state.frameCount == 1) {
+                state.cx = predictedCx;
+                state.cy = predictedCy;
+            } else {
+                float posAlpha = 0.25f;  // 位置平滑系数：越小越稳定
+                state.cx += posAlpha * (predictedCx - state.cx);
+                state.cy += posAlpha * (predictedCy - state.cy);
+
+                // 死区：如果差异很小，不做更新（防抖）
+                float diffX = fabsf(predictedCx - state.cx);
+                float diffY = fabsf(predictedCy - state.cy);
+                float deadX = boxW * 0.02f;  // 2% 框宽的死区
+                float deadY = boxH * 0.02f;
+                if (diffX < deadX && diffY < deadY) {
+                    // 差异在死区内，保持上次位置
+                }
+            }
+
+            float pcx = state.cx;
+            float pcy = state.cy;
+
             ImVec2 p1((pcx - hw) * sx, (pcy - hh) * sy);
             ImVec2 p2((pcx + hw) * sx, (pcy + hh) * sy);
             int thick = std::max(1, g_cfg.boxThickness);
@@ -1017,10 +1075,10 @@ static void drawDetectionOverlay() {
             }
         }
 
-        // 清理已不存在的目标的平滑状态
-        for (auto it = g_smoothStates.begin(); it != g_smoothStates.end(); ) {
+        // 清理已不存在的目标
+        for (auto it = g_stableStates.begin(); it != g_stableStates.end(); ) {
             if (currentTrackIds.find(it->first) == currentTrackIds.end())
-                it = g_smoothStates.erase(it);
+                it = g_stableStates.erase(it);
             else
                 ++it;
         }
