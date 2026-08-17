@@ -118,6 +118,7 @@ static float g_gyroSmoothYaw   = 0.0f;   // 主线程平滑后的实际注入 ya
 static float g_gyroLastTargetPitch = 0.0f; // 上一帧目标 pitch（用于变化率限制）
 static float g_gyroLastTargetYaw   = 0.0f; // 上一帧目标 yaw（用于变化率限制）
 static bool  g_gyroTargetActive = false;  // 推理线程是否有有效目标
+static bool  g_gyroTargetDirReversed = false; // 目标方向反转标记（主线程快速收敛）
 
 // 配置文件路径（工作目录下）+ 上次保存副本（用于自动保存差异检测）
 static std::string g_cfgFile = "yolotouch_cfg.bin";
@@ -237,6 +238,7 @@ static void releaseAimFingers() {
         g_gyroSmoothYaw   = 0.0f;
         g_gyroLastTargetPitch = 0.0f;
         g_gyroLastTargetYaw   = 0.0f;
+        g_gyroTargetDirReversed = false;
         touch_gyro_stop();
     }
 }
@@ -610,21 +612,34 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             float pitch = dpy * g_cfg.gyroSens;
             float yaw   = dpx * g_cfg.gyroSens;
             
-            // 高灵敏度下限制单帧角度跳变，防止检测框抖动导致乱甩
-            // 灵敏度越高，允许的单帧最大变化越小（自适应）
-            float maxChange = 3.0f / (g_cfg.gyroSens + 0.5f);
-            float dp = pitch - g_gyroLastTargetPitch;
-            float dy = yaw - g_gyroLastTargetYaw;
-            float changeMag = std::sqrt(dp*dp + dy*dy);
-            if (changeMag > maxChange) {
-                float k = maxChange / changeMag;
-                pitch = g_gyroLastTargetPitch + dp * k;
-                yaw = g_gyroLastTargetYaw + dy * k;
+            // 方向反转检测：当前目标方向与上帧注入方向相反
+            // 这意味着目标切换或过冲，跳过变化率限制让准星快速到位
+            bool dirReversed = false;
+            {
+                // 锁外计算，避免长时间持锁
+                float prevPitch = g_gyroLastTargetPitch;
+                float prevYaw = g_gyroLastTargetYaw;
+                bool signRevPitch = (pitch > 0 && prevPitch < 0) || (pitch < 0 && prevPitch > 0);
+                bool signRevYaw = (yaw > 0 && prevYaw < 0) || (yaw < 0 && prevYaw > 0);
+                dirReversed = signRevPitch || signRevYaw;
+            }
+
+            if (!dirReversed) {
+                // 高灵敏度下限制单帧角度跳变，防止检测框抖动导致乱甩
+                float maxChange = 3.0f / (g_cfg.gyroSens + 0.5f);
+                float dp = pitch - g_gyroLastTargetPitch;
+                float dy = yaw - g_gyroLastTargetYaw;
+                float changeMag = std::sqrt(dp*dp + dy*dy);
+                if (changeMag > maxChange) {
+                    float k = maxChange / changeMag;
+                    pitch = g_gyroLastTargetPitch + dp * k;
+                    yaw = g_gyroLastTargetYaw + dy * k;
+                }
             }
             g_gyroLastTargetPitch = pitch;
             g_gyroLastTargetYaw = yaw;
             
-            // 单帧最大注入角度限幅，避免目标偏离过大时视角瞬移
+            // 单帧最大注入角度限幅
             float mag = std::sqrt(pitch * pitch + yaw * yaw);
             if (mag > g_cfg.gyroMaxDeg) {
                 float k = g_cfg.gyroMaxDeg / mag;
@@ -632,14 +647,14 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             }
             if (g_cfg.gyroInvertPitch) pitch = -pitch;
             if (g_cfg.gyroInvertYaw)   yaw   = -yaw;
-            // 压枪下拉角速度（°/s × s），叠加到 pitch（负值 = 视角下压）
             if (recoilPulling) pitch -= g_cfg.recoilDegPerSec * dt;
-            // 只写目标值，不直接注入 —— 主线程会平滑插值后注入
             {
                 std::lock_guard<std::mutex> lock(g_gyroMutex);
                 g_gyroTargetPitch = pitch;
                 g_gyroTargetYaw   = yaw;
                 g_gyroTargetActive = true;
+                // 方向反转标记：主线程 EMA 检测到后会用快速收敛
+                g_gyroTargetDirReversed = dirReversed;
             }
             g_aimActive = aimActiveNow;
             if (aimActiveNow) {
@@ -653,6 +668,7 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
                 g_gyroTargetActive = false;
                 g_gyroLastTargetPitch = 0.0f;
                 g_gyroLastTargetYaw = 0.0f;
+                g_gyroTargetDirReversed = false;
             }
             g_aimActive = false;
         }
@@ -1837,21 +1853,27 @@ int main(int argc, char* argv[]) {
         // 推理线程每帧（~50ms）写入目标 pitch/yaw 到 g_gyroTarget*
         // 主线程每帧（~1ms）用指数移动平均（EMA）平滑插值后注入
         // 高灵敏度时使用更低的 alpha，增加平滑时间常数，减少抖动
+        // 方向反转时使用高 alpha 快速收敛到新方向，防止过冲振荡
         {
             std::lock_guard<std::mutex> lock(g_gyroMutex);
             if (g_gyroTargetActive && g_cfg.gyroAim && touch_kernel_connected()) {
-                // 灵敏度越高，alpha 越低（更平滑）
                 float sens = g_cfg.gyroSens;
-                float alpha = 0.20f - sens * 0.08f;  // sens=0→0.20, sens=2→0.04
+                float alpha = 0.20f - sens * 0.08f;
                 if (alpha < 0.02f) alpha = 0.02f;
+
+                // 方向反转时：使用高 alpha 快速收敛，让准星直接锁定新目标
+                if (g_gyroTargetDirReversed) {
+                    alpha = 0.65f;  // 快速收敛
+                    g_gyroTargetDirReversed = false;
+                }
                 
                 g_gyroSmoothPitch += alpha * (g_gyroTargetPitch - g_gyroSmoothPitch);
                 g_gyroSmoothYaw   += alpha * (g_gyroTargetYaw   - g_gyroSmoothYaw);
                 touch_gyro_apply(true, g_gyroSmoothPitch, g_gyroSmoothYaw);
             } else if (!g_gyroTargetActive) {
-                // 无目标：平滑归零后停止注入，避免视角残留移动
                 g_gyroSmoothPitch *= 0.85f;
                 g_gyroSmoothYaw   *= 0.85f;
+                g_gyroTargetDirReversed = false;
                 float mag = std::sqrt(g_gyroSmoothPitch*g_gyroSmoothPitch
                                     + g_gyroSmoothYaw*g_gyroSmoothYaw);
                 if (mag < 0.01f) {
@@ -1888,6 +1910,7 @@ int main(int argc, char* argv[]) {
         g_gyroSmoothYaw   = 0.0f;
         g_gyroLastTargetPitch = 0.0f;
         g_gyroLastTargetYaw   = 0.0f;
+        g_gyroTargetDirReversed = false;
         touch_gyro_stop();
     }
     if (g_touchReady) touch_close();

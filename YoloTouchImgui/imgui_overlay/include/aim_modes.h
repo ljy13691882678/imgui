@@ -143,6 +143,14 @@ public:
         float errX = (px - screenCx) * scrW;
         float errY = (py - screenCy) * scrH;
 
+        // 目标切换检测：trackId 变化立即重置所有状态
+        if (t.trackId != m_lastTrackId && m_lastTrackId >= 0) {
+            m_mover.cancel();
+            m_lastX = 0.0f; m_lastY = 0.0f;
+            m_prevMoveX = 0.0f; m_prevMoveY = 0.0f;
+        }
+        m_lastTrackId = t.trackId;
+
         // 收敛：进入像素阈值框内停止拖拽
         if (std::fabs(errX) < cfg.convergeThresh && std::fabs(errY) < cfg.convergeThresh) {
             m_lastX = 0.0f; m_lastY = 0.0f;
@@ -151,44 +159,45 @@ public:
             return out;
         }
 
-        // 过冲检测：误差符号与上帧移动方向相反时，强制立即收敛
-        // 防止目标切换时的"过冲-甩回"振荡
-        if (m_prevMoveX != 0.0f && m_prevMoveY != 0.0f) {
+        // 过冲检测：上帧移动方向与当前误差方向相反 → 立即收敛
+        // 防止"过冲后甩回"的振荡
+        if (m_prevMoveX != 0.0f || m_prevMoveY != 0.0f) {
             bool overshotX = (errX > 0 && m_prevMoveX < 0) || (errX < 0 && m_prevMoveX > 0);
             bool overshotY = (errY > 0 && m_prevMoveY < 0) || (errY < 0 && m_prevMoveY > 0);
 
-            // 检测到过冲，立即停止贝塞尔移动并快速归零
             if (overshotX || overshotY) {
+                // 强制归零：方向反转时直接清零旧惯性
                 m_mover.cancel();
-                m_lastX *= 0.1f;  // 快速衰减旧惯性
-                m_lastY *= 0.1f;
+                m_lastX = 0.0f;
+                m_lastY = 0.0f;
+                m_prevMoveX = 0.0f;
+                m_prevMoveY = 0.0f;
+                // 过冲时不输出移动，让自然的贝塞尔重新起步
+                return out;
             }
         }
 
         long long now = nowMs();
-        // 只有在 mover 不活跃时才启动新的，避免频繁重启
         if (!m_mover.isActive()) {
             float dist = std::sqrt(errX * errX + errY * errY);
-            // 根据距离动态调整时长：近则快，远则慢
             long long dur = (long long)(cfg.bezierDuration * 5.0f + dist * 0.2f);
-            dur = std::clamp(dur, 100LL, 500LL);  // 缩短时长，加快响应
+            dur = std::clamp(dur, 100LL, 500LL);
             m_mover.start(now, now + dur);
         }
         float ratio = m_mover.tickRatio(now);
 
-        // 直接使用误差 * ratio，不叠加旧惯性
         float moveX = errX * ratio;
         float moveY = errY * ratio;
 
-        // 输出平滑（EMA）：使用较小的 sm 值减少惯性
-        float sm = std::clamp(cfg.aimMoveSmooth * 0.5f, 0.0f, 0.5f);
+        // 输出平滑：仅用极弱 EMA，防止惯性累积
+        float sm = std::clamp(cfg.aimMoveSmooth * 0.3f, 0.0f, 0.3f);
         moveX = m_lastX * sm + moveX * (1.0f - sm);
         moveY = m_lastY * sm + moveY * (1.0f - sm);
         m_lastX = moveX; m_lastY = moveY;
 
-        // 记录当前移动方向，用于下帧过冲检测
-        m_prevMoveX = moveX;
-        m_prevMoveY = moveY;
+        // 记录移动方向用于下帧过冲检测（取移动方向符号）
+        m_prevMoveX = moveX >= 0 ? 1.0f : -1.0f;
+        m_prevMoveY = moveY >= 0 ? 1.0f : -1.0f;
 
         out.active = true;
         out.deltaX = moveX / scrW;
@@ -202,6 +211,7 @@ public:
         m_mover.cancel();
         m_lastX = 0.0f; m_lastY = 0.0f;
         m_prevMoveX = 0.0f; m_prevMoveY = 0.0f;
+        m_lastTrackId = -1;
     }
 
 private:
@@ -212,5 +222,6 @@ private:
 
     BezierMover m_mover;
     float m_lastX = 0.0f, m_lastY = 0.0f;
-    float m_prevMoveX = 0.0f, m_prevMoveY = 0.0f;  // 上帧移动方向，用于过冲检测
+    float m_prevMoveX = 0.0f, m_prevMoveY = 0.0f;
+    int   m_lastTrackId = -1;
 };
