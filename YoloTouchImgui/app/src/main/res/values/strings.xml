@@ -8,4 +8,13 @@
     <string name="stop_service">停止服务</string>
     <string name="hint_root">需要 root 权限：将通过 su 以 root 运行（悬浮窗 + uinput 注入）</string>
     <string name="hint_model">模型：valorant_256_v26n.tflite（YOLOv26n 256 INT8）</string>
+
+    <!-- 卡密验证 -->
+    <string name="card_hint">请输入卡密</string>
+    <string name="verify_card">卡密验证</string>
+    <string name="verify_pending">未验证：请输入卡密并点击验证</string>
+    <string name="verify_success">验证通过，可开始使用</string>
+    <string name="verify_fail">验证失败：%1$s</string>
+    <string name="verify_working">正在验证卡密…</string>
+    <string name="verify_required">请先完成卡密验证</string>
 </resources>

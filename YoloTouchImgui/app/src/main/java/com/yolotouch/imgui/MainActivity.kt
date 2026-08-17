@@ -7,6 +7,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.widget.Button
+import android.widget.EditText
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -22,6 +23,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private lateinit var statusText: TextView
+    private lateinit var verifyStatus: TextView
+    private lateinit var cardInput: EditText
+    private lateinit var verifyBtn: Button
+    private lateinit var startBtn: Button
     private lateinit var mediaProjectionManager: MediaProjectionManager
     private val checkExecutor = Executors.newSingleThreadExecutor()
 
@@ -30,11 +35,24 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         statusText = findViewById(R.id.status_text)
+        verifyStatus = findViewById(R.id.verify_status)
+        cardInput = findViewById(R.id.card_input)
+        verifyBtn = findViewById(R.id.verify_btn)
+        startBtn = findViewById(R.id.start_btn)
         mediaProjectionManager =
             getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
-        findViewById<Button>(R.id.start_btn).setOnClickListener {
+        // 回填上次保存的卡密
+        val savedCard = T3AuthManager.loadCard(this)
+        if (savedCard.isNotEmpty()) cardInput.setText(savedCard)
+
+        verifyBtn.setOnClickListener { doVerify() }
+        startBtn.setOnClickListener {
             requestNotificationPermissionIfNeeded()
+            if (!T3AuthManager.isVerified(this)) {
+                verifyStatus.text = getString(R.string.verify_required)
+                return@setOnClickListener
+            }
             startProjection()
         }
         findViewById<Button>(R.id.stop_btn).setOnClickListener {
@@ -44,6 +62,40 @@ class MainActivity : AppCompatActivity() {
 
         checkRootStatus()
         showLastStatus()
+        refreshVerifyStatus()
+    }
+
+    /** 更新验证状态显示（基于本地保存的凭据） */
+    private fun refreshVerifyStatus() {
+        if (T3AuthManager.isVerified(this)) {
+            verifyStatus.setText(R.string.verify_success)
+        } else {
+            verifyStatus.setText(R.string.verify_pending)
+        }
+    }
+
+    /** 卡密验证：后台线程登录，成功后保存凭据 */
+    private fun doVerify() {
+        val card = cardInput.text.toString().trim()
+        if (card.isEmpty()) {
+            verifyStatus.setText(R.string.verify_pending)
+            return
+        }
+        verifyBtn.isEnabled = false
+        verifyStatus.setText(R.string.verify_working)
+        checkExecutor.execute {
+            val result = T3AuthManager.login(card)
+            runOnUiThread {
+                verifyBtn.isEnabled = true
+                if (result.success) {
+                    // 登录成功：保存卡密 + statecode，供后续启动/心跳使用
+                    T3AuthManager.saveAuth(this, card, result.statecode)
+                    verifyStatus.setText(R.string.verify_success)
+                } else {
+                    verifyStatus.text = getString(R.string.verify_fail, result.error ?: "未知错误")
+                }
+            }
+        }
     }
 
     /** 显示上次 CaptureService 写入的运行状态（失败原因在服务退出后仍可见） */

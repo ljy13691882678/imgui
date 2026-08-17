@@ -381,15 +381,24 @@ class CaptureService : Service() {
         shm.setReadable(true, false)
         shm.setWritable(true, false)
 
-        // 5. 以 root 拉起 imgui（使用 RootHelper 封装）
+        // 5. 启动 T3 心跳保活（APK 侧独立于 native 验证，同一张卡密）
+        if (!T3AuthManager.startHeartbeat(this)) {
+            diagLog("ERROR: 未找到已保存的卡密/statecode，拒绝启动")
+            showError("请先在主界面完成卡密验证")
+            return false
+        }
+
+        // 6. 以 root 拉起 imgui（使用 RootHelper 封装）
         val ldPath = libDir.absolutePath
         diagLog("launching imgui from ${binDir.absolutePath}")
         updateNotification("录屏中，正在启动悬浮窗进程...")
+        // 最后一个参数为卡密：native 侧会在启动时用同一套 T3 配置独立验证（防破解）
+        val card = T3AuthManager.loadCard(this)
         val result = RootHelper.launchBackground(
             workDir = binDir.absolutePath,
             env = mapOf("LD_LIBRARY_PATH" to ldPath),
             executable = imgui.absolutePath,
-            model.absolutePath, shm.absolutePath, binDir.absolutePath
+            model.absolutePath, shm.absolutePath, binDir.absolutePath, card
         )
         diagLog("root launch: rc=${result.exitCode} out=${result.output} err=${result.error}")
 
@@ -696,6 +705,7 @@ class CaptureService : Service() {
         } catch (_: Exception) {}
         // 停止 imgui 进程
         RootHelper.killByPattern("imgui ")
+        T3AuthManager.stopHeartbeat()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }

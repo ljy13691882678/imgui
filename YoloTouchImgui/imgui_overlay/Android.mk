@@ -9,6 +9,9 @@ LOCAL_MODULE := imgui
 LOCAL_CFLAGS := -std=c++17
 LOCAL_CPPFLAGS := -std=c++17
 
+# T3 验证 SDK 依赖异常与 RTTI
+LOCAL_CPPFLAGS += -fexceptions -frtti
+
 LOCAL_CFLAGS += -DVK_USE_PLATFORM_ANDROID_KHR
 LOCAL_CPPFLAGS += -DVK_USE_PLATFORM_ANDROID_KHR
 
@@ -46,7 +49,9 @@ LOCAL_SRC_FILES := \
     src/inference/qnn_engine.cpp \
     src/injection/touch_core.cpp \
     src/injection/time_driver_wrap.cpp \
-    src/injection/stderr_shim.cpp
+    src/injection/stderr_shim.cpp \
+    src/t3sdk/t3sdk.cpp \
+    src/auth/t3auth.cpp
 
 ifeq ($(OPENGL_DRAW), 1)
     LOCAL_SRC_FILES += src/ImGui/backends/imgui_impl_opengl3.cpp

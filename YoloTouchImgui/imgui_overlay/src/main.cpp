@@ -10,6 +10,7 @@
 #include "inference/litert_engine.h"
 #include "injection/touch_core.h"
 #include "injection/time_driver_wrap.h"
+#include "auth/t3auth.h"
 
 #include <atomic>
 #include <mutex>
@@ -26,6 +27,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <fstream>
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/time.h>
@@ -1697,17 +1699,65 @@ void Layout_tick_UI() {
 }
 
 // ---------------------------------------------------------------------------
+// T3 卡密验证（防破解）
+// 与 APK 侧使用同一套调用码 + APPKEY + RSA 公钥（见 t3auth.cpp），验证同一张卡密。
+// 卡密来源优先级：命令行参数 argv[4] > 工作目录 .t3card 文件。
+// 验证失败直接返回 false → main 返回 -1，进程退出，悬浮窗起不来
+// （APK 侧 checkImguiAlive 会把 imgui.log 的错误带到通知栏）。
+// ---------------------------------------------------------------------------
+static bool t3auth_verify_at_startup(int argc, char* argv[]) {
+    std::string card;
+    if (argc >= 5 && argv[4] && argv[4][0]) {
+        card = argv[4];
+    } else {
+        std::ifstream ifs(".t3card");
+        if (ifs.is_open()) std::getline(ifs, card);
+    }
+    // 去除首尾空白
+    while (!card.empty() && (card.back() == '\r' || card.back() == '\n' || card.back() == ' '))
+        card.pop_back();
+    while (!card.empty() && (card.front() == ' ' || card.front() == '\t'))
+        card.erase(card.begin());
+
+    if (card.empty()) {
+        printf("[T3验证] 未提供卡密（命令行参数或 .t3card 文件），拒绝启动\n");
+        fflush(stdout);
+        return false;
+    }
+
+    std::string imei = t3auth_machine_code();
+    printf("[T3验证] 正在验证卡密，机器码=%s ...\n", imei.c_str());
+    fflush(stdout);
+
+    T3AuthResult r = t3auth_login(card, imei);
+    if (!r.ok) {
+        printf("[T3验证] 卡密验证失败: %s\n", r.error.c_str());
+        fflush(stdout);
+        return false;
+    }
+    printf("[T3验证] 卡密验证通过，已启动心跳保活\n");
+    fflush(stdout);
+    t3auth_start_heartbeat(card, r.statecode);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
-    // 参数：model_path shm_path [workdir]
+    // 参数：model_path shm_path [workdir] [card]
     if (argc < 3) {
-        printf("Usage: %s <model.tflite> <shm_path> [workdir]\n", argv[0]);
+        printf("Usage: %s <model.tflite> <shm_path> [workdir] [card]\n", argv[0]);
         return -1;
     }
     const char* modelPath = argv[1];
     const char* shmPath = argv[2];
     if (argc >= 4) chdir(argv[3]);
+
+    // 卡密验证（防破解）：失败即退出，不启动 GUI / 推理 / 触摸注入
+    if (!t3auth_verify_at_startup(argc, argv)) {
+        return -1;
+    }
 
     // 清理 /data/local/tmp 下的 log 文件和 kaixin.com 文件夹
     {
