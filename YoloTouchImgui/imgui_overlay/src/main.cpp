@@ -1848,8 +1848,9 @@ int main(int argc, char* argv[]) {
     if (argc >= 4) chdir(argv[3]);
 
     // 卡密验证（防破解）：
-    // 优先尝试用 APK 传入的 argv[4] 或工作目录 .t3card 自动登录；
-    // 失败不退出，悬浮窗会显示 输入框+粘贴+登录 界面，验证通过后才启用推理。
+    // 启动时一律不自动验证，强制在悬浮窗内手动输入卡密点击“登录”。
+    // APK 传入的 argv[4] 或工作目录 .t3card 仅用于预填输入框，绝不自动放行；
+    // 只有悬浮窗内验证通过后 g_t3Verified 才置 true，推理/自瞄功能才启用。
     {
         std::string card;
         if (argc >= 5 && argv[4] && argv[4][0]) {
@@ -1865,23 +1866,11 @@ int main(int argc, char* argv[]) {
             card.erase(card.begin());
 
         if (!card.empty()) {
-            std::string statecode, err;
-            if (t3auth_try_login(card, statecode, err)) {
-                g_t3Card = card;
-                g_t3Statecode = statecode;
-                g_t3Verified.store(true);
-                t3auth_start_heartbeat(card, statecode);
-                t3auth_set_message("验证通过，推理功能已启用");
-                printf("[T3验证] 自动登录成功，已启动心跳保活\n");
-            } else {
-                // 自动登录失败：把卡密预填到输入框，等待用户在悬浮窗重试
-                snprintf(g_t3InputBuf, sizeof(g_t3InputBuf), "%s", card.c_str());
-                t3auth_set_message("自动登录失败: " + err);
-                printf("[T3验证] 自动登录失败，等待悬浮窗手动登录: %s\n", err.c_str());
-            }
-        } else {
-            t3auth_set_message("请输入卡密并登录");
+            // 仅预填输入框，让用户确认后点击“登录”
+            snprintf(g_t3InputBuf, sizeof(g_t3InputBuf), "%s", card.c_str());
+            printf("[T3验证] 已预填卡密到输入框，等待悬浮窗手动登录\n");
         }
+        t3auth_set_message("请输入卡密并点击登录，验证通过后才启用推理");
     }
 
     // 清理 /data/local/tmp 下的 log 文件和 kaixin.com 文件夹
