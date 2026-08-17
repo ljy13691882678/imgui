@@ -76,3 +76,43 @@ void kdrv_gyro_stop(uint32_t orientation) {
 void kdrv_gyro_disable(void) {
     if (kdrv_connected()) TIME_Driver->Gyro_Disable();
 }
+
+// ─── 内核触摸（TimeDriver 触摸注入） ───
+// 关键：Touch_Init 会创建内核虚拟触摸设备，必须紧随 Touch_Disable 关闭触摸接管，
+// 否则会阻断物理触摸。这样物理触摸正常，虚拟手指由 TimeDriver 内核注入。
+static bool g_touchInited = false;
+
+bool kdrv_touch_init(int width, int height, int orientation) {
+    if (!kdrv_init()) return false;
+    if (g_touchInited) return true;
+    bool ok = TIME_Driver->Touch_Init(width, height, orientation);
+    if (!ok) { LOGE("Touch_Init failed"); return false; }
+    // 立即关闭触摸接管，防止物理触摸被拦截
+    TIME_Driver->Touch_Disable();
+    g_touchInited = true;
+    LOGD("kdrv touch init (%dx%d, orient=%d) ok=1", width, height, orientation);
+    return true;
+}
+
+void kdrv_touch_cleanup(void) {
+    if (g_touchInited && TIME_Driver) {
+        TIME_Driver->Touch_Cleanup();
+        g_touchInited = false;
+        LOGD("kdrv touch cleanup");
+    }
+}
+
+bool kdrv_touch_down(int id, int x, int y) {
+    if (!g_touchInited || !TIME_Driver) return false;
+    return TIME_Driver->Touch_Down(id, x, y);
+}
+
+bool kdrv_touch_move(int id, int x, int y) {
+    if (!g_touchInited || !TIME_Driver) return false;
+    return TIME_Driver->Touch_Move(id, x, y);
+}
+
+bool kdrv_touch_up(int id) {
+    if (!g_touchInited || !TIME_Driver) return false;
+    return TIME_Driver->Touch_Up(id);
+}

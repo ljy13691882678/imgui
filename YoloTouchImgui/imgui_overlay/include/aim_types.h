@@ -134,6 +134,11 @@ struct AimConfig {
     bool  gyroInvertPitch = false;      // 反转 Pitch（上下）
     bool  gyroInvertYaw = false;        // 反转 Yaw（左右）
 
+    // 内核触摸（TimeDriver 触摸注入，替代 uinput）
+    // 勾选后自瞄/压枪/扳机的虚拟触摸走 TimeDriver 内核驱动注入，
+    // 而非 uinput。物理触摸不受影响（Touch_Init 后立即 Touch_Disable）。
+    bool  kernelTouch = false;
+
     // 目标选择
     int   selectMode = 0;          // 0=最近中心 1=最大框 2=最接近准星
 };

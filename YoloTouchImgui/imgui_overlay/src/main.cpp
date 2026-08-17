@@ -9,6 +9,7 @@
 #include "inference/inference_engine.h"
 #include "inference/litert_engine.h"
 #include "injection/touch_core.h"
+#include "injection/time_driver_wrap.h"
 
 #include <atomic>
 #include <mutex>
@@ -54,6 +55,29 @@ static bool g_touchReady = false;
 // uinput 注入设备就绪（touch_inject_ready 且设备扫描成功）时才可做触摸注入。
 // 陀螺仪模式下 uinput 设备【保持初始化】供屏幕触控，仅自瞄/压枪注入走内核陀螺仪。
 static bool injectReady() { return g_touchReady && touch_inject_ready(); }
+
+// 内核触摸模式：TimeDriver 已连接且勾选了内核触摸
+static bool kernelTouchMode() {
+    return g_cfg.kernelTouch && kdrv_connected();
+}
+
+// 统一触摸注入：根据当前模式选择 uinput 或内核驱动
+static bool canInjectTouch() {
+    return injectReady() || kernelTouchMode();
+}
+
+static void inject_down(int slot, int id, int x, int y) {
+    if (kernelTouchMode()) kdrv_touch_down(id, x, y);
+    else touch_down(slot, id, x, y);
+}
+static void inject_move(int slot, int x, int y) {
+    if (kernelTouchMode()) kdrv_touch_move(slot, x, y);
+    else touch_move(slot, x, y);
+}
+static void inject_up(int slot) {
+    if (kernelTouchMode()) kdrv_touch_up(slot);
+    else touch_up(slot);
+}
 
 // 共享内存
 static ShmFrameReader* g_shm = nullptr;
@@ -177,11 +201,11 @@ static void computeAimPoint(const AimTarget& t, int part, float* ax, float* ay) 
 // 释放自瞄/扳机的虚拟手指（目标丢失/功能停用时调用，避免手指卡在屏幕上）
 static void releaseAimFingers() {
     if (g_aimFingerDown) {
-        if (g_touchReady) touch_up(TOUCH_VIRTUAL_SLOT);
+        if (g_touchReady || kernelTouchMode()) inject_up(TOUCH_VIRTUAL_SLOT);
         g_aimFingerDown = false;
     }
     if (g_triggerDown) {
-        if (g_touchReady) touch_up(TOUCH_TRIGGER_SLOT);
+        if (g_touchReady || kernelTouchMode()) inject_up(TOUCH_TRIGGER_SLOT);
         g_triggerDown = false;
     }
     // 陀螺仪模式下也停止注入，避免目标丢失/功能停用后视角仍被持续拖拽
@@ -195,13 +219,8 @@ static void releaseAimFingers() {
 // 这样游戏屏幕仍可被注入触摸（仅 uinput 未初始化才会导致屏幕不可触控）。
 static void applyGyroMode(bool enabled) {
     if (enabled) {
-        // 先连接驱动并初始化陀螺仪 hook。只当驱动【真正连接成功】才进入陀螺仪模式；
-        // 若驱动未加载/连接失败，保留 uinput 注入作为回退，否则勾选“内核陀螺仪”后
-        // 自瞄/扳机因 uinput 被关闭而全部失效（“对接了也没效果”）。
         bool gyroOk = touch_kernel_gyro_init();
         if (gyroOk && touch_inject_ready()) {
-            // 释放可能仍按下的 uinput 虚拟手指，但【不关闭】uinput 设备：
-            // 陀螺仪模式下 uinput 保持初始化，游戏屏幕才可被注入触摸。
             releaseAimFingers();
         }
         printf("applyGyroMode(true) driver_connected=%d inject_ready=%d\n",
@@ -210,6 +229,31 @@ static void applyGyroMode(bool enabled) {
         touch_gyro_stop();
         touch_gyro_disable();
         if (!touch_inject_ready()) touch_inject_init();
+    }
+}
+
+// 切换内核触摸模式：
+// 勾选 → 初始化 TimeDriver 内核触摸设备（Touch_Init + Touch_Disable 不阻断物理触摸）
+// 取消 → 清理内核触摸设备
+// 内核触摸模式与 uinput 模式互斥：勾选后注入走 TimeDriver，不再走 uinput
+static void applyKernelTouchMode(bool enabled) {
+    if (enabled) {
+        if (!kdrv_connected()) kdrv_init();
+        if (kdrv_connected()) {
+            int w = g_shm ? (int)g_shm->header()->width : 1080;
+            int h = g_shm ? (int)g_shm->header()->height : 2400;
+            int orient = g_rotation;
+            bool ok = kdrv_touch_init(w, h, orient);
+            printf("applyKernelTouchMode(true) driver_connected=%d touch_inited=%d\n",
+                   (int)kdrv_connected(), (int)ok);
+        } else {
+            printf("applyKernelTouchMode(true) FAILED: driver not connected\n");
+        }
+    } else {
+        kdrv_touch_up(TOUCH_VIRTUAL_SLOT);
+        kdrv_touch_up(TOUCH_TRIGGER_SLOT);
+        kdrv_touch_cleanup();
+        printf("applyKernelTouchMode(false) cleanup done\n");
     }
 }
 
@@ -440,6 +484,7 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             touch_inject_init();
     }
     const bool gyroMode = g_cfg.gyroAim && touch_kernel_connected();
+    const bool kernelTouchModeOn = g_cfg.kernelTouch && kdrv_connected();
 
     // 自瞄触发区/倍镜区门控：开启时物理手指需点在对应区域内才允许自瞄
     bool aimGateOk = true;
@@ -462,8 +507,9 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     bool  aimActiveNow = false;
     float dpx = 0.0f, dpy = 0.0f;
     // 自瞄增量计算不依赖 uinput（只算误差增量）；陀螺仪模式下即使设备扫描/uinput 不可用
-    // 也照常计算，注入交给内核陀螺仪；uinput 模式下仍要求 g_touchReady。
-    if ((gyroMode || g_touchReady) && g_cfg.aimEnabled && g_cfg.enabled && !zoneEditing && aimGateOk) {
+    // 也照常计算，注入交给内核陀螺仪；内核触摸模式下自瞄注入走 TimeDriver；
+    // uinput 模式下仍要求 g_touchReady。
+    if ((gyroMode || g_touchReady || kernelTouchModeOn) && g_cfg.aimEnabled && g_cfg.enabled && !zoneEditing && aimGateOk) {
         switch (g_cfg.aimMode) {
         case 1:
             out = g_pidAim.compute(aimTarget, g_cfg, screenCx, screenCy, dt,
@@ -515,7 +561,7 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     const bool recoilArmed = g_cfg.enabled && !zoneEditing &&
                              g_cfg.recoilEnabled &&
                              (gyroMode ? (g_cfg.recoilDegPerSec > 0.0f)
-                                       : (g_touchReady && g_cfg.recoilStrength > 0));
+                                       : ((g_touchReady || kernelTouchModeOn) && g_cfg.recoilStrength > 0));
     if (recoilArmed && touch_is_finger_in_fire_zone()) {
         if (!g_recoilFiring) { g_recoilFiring = true; g_recoilStartMs = now; }
     } else {
@@ -552,8 +598,9 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             touch_gyro_stop();
             g_aimActive = false;
         }
-    } else if (injectReady() && (aimActiveNow || recoilPulling)) {
+    } else if (canInjectTouch() && (aimActiveNow || recoilPulling)) {
         // 视角手指：自瞄增量 + 压枪下拉合并移动
+        // 根据当前模式选择 uinput 或内核驱动注入
         float dx = dpx;
         float dy = dpy;
         if (recoilPulling) dy += g_cfg.recoilStrength * dt;  // 压枪下拉（px/s × s）
@@ -561,22 +608,22 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             // 手指从触控区中心按下
             g_aimFingerX = tzCx;
             g_aimFingerY = tzCy;
-            touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
+            inject_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
                        (int)g_aimFingerX, (int)g_aimFingerY);
             g_aimFingerDown = true;
         }
         g_aimFingerX = std::clamp(g_aimFingerX + dx, tzLpx, tzRpx);
         g_aimFingerY = std::clamp(g_aimFingerY + dy, tzTpx, tzBpx);
-        touch_move(TOUCH_VIRTUAL_SLOT, (int)g_aimFingerX, (int)g_aimFingerY);
+        inject_move(TOUCH_VIRTUAL_SLOT, (int)g_aimFingerX, (int)g_aimFingerY);
         // 拖到远离触控区中心时抬手回中心再按下，模拟人手重新起指，
         // 保证目标在屏幕边缘也能持续转向（游戏累积每段拖拽的旋转量）
         float drift = std::sqrt((g_aimFingerX - tzCx) * (g_aimFingerX - tzCx) +
                                 (g_aimFingerY - tzCy) * (g_aimFingerY - tzCy));
         if (drift > std::max(tzRpx - tzLpx, tzBpx - tzTpx) * 0.5f) {
-            touch_up(TOUCH_VIRTUAL_SLOT);
+            inject_up(TOUCH_VIRTUAL_SLOT);
             g_aimFingerX = tzCx;
             g_aimFingerY = tzCy;
-            touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
+            inject_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID,
                        (int)g_aimFingerX, (int)g_aimFingerY);
         }
         g_aimActive = aimActiveNow;
@@ -586,7 +633,7 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         }
     } else {
         if (g_aimFingerDown) {
-            touch_up(TOUCH_VIRTUAL_SLOT);
+            inject_up(TOUCH_VIRTUAL_SLOT);
             g_aimFingerDown = false;
         }
         g_aimActive = false;
@@ -596,7 +643,8 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     // 触发区（fire zone）：玩家物理手指在此区域内时，暂停自动开火，避免与手动开火冲突。
     // 先按配置同步触发区到 touch_core，再让 reader 线程做硬件手指检测。
     // 陀螺仪模式下扳机禁用（自瞄/压枪走内核陀螺仪，扳机走 uinput 会与陀螺仪冲突）。
-    if (injectReady() && !gyroMode && g_cfg.triggerEnabled && g_cfg.enabled) {
+    // 内核触摸模式下扳机可用（走 TimeDriver 内核触摸注入，不与内核陀螺仪冲突）。
+    if (canInjectTouch() && (!gyroMode || kernelTouchModeOn) && g_cfg.triggerEnabled && g_cfg.enabled) {
         int fzL = (int)(g_cfg.fireZoneL * scrW), fzT = (int)(g_cfg.fireZoneT * scrH);
         int fzR = (int)(g_cfg.fireZoneR * scrW), fzB = (int)(g_cfg.fireZoneB * scrH);
         touch_set_fire_zone(fzL, fzT, fzR, fzB);
@@ -609,20 +657,20 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         int trigX = (int)((g_cfg.fireZoneL + g_cfg.fireZoneR) * 0.5f * scrW);
         int trigY = (int)((g_cfg.fireZoneT + g_cfg.fireZoneB) * 0.5f * scrH);
         if (fireOnce) {
-            if (g_triggerDown) { touch_up(TOUCH_TRIGGER_SLOT); g_triggerDown = false; }
-            touch_down(TOUCH_TRIGGER_SLOT, TOUCH_TRIGGER_ID, trigX, trigY);
-            touch_up(TOUCH_TRIGGER_SLOT);
+            if (g_triggerDown) { inject_up(TOUCH_TRIGGER_SLOT); g_triggerDown = false; }
+            inject_down(TOUCH_TRIGGER_SLOT, TOUCH_TRIGGER_ID, trigX, trigY);
+            inject_up(TOUCH_TRIGGER_SLOT);
         } else if (hold) {
             if (!g_triggerDown) {
-                touch_down(TOUCH_TRIGGER_SLOT, TOUCH_TRIGGER_ID, trigX, trigY);
+                inject_down(TOUCH_TRIGGER_SLOT, TOUCH_TRIGGER_ID, trigX, trigY);
                 g_triggerDown = true;
             }
         } else if (holdRelease || g_triggerDown) {
-            touch_up(TOUCH_TRIGGER_SLOT);
+            inject_up(TOUCH_TRIGGER_SLOT);
             g_triggerDown = false;
         }
     } else if (g_triggerDown) {
-        touch_up(TOUCH_TRIGGER_SLOT);
+        inject_up(TOUCH_TRIGGER_SLOT);
         g_triggerDown = false;
     }
 }
@@ -1260,8 +1308,8 @@ static void drawControlPanel() {
     // 陀螺仪自瞄参数：勾选“内核陀螺仪”后，自瞄转向按角度注入
     ImGui::Separator();
     ImGui::TextDisabled("陀螺仪自瞄参数（内核陀螺仪模式下生效）");
-    ImGui::SliderFloat("陀螺仪灵敏度", &g_cfg.gyroSens, 0.001f, 0.05f, "%.3f");
-    ImGui::SliderFloat("单帧最大角度(°)", &g_cfg.gyroMaxDeg, 0.0f, 250.0f, "%.1f");
+    ImGui::SliderFloat("陀螺仪灵敏度", &g_cfg.gyroSens, 0.0f, 2.0f, "%.3f");
+    ImGui::SliderFloat("单帧最大角度(°)", &g_cfg.gyroMaxDeg, 0.0f, 500.0f, "%.1f");
     ImGui::Checkbox("反转 Pitch", &g_cfg.gyroInvertPitch);
     ImGui::Checkbox("反转 Yaw", &g_cfg.gyroInvertYaw);
     }
@@ -1357,6 +1405,17 @@ static void drawControlPanel() {
                 }
             }
         }
+        ImGui::Separator();
+        // 内核触摸（TimeDriver）：勾选后自瞄/压枪/扳机的虚拟注入走 TimeDriver 内核驱动，
+        // 不再依赖 uinput 的虚拟触摸设备；物理触摸不受影响（Touch_Init 后立即 Touch_Disable）。
+        if (ImGui::Checkbox("内核触摸", &g_cfg.kernelTouch))
+            applyKernelTouchMode(g_cfg.kernelTouch);
+        ImGui::TextDisabled(g_cfg.kernelTouch && kdrv_connected()
+            ? "内核触摸模式：自瞄/压枪/扳机走 TimeDriver 注入，物理触摸正常"
+            : (g_cfg.kernelTouch
+                ? "内核触摸驱动未连接，回退 uinput 注入"
+                : "触摸模式：注入统一走 uinput"));
+
         // 触摸诊断：reader 是否读到物理手指（排查“无法触控屏幕/ImGui”）
         {
             static int diagFrame = 0;
@@ -1477,6 +1536,9 @@ int main(int argc, char* argv[]) {
 
     // 配置里若已开启内核陀螺仪模式，则启动时直接应用（连接驱动 + 屏蔽 uinput 初始化）
     if (g_cfg.gyroAim) applyGyroMode(true);
+
+    // 配置里若已开启内核触摸模式，则启动时直接应用（连接 TimeDriver + 初始化虚拟触摸设备）
+    if (g_cfg.kernelTouch) applyKernelTouchMode(true);
 
     // 初始化推理引擎
     auto engine = std::make_unique<LiteRtEngine>();
