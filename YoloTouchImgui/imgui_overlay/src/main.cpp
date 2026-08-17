@@ -95,6 +95,13 @@ static std::atomic<uint64_t> g_srcFps{0};      // APK 帧源写帧速率（帧/s
 static std::atomic<uint64_t> g_frameCount{0};
 // 最近一帧处理耗时（ms，含推理），供面板/日志诊断 QNN 是否过慢
 static std::atomic<long long> g_lastFrameMs{0};
+// 最近一次 processFrame 完成时刻（ms），用于主循环诊断推理是否卡死
+static std::atomic<long long> g_lastFrameDoneMs{0};
+// 最近一帧推理完成的时间戳（ms），用于绘制时精确补偿推理延迟
+static std::atomic<long long> g_lastFrameTimestamp{0};
+// 平滑后的推理延迟（ms，整数，用 atomic<int> 保证跨线程安全）
+// 用于 UI 显示和预测补偿
+static std::atomic<int> g_inferLatencyMs{0};
 
 static bool g_aimActive = false;
 static float g_aimX = 0.5f, g_aimY = 0.5f;
@@ -729,14 +736,6 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
 // ---------------------------------------------------------------------------
 static std::atomic<bool> g_inferRunning{false};
 
-// 最近一次 processFrame 完成时刻（ms），用于主循环诊断推理是否卡死
-static std::atomic<long long> g_lastFrameDoneMs{0};
-// 最近一帧推理完成的时间戳（ms），用于绘制时精确补偿推理延迟
-// 绘制时用 (now - g_lastFrameTimestamp) 作为预测时长，自动适配不同模型/设备的推理耗时
-static std::atomic<long long> g_lastFrameTimestamp{0};
-// 平滑后的推理延迟（ms），用于 UI 显示和预测（EMA 避免抖动）
-static std::atomic<float> g_inferLatencyMs{0.0f};
-
 static void inferenceLoop() {
     uint64_t frames = 0;
     long long lastFpsMs = getTimeNowMs();
@@ -809,8 +808,8 @@ static void inferenceLoop() {
         g_lastFrameTimestamp.store(frameDone);
         // EMA 平滑推理延迟（用于绘制时的预测补偿，避免跳变）
         float latMs = (float)(frameDone - frameStart);
-        float oldLat = g_inferLatencyMs.load();
-        g_inferLatencyMs.store(oldLat * 0.7f + latMs * 0.3f);
+        float oldLat = (float)g_inferLatencyMs.load();
+        g_inferLatencyMs.store((int)(oldLat * 0.7f + latMs * 0.3f));
         frames++;
 
         // 推理帧率上限（节流）：达到上限后等待到下一帧时隙，避免无谓的 CPU/耗电
@@ -930,7 +929,7 @@ static void drawDetectionOverlay() {
         snprintf(buf, sizeof(buf), "帧率: %llu  检测: %zu  跟踪: %zu  推理延迟: %.1fms",
                  (unsigned long long)g_inferFps.load(),
                  g_detections.size(), g_tracks.size(),
-                 g_inferLatencyMs.load());
+                 (float)g_inferLatencyMs.load());
         draw->AddText(ImVec2(20, 20), IM_COL32(255, 255, 0, 255), buf);
     }
 
