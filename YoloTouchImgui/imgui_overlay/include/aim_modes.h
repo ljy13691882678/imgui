@@ -49,6 +49,8 @@ private:
     float     m_prevSmooth = 0.0f;
 };
 
+// 辅助函数：获取随机速度系数（已移至 aim_types.h）
+
 // PID 自瞄控制器（像素空间内计算，输出归一化增量）
 class PidAimController {
 public:
@@ -94,6 +96,11 @@ public:
         float moveX = errX * cfg.pidKp + m_integralX * cfg.pidKi + derivX * cfg.pidKd;
         float moveY = errY * cfg.pidKp + m_integralY * cfg.pidKi + derivY * cfg.pidKd;
         m_prevErrX = errX; m_prevErrY = errY;
+
+        // 随机速度增益（在设定的最小值和最大值之间生成随机速度）
+        float randomSpeed = getRandomSpeed(cfg);
+        moveX *= randomSpeed;
+        moveY *= randomSpeed;
 
         // 输出平滑（EMA）
         float sm = std::clamp(cfg.aimMoveSmooth, 0.0f, 0.95f);
@@ -177,6 +184,11 @@ public:
             float moveX = errX * ratio;
             float moveY = errY * ratio;
 
+            // 随机速度增益
+            float randomSpeed = getRandomSpeed(cfg);
+            moveX *= randomSpeed;
+            moveY *= randomSpeed;
+
             // 强 EMA 平滑（sm=0.7），减少抖动
             float sm = 0.7f;
             moveX = m_lastX * sm + moveX * (1.0f - sm);
@@ -224,6 +236,11 @@ public:
 
         float moveX = errX * ratio;
         float moveY = errY * ratio;
+
+        // 随机速度增益
+        float randomSpeed = getRandomSpeed(cfg);
+        moveX *= randomSpeed;
+        moveY *= randomSpeed;
 
         // 输出 EMA 平滑：使用较弱的平滑（sm=0.4），保持响应速度
         float sm = 0.4f;

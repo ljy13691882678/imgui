@@ -3,6 +3,8 @@
 #include <vector>
 #include <mutex>
 #include <cstdint>
+#include <algorithm>
+#include <cstdlib>
 
 // 检测目标（归一化坐标，相对屏幕）
 struct AimTarget {
@@ -176,3 +178,11 @@ constexpr int      SHM_BUFFER_COUNT = 2;   // 双缓冲
 // 与 APK 侧 CaptureService.CROP_OPTIONS 严格一致
 constexpr int      CROP_OPTIONS[] = {0, 1260, 1080, 960, 720, 620, 416, 320, 256};
 constexpr int      CROP_DEFAULT = 416;
+
+// 辅助函数：获取随机速度系数
+inline float getRandomSpeed(const AimConfig& cfg) {
+    float speedMin = std::min(cfg.aimSpeedMin, cfg.aimSpeedMax);
+    float speedMax = std::max(cfg.aimSpeedMin, cfg.aimSpeedMax);
+    return speedMin + static_cast<float>(std::rand()) /
+           (static_cast<float>(RAND_MAX) + 1.0f) * (speedMax - speedMin);
+}

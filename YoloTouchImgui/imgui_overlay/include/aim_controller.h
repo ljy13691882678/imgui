@@ -43,10 +43,7 @@ public:
         }
 
         // 随机速度：在设置的最小值和最大值之间生成随机速度
-        float speedMin = std::min(cfg.aimSpeedMin, cfg.aimSpeedMax);
-        float speedMax = std::max(cfg.aimSpeedMin, cfg.aimSpeedMax);
-        float randomSpeed = speedMin + static_cast<float>(std::rand()) /
-                             (static_cast<float>(RAND_MAX) + 1.0f) * (speedMax - speedMin);
+        float randomSpeed = getRandomSpeed(cfg);
 
         // PID 比例控制（这里用 P 项 + 平滑 + 减速区）
         float kP = randomSpeed * 0.5f * ease;
