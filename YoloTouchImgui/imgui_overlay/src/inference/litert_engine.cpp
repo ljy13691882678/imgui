@@ -7,14 +7,9 @@
 
 namespace {
 
-// 把诊断信息写入 /data/local/tmp/imgui_qnn.log（root 进程可写，
-// 用户可用 root 文件管理器查看，无需 adb）
 void writeDiagToFile(const std::string& content) {
-    FILE* f = fopen("/data/local/tmp/imgui_qnn.log", "w");
-    if (f) {
-        fwrite(content.data(), 1, content.size(), f);
-        fclose(f);
-    }
+    // 已禁用诊断日志落盘，仅保留 m_diag 用于可能的内存调试
+    (void)content;
 }
 
 struct OutputTensorData {

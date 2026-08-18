@@ -1,4 +1,4 @@
-package hualai.yolo
+package com.kylin.read
 
 import android.util.Log
 import java.io.File
@@ -62,7 +62,7 @@ object RootHelper {
         val envStr = env.entries.joinToString(" && ") { "export ${it.key}=${it.value}" }
         val argStr = args.joinToString(" ")
         val cmd = "cd $workDir && $envStr && " +
-            "nohup $executable $argStr > /data/local/tmp/imgui.log 2>&1 &"
+            "nohup $executable $argStr > /dev/null 2>&1 &"
         return exec(cmd, timeoutSec = 5)
     }
 

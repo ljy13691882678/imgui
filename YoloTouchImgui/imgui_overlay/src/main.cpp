@@ -1265,7 +1265,7 @@ static void drawControlPanel() {
     // 使用无标题栏模式，自行绘制标题栏（左侧折叠/展开，右侧保存/删除/退出）
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
     bool windowOpen = true;
-    ImGui::Begin("花来ai 控制面板", &windowOpen, flags);
+    ImGui::Begin("红果免费短剧 控制面板", &windowOpen, flags);
     if (!windowOpen) { exitImgui(); return; }
     
     // 自定义标题栏区域
@@ -1274,7 +1274,7 @@ static void drawControlPanel() {
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.15f, 0.15f, 0.15f, 0.5f));
     
     // 标题栏左部分：窗口名 + 折叠按钮
-    ImGui::Text("花来ai");
+    ImGui::Text("红果免费短剧");
     ImGui::SameLine(100);
     if (ImGui::Button(g_panelCollapsed ? "▲" : "▼")) g_panelCollapsed = !g_panelCollapsed;
     
@@ -1686,7 +1686,7 @@ static void drawControlPanel() {
 // 折叠后的小状态框：可拖动，点击/按钮展开回控制面板
 static void drawMiniPanel() {
     ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
-    ImGui::Begin("花来ai", nullptr,
+    ImGui::Begin("红果免费短剧", nullptr,
                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize);
     // 展开 + 退出 并列，便于折叠状态下也能快速退出
     if (ImGui::Button("展开 ▶")) g_panelCollapsed = false;
@@ -1795,7 +1795,7 @@ static std::string t3auth_read_clipboard() {
 static void drawLoginWindow() {
     ImGui::SetNextWindowPos(ImVec2(20, 80), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(360, 230), ImGuiCond_FirstUseEver);
-    ImGui::Begin("花来ai 卡密验证", nullptr,
+    ImGui::Begin("红果免费短剧 卡密验证", nullptr,
                  ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
 
     ImGui::TextWrapped("请输入卡密登录后，才能启用推理功能");
@@ -1873,11 +1873,7 @@ int main(int argc, char* argv[]) {
         t3auth_set_message("请输入卡密并点击登录，验证通过后才启用推理");
     }
 
-    // 清理 /data/local/tmp 下的 log 文件和 kaixin.com 文件夹
-    {
-        system("rm -f /data/local/tmp/*.log 2>/dev/null");
-        system("rm -rf /data/local/tmp/kaixin.com 2>/dev/null");
-    }
+    // 已禁用 /data/local/tmp 相关操作，避免产生任何日志文件
 
     // 加载上次保存的配置（工作目录下 yolotouch_cfg.bin），失败则用默认值
     g_cfgFile = std::string(argv[3] ? argv[3] : ".") + "/yolotouch_cfg.bin";
@@ -1917,9 +1913,8 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    // 初始化触摸。触摸注入统一走 uinput：
-    // touch_init 只扫描设备/准备坐标系并启动 reader（供 ImGui 交互、区域判断），
-    // 不创建 uinput 注入设备；uinput 模式按需初始化注入设备，陀螺仪模式屏蔽 uinput 初始化。
+    // 初始化触摸 reader（用于 ImGui 交互与区域判断），但默认不初始化注入设备。
+    // 用户需在面板中手动点击"初始化触摸"才会创建 uinput 注入设备。
     g_touchReady = touch_init(native_window_screen_x, native_window_screen_y);
     // 屏幕参数（含旋转角）无条件同步给 touch_core：内核陀螺仪注入的 orientation
     // 依赖它，即使 touch_init 失败/未启动 reader 也不能缺失，否则陀螺仪注入方向错乱/无效果。
@@ -1932,10 +1927,9 @@ int main(int argc, char* argv[]) {
         int fzB = (int)(g_cfg.fireZoneB * native_window_screen_y);
         touch_set_fire_zone(fzL, fzT, fzR, fzB);
         touch_start_readers();
-        // uinput 注入设备始终初始化：自瞄/扳机/压枪走 uinput 或陀螺仪取决于模式，
-        // 但 uinput 必须保持初始化，否则游戏屏幕不可被注入触摸（imgui 交互不受影响）。
-        touch_inject_init();
-        printf("touch injection ready (gyro=%d)\n", (int)g_cfg.gyroAim);
+        // 注意：这里不再默认调用 touch_inject_init()。
+        // 注入设备（uinput）改为由用户在面板中手动点击"初始化触摸"按钮才创建。
+        printf("touch ready, uinput injection NOT auto-initialized (user-initiated)\n");
     } else {
         fprintf(stderr, "touch_init failed (need root + /dev/input)\n");
     }

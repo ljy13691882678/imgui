@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "hualai.yolo"
+    namespace = "com.kylin.read"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "hualai.yolo"
+        applicationId = "com.kylin.read"
         minSdk = 29
         targetSdk = 34
         versionCode = 1

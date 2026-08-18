@@ -189,7 +189,7 @@ void drawBegin() {
         }
 
         // 旋转后把控制面板移到安全位置（g_window 可能为空，先初始化再判空）
-        g_window = ImGui::FindWindowByName("花来ai 控制面板");
+        g_window = ImGui::FindWindowByName("红果免费短剧 控制面板");
         if (g_window) {
             g_window->Pos.x = 100;
             g_window->Pos.y = 125;

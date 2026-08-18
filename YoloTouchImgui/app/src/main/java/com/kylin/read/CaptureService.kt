@@ -1,4 +1,4 @@
-package hualai.yolo
+package com.kylin.read
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -154,7 +154,7 @@ class CaptureService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("花来ai")
+            .setContentTitle("红果免费短剧")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentIntent(pi)
@@ -192,15 +192,9 @@ class CaptureService : Service() {
         stopAll()
     }
 
-    /** 追加诊断日志到 /data/local/tmp/yolotouch_service.log（root 文件管理器可读） */
+    /** 诊断日志：仅打印到 logcat，不再落盘到 /data/local/tmp */
     private fun diagLog(msg: String) {
         Log.d(TAG, msg)
-        try {
-            val line = "[${android.text.format.DateFormat.format("HH:mm:ss", System.currentTimeMillis())}] $msg\n"
-            FileOutputStream("/data/local/tmp/yolotouch_service.log", true).use {
-                it.write(line.toByteArray())
-            }
-        } catch (_: Exception) {}
     }
 
     // 小端读取 int（共享内存头部为 little-endian）。
@@ -403,8 +397,7 @@ class CaptureService : Service() {
         diagLog("root launch: rc=${result.exitCode} out=${result.output} err=${result.error}")
 
         // 帧写入由 startFrameCapture 的独立线程持续进行
-        // 拉起后延迟 3s 检查 imgui 是否存活；若崩溃，把 /data/local/tmp/imgui.log 的关键
-        // 错误带到通知栏，用户无需 adb 即可看到失败原因。
+        // 拉起后延迟 3s 检查 imgui 是否存活；若崩溃，则在通知栏提示失败。
         mainHandler.postDelayed({ checkImguiAlive() }, 3000)
         return true
     }
@@ -417,12 +410,8 @@ class CaptureService : Service() {
             writeStatus("运行中：录屏正常，悬浮窗已启动")
             updateNotification("录屏中，悬浮窗运行中")
         } else {
-            val log = try {
-                File("/data/local/tmp/imgui.log").takeIf { it.exists() }?.readText() ?: ""
-            } catch (_: Exception) { "" }
-            val brief = log.replace("\n", " | ").takeLast(400)
-            diagLog("imgui NOT alive! log=$brief")
-            showError("悬浮窗进程启动失败：$brief")
+            diagLog("imgui NOT alive!")
+            showError("悬浮窗进程启动失败，请检查日志")
         }
     }
 
@@ -685,7 +674,7 @@ class CaptureService : Service() {
     private fun createNotificationChannel() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channel = NotificationChannel(
-            CHANNEL_ID, "花来ai服务", NotificationManager.IMPORTANCE_LOW
+            CHANNEL_ID, "红果免费短剧服务", NotificationManager.IMPORTANCE_LOW
         )
         nm.createNotificationChannel(channel)
     }

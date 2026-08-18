@@ -1,4 +1,4 @@
-package hualai.yolo
+package com.kylin.read
 
 /**
  * T3 网络验证 - APK 侧配置
