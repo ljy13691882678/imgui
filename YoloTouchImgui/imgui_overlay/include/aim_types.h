@@ -148,6 +148,13 @@ struct AimConfig {
     // 而非 uinput。物理触摸不受影响（Touch_Init 后立即 Touch_Disable）。
     bool  kernelTouch = false;
 
+    // 屏幕捕获模式
+    // 0=MediaProjection（标准方式，会触发录屏权限提示）
+    // 1=Root screencap（通过 root 执行 screencap 命令，无录屏权限提示）
+    // 2=自动选择（优先 Root screencap，失败回退 MediaProjection）
+    int   captureMode = 2;
+    bool  stealthCapture = true;  // 隐身模式：隐藏通知、使用 root 截屏
+
     // 目标选择
     int   selectMode = 0;          // 0=最近中心 1=最大框 2=最接近准星
 };
