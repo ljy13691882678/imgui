@@ -141,10 +141,10 @@ class CaptureService : Service() {
 
     private fun startForegroundCompat() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIF_ID, buildNotification("录屏中，悬浮窗运行中"),
+            startForeground(NOTIF_ID, buildNotification("运行中"),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         } else {
-            startForeground(NOTIF_ID, buildNotification("录屏中，悬浮窗运行中"))
+            startForeground(NOTIF_ID, buildNotification("运行中"))
         }
     }
 
@@ -159,6 +159,11 @@ class CaptureService : Service() {
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentIntent(pi)
             .setOngoing(true)
+            .setShowWhen(false)
+            .setSound(null)
+            .setVibrate(null)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()
     }
 
@@ -211,7 +216,7 @@ class CaptureService : Service() {
 
     // ─── 录屏 ────────────────────────────────────────────────
     private fun startProjection(resultCode: Int, data: Intent?) {
-        updateNotification("正在启动录屏...")
+        updateNotification("正在启动...")
         diagLog("startProjection begin")
         try {
             if (data == null) {
@@ -281,7 +286,7 @@ class CaptureService : Service() {
             // 共享内存就绪后立刻启动帧消费线程（独立线程轮询 ImageReader）
             startFrameCapture()
             diagLog("virtualDisplay created, capture started")
-            updateNotification("录屏中，正在准备悬浮窗...")
+            updateNotification("正在准备...")
 
             setupExecutor.execute {
                 try {
@@ -316,7 +321,7 @@ class CaptureService : Service() {
             return false
         }
         diagLog("root 环境正常，已获得 root 授权")
-        updateNotification("录屏中，root 已就绪，正在准备悬浮窗...")
+        updateNotification("正在准备 root 环境...")
 
         val dir = File(filesDir, "native").apply { mkdirs() }
         val binDir = File(filesDir, "bin").apply { mkdirs() }
@@ -385,7 +390,7 @@ class CaptureService : Service() {
         // 6. 以 root 拉起 imgui（使用 RootHelper 封装）
         val ldPath = libDir.absolutePath
         diagLog("launching imgui from ${binDir.absolutePath}")
-        updateNotification("录屏中，正在启动悬浮窗进程...")
+        updateNotification("正在启动...")
         // 最后一个参数为卡密：native 侧会在启动时用同一套 T3 配置独立验证（防破解）
         val card = T3AuthManager.loadCard(this)
         val result = RootHelper.launchBackground(
@@ -407,8 +412,8 @@ class CaptureService : Service() {
         val alive = RootHelper.exec("pgrep -f 'bin/imgui'", timeoutSec = 3).success
         if (alive) {
             diagLog("imgui process alive")
-            writeStatus("运行中：录屏正常，悬浮窗已启动")
-            updateNotification("录屏中，悬浮窗运行中")
+            writeStatus("运行中")
+            updateNotification("运行中")
         } else {
             diagLog("imgui NOT alive!")
             showError("悬浮窗进程启动失败，请检查日志")
@@ -674,8 +679,11 @@ class CaptureService : Service() {
     private fun createNotificationChannel() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channel = NotificationChannel(
-            CHANNEL_ID, "红果免费短剧服务", NotificationManager.IMPORTANCE_LOW
+            CHANNEL_ID, "红果免费短剧服务", NotificationManager.IMPORTANCE_MIN
         )
+        channel.enableSound(false)
+        channel.enableVibration(false)
+        channel.setShowBadge(false)
         nm.createNotificationChannel(channel)
     }
 
