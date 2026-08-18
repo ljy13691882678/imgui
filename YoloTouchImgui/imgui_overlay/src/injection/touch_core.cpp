@@ -13,6 +13,7 @@
 #include <sys/ioctl.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <ctime>
