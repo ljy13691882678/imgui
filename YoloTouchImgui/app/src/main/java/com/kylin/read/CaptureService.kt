@@ -250,16 +250,15 @@ class CaptureService : Service() {
             }, mainHandler)
 
             val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val bounds = wm.currentWindowMetrics.bounds
-                captureW = bounds.width()
-                captureH = bounds.height()
-            } else {
-                val metrics = DisplayMetrics()
-                wm.defaultDisplay.getRealMetrics(metrics)
-                captureW = metrics.widthPixels
-                captureH = metrics.heightPixels
-            }
+            // 固定为“竖屏自然分辨率”(宽<高)：MediaProjection 虚拟屏始终以竖屏尺寸
+            // 输出，源帧宽高比恒定 → 居中裁剪框恒为正方形。横屏时内容在缓存内按
+            // 旋转存放，由 C++ 端按 rotation 把坐标旋转回来，避免检测框被拉成横条。
+            // 用 getRealSize 取物理全屏（含导航栏/状态栏），与 MediaProjection 实际输出一致。
+            val out = android.graphics.Point()
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getRealSize(out)
+            captureW = minOf(out.x, out.y)
+            captureH = maxOf(out.x, out.y)
             rotation = try {
                 wm.defaultDisplay.rotation
             } catch (e: Exception) {
@@ -674,6 +673,13 @@ class CaptureService : Service() {
 
             // 更新 header（全屏尺寸 + 裁剪信息 + 序号 + 写帧诊断计数）
             writeSuccesses.incrementAndGet()
+            // 固定竖屏捕获不做重建，故每帧刷新当前设备旋转，让 C++ 端能实时按
+            // rotation 做源帧坐标的旋转映射（竖屏→横屏时正确旋转回来）。
+            rotation = try {
+                (getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.rotation
+            } catch (e: Exception) {
+                rotation
+            }
             // 写头部前复查 cropRequest：若 C++ 在本帧写帧期间又发了新请求，保留它
             // 不覆盖。否则请求会被 -1 回写覆盖丢失，导致“切到全屏后无法切回其他尺寸”。
             raf.seek(44L)

@@ -885,6 +885,26 @@ static void inferenceLoop() {
 // ---------------------------------------------------------------------------
 // UI 绘制
 // ---------------------------------------------------------------------------
+// 源帧(共享内存,固定竖屏自然分辨率 srcW<=srcH)的归一化坐标 → 悬浮窗屏幕坐标。
+// 竖屏(R=0/2)：源帧与悬浮窗方向一致，直接按宽高各自缩放。
+// 横屏(R=1/3)：源缓冲内是横屏场景逆时针旋转存放的内容，而悬浮窗是横屏，
+// 需把源坐标按旋转映射回屏幕，保证裁剪框/检测框为正方形并居中，避免被拉成横条。
+static void mapSrcToScreen(float nx, float ny, int rot,
+                           float scrW, float scrH,
+                           float& ox, float& oy) {
+    int r = ((rot % 4) + 4) % 4;
+    if (r == 1) {         // 90°：内容在源缓冲中逆时针存放，映射时旋转回来
+        ox = (1.0f - ny) * scrW;
+        oy = nx * scrH;
+    } else if (r == 3) {  // 270°：反向旋转
+        ox = ny * scrW;
+        oy = (1.0f - nx) * scrH;
+    } else {
+        ox = nx * scrW;
+        oy = ny * scrH;
+    }
+}
+
 static void drawDetectionOverlay() {
     if (!g_cfg.showBoxes && !g_cfg.showFps && !g_cfg.showCropBox && !g_cfg.showZones) return;
 
@@ -950,11 +970,16 @@ static void drawDetectionOverlay() {
     // 裁剪区域描边：在屏幕上画一个矩形框，标出当前推理输入的裁剪范围
     if (g_cfg.showCropBox && g_shm && g_shm->valid()) {
         auto ci = g_shm->cropInfo();
-        if (ci.size > 0) {
-            float x1 = ci.offX * sx / ci.fullW;
-            float y1 = ci.offY * sy / ci.fullH;
-            float x2 = (ci.offX + ci.size) * sx / ci.fullW;
-            float y2 = (ci.offY + ci.size) * sy / ci.fullH;
+        if (ci.size > 0 && ci.fullW > 0 && ci.fullH > 0) {
+            // 源帧固定为竖屏自然分辨率；当前屏可能横屏，按 rotation 旋转映射
+            // 保证裁剪框(居中正方形)在竖横屏下都画成正方形，不随方向被拉成横条。
+            float c1x, c1y, c2x, c2y;
+            mapSrcToScreen(ci.offX / (float)ci.fullW, ci.offY / (float)ci.fullH,
+                           ci.rotation, sx, sy, c1x, c1y);
+            mapSrcToScreen((ci.offX + ci.size) / (float)ci.fullW,
+                           (ci.offY + ci.size) / (float)ci.fullH,
+                           ci.rotation, sx, sy, c2x, c2y);
+            float x1 = c1x, y1 = c1y, x2 = c2x, y2 = c2y;
             // 外描边（黑色，粗线） + 内描边（黄色虚线风格，实线）
             draw->AddRect(ImVec2(x1, y1), ImVec2(x2, y2), IM_COL32(0, 0, 0, 200), 0.0f, 0, 5.0f);
             draw->AddRect(ImVec2(x1, y1), ImVec2(x2, y2), IM_COL32(255, 255, 0, 200), 0.0f, 0, 2.0f);
@@ -1071,8 +1096,16 @@ static void drawDetectionOverlay() {
             }
 
             // === 绘制 ===
-            ImVec2 p1((pcx - hw) * sx, (pcy - hh) * sy);
-            ImVec2 p2((pcx + hw) * sx, (pcy + hh) * sy);
+            // 检测框坐标为源帧(固定竖屏自然分辨率)归一化坐标；当前屏可能横屏，
+            // 按 rotation 旋转映射回屏幕，保证横屏下检测框仍为正方形。
+            float curRot = 0;
+            if (g_shm && g_shm->valid())
+                curRot = (float)g_shm->cropInfo().rotation;
+            float p1x, p1y, p2x, p2y;
+            mapSrcToScreen(pcx - hw, pcy - hh, (int)curRot, sx, sy, p1x, p1y);
+            mapSrcToScreen(pcx + hw, pcy + hh, (int)curRot, sx, sy, p2x, p2y);
+            ImVec2 p1(p1x, p1y);
+            ImVec2 p2(p2x, p2y);
             int thick = std::max(1, g_cfg.boxThickness);
             int outline = thick + 3;
             draw->AddRect(p1, p2, IM_COL32(0, 0, 0, 200), 0.0f, 0, (float)outline);
@@ -1110,9 +1143,13 @@ static void drawDetectionOverlay() {
     if (g_cfg.showAimLines && g_cfg.showBoxes) {
         ImVec2 anchor(sx * 0.5f, 0.0f);
         draw->AddCircleFilled(anchor, 5.0f, IM_COL32(0, 255, 255, 255), 12);
+        int ar = 0;
+        if (g_shm && g_shm->valid()) ar = (int)g_shm->cropInfo().rotation;
         for (const auto& t : g_tracks) {
             float hh = (t.y2 - t.y1) * 0.5f;
-            ImVec2 boxTop(t.cx * sx, (t.cy - hh) * sy);
+            float bx, by;
+            mapSrcToScreen(t.cx, t.cy - hh, ar, sx, sy, bx, by);
+            ImVec2 boxTop(bx, by);
             draw->AddLine(anchor, boxTop, IM_COL32(0, 255, 255, 150), 1.5f);
         }
     }

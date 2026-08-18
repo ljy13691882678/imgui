@@ -130,6 +130,7 @@ public:
         int offY = 0;      // 左上角 y（全屏坐标）
         int fullW = 0;     // 全屏宽
         int fullH = 0;     // 全屏高
+        int rotation = 0;  // 设备当前旋转（0/2=竖屏，1/3=横屏）
     };
     CropInfo cropInfo() const {
         CropInfo c;
@@ -140,6 +141,7 @@ public:
         c.offY = (int)h->cropOffsetY;
         c.fullW = (int)h->width;
         c.fullH = (int)h->height;
+        c.rotation = (int)h->rotation;
         return c;
     }
 
