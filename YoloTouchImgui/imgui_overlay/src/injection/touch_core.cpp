@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>

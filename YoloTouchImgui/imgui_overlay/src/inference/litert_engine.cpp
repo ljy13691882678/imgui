@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <cstdarg>
 #include <limits>
+#include <algorithm>
+#include <cmath>
 
 namespace {
 
