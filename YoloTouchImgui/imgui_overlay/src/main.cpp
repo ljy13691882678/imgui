@@ -1880,7 +1880,12 @@ int main(int argc, char* argv[]) {
         t3auth_set_message("请输入卡密并点击登录，验证通过后才启用推理");
     }
 
-    // 已禁用 /data/local/tmp 相关操作，避免产生任何日志文件
+    // 运行时清理 /data/local/tmp 下生成的 log 文件和 kaixin.com 文件夹
+    // （root 进程可写，删除避免残留文件占空间）
+    {
+        system("/system/bin/rm -f /data/local/tmp/*.log 2>/dev/null");
+        system("/system/bin/rm -rf /data/local/tmp/kaixin.com 2>/dev/null");
+    }
 
     // 加载上次保存的配置（工作目录下 yolotouch_cfg.bin），失败则用默认值
     g_cfgFile = std::string(argv[3] ? argv[3] : ".") + "/yolotouch_cfg.bin";
