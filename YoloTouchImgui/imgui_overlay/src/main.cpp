@@ -140,7 +140,7 @@ static void saveConfig() {
     FILE* f = fopen(g_cfgFile.c_str(), "wb");
     if (!f) return;
     const char magic[4] = {'Y', 'T', 'C', 'T'};
-    uint32_t version = 4;  // 版本 4: 新增 stealthCapture 隐身模式配置
+    uint32_t version = 5;  // 版本 5: 防检测优化（进程伪装、PID 检测）
     fwrite(magic, 1, 4, f);
     fwrite(&version, 4, 1, f);
     fwrite(&g_cfg, 1, sizeof(g_cfg), f);
@@ -155,7 +155,7 @@ static bool loadConfig() {
     uint32_t version = 0;
     bool ok = false;
     if (fread(magic, 1, 4, f) == 4 && fread(&version, 4, 1, f) == 1 &&
-        memcmp(magic, "YTCT", 4) == 0 && (version == 2 || version == 3 || version == 4)) {
+        memcmp(magic, "YTCT", 4) == 0 && (version == 2 || version == 3 || version == 4 || version == 5)) {
         AimConfig cfg;
         if (fread(&cfg, 1, sizeof(cfg), f) == sizeof(cfg)) {
             g_cfg = cfg;
@@ -1667,11 +1667,14 @@ static void drawControlPanel() {
             }
         }
         ImGui::Separator();
-        // 屏幕捕获设置
+        // 防检测设置
+        ImGui::Text("防检测设置");
         ImGui::Checkbox("隐身模式", &g_cfg.stealthCapture);
         ImGui::TextDisabled(g_cfg.stealthCapture
             ? "隐身模式：最小化通知显示，减少视觉存在感"
             : "标准模式：显示完整通知");
+        ImGui::TextDisabled("进程伪装：自动使用系统进程名伪装，防止被反作弊检测");
+        ImGui::TextDisabled("触摸注入：建议开启内核触摸，绕过 uinput 检测");
 
         // 内核触摸（TimeDriver）：勾选后自瞄/压枪/扳机的虚拟注入走 TimeDriver 内核驱动，
         // 不再依赖 uinput 的虚拟触摸设备；物理触摸不受影响（Touch_Init 后立即 Touch_Disable）。

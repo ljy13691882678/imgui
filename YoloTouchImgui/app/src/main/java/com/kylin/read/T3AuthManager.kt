@@ -20,6 +20,11 @@ object T3AuthManager {
     private const val KEY_CARD = "saved_card"
     private const val KEY_STATECODE = "saved_statecode"
 
+    // 当前使用的伪装进程名（由 CaptureService 设置，心跳失败时使用）
+    @Volatile var currentStealthName: String? = null
+    // 当前 imgui 进程 PID（如果已获取）
+    @Volatile var currentImguiPid: Int = -1
+
     private val heartbeatLock = Any()
     private var heartbeatRunning = false
 
@@ -112,7 +117,13 @@ object T3AuthManager {
                     Log.e(TAG, "heartbeat fail ($failCount/${T3Config.MAX_HEARTBEAT_FAIL}): ${r.error}")
                     if (failCount >= T3Config.MAX_HEARTBEAT_FAIL) {
                         Log.e(TAG, "heartbeat failed too many times, killing native")
-                        RootHelper.killByPattern("imgui ")
+                        // 优先使用 PID，避免暴露进程名
+                        if (currentImguiPid > 0) {
+                            RootHelper.exec("kill -9 $currentImguiPid")
+                        } else {
+                            val name = currentStealthName ?: "imgui"
+                            RootHelper.killByPattern(name)
+                        }
                         break
                     }
                 }

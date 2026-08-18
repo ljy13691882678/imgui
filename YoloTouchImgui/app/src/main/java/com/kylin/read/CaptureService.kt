@@ -61,6 +61,15 @@ class CaptureService : Service() {
         private const val ASSET_IMGUI = "imgui"
         private const val ASSET_MODEL = "valorant_256_v26n.tflite"
 
+        // 伪装的可执行文件名列表（看起来像系统服务进程）
+        private val STEALTH_BIN_NAMES = listOf(
+            "mdnsd", "logd", "vold", "servicemanager",
+            "keystore", "installd", "vbridge", "netd",
+            "wpa_supplicant", "tlsdate", "racoon", "sdkmanager",
+            "google_ime", "com.android.art", "dumpsys",
+            "tombstoned", "system_server", "zygote"
+        )
+
         fun startWithProjection(context: Context, resultCode: Int, data: Intent) {
             val intent = Intent(context, CaptureService::class.java)
             intent.putExtra("resultCode", resultCode)
@@ -119,6 +128,10 @@ class CaptureService : Service() {
     @Volatile private var activeCropOffsetX = 0
     @Volatile private var activeCropOffsetY = 0
     private var lastCropCheckMs = 0L
+
+    // 隐身模式状态
+    private var stealthBinName: String? = null  // 当前使用的伪装文件名
+    private var imguiPid: Int = -1  // imgui 进程 PID
 
     override fun onCreate() {
         super.onCreate()
@@ -341,12 +354,17 @@ class CaptureService : Service() {
             out.setExecutable(true, false)
         }
 
-        // 2. 解压 imgui 可执行文件
-        val imgui = File(binDir, ASSET_IMGUI)
+        // 2. 解压 imgui 可执行文件，使用伪装文件名
+        val stealthName = STEALTH_BIN_NAMES.random()
+        stealthBinName = stealthName
+        val imgui = File(binDir, stealthName)
         if (!imgui.exists() || imgui.length() == 0L) {
+            // 先解压到临时文件，再重命名为伪装名
+            val tmpFile = File(binDir, "imgui_tmp")
             assets.open("$ASSET_NATIVE_DIR/$ASSET_IMGUI").use { input ->
-                FileOutputStream(imgui).use { output -> input.copyTo(output) }
+                FileOutputStream(tmpFile).use { output -> input.copyTo(output) }
             }
+            tmpFile.renameTo(imgui)
         }
         imgui.setExecutable(true, true)
 
@@ -389,7 +407,7 @@ class CaptureService : Service() {
 
         // 6. 以 root 拉起 imgui（使用 RootHelper 封装）
         val ldPath = libDir.absolutePath
-        diagLog("launching imgui from ${binDir.absolutePath}")
+        diagLog("launching imgui as '$stealthName' from ${binDir.absolutePath}")
         updateNotification("正在启动...")
         // 最后一个参数为卡密：native 侧会在启动时用同一套 T3 配置独立验证（防破解）
         val card = T3AuthManager.loadCard(this)
@@ -401,6 +419,14 @@ class CaptureService : Service() {
         )
         diagLog("root launch: rc=${result.exitCode} out=${result.output} err=${result.error}")
 
+        // 获取进程 PID 用于后续检测
+        val pidResult = RootHelper.exec("pidof $stealthName || pgrep -f '$stealthName' | head -1")
+        imguiPid = pidResult.output.trim().toIntOrNull() ?: -1
+        // 同步到 T3AuthManager 以便心跳失败时使用
+        T3AuthManager.currentStealthName = stealthName
+        T3AuthManager.currentImguiPid = imguiPid
+        diagLog("imgui PID: $imguiPid")
+
         // 帧写入由 startFrameCapture 的独立线程持续进行
         // 拉起后延迟 3s 检查 imgui 是否存活；若崩溃，则在通知栏提示失败。
         mainHandler.postDelayed({ checkImguiAlive() }, 3000)
@@ -409,14 +435,21 @@ class CaptureService : Service() {
 
     private fun checkImguiAlive() {
         if (!running.get()) return
-        val alive = RootHelper.exec("pgrep -f 'bin/imgui'", timeoutSec = 3).success
+        val alive = if (imguiPid > 0) {
+            // 使用 PID 检测进程是否存活（更安全，不暴露进程名）
+            RootHelper.exec("kill -0 $imguiPid 2>/dev/null; echo $?", timeoutSec = 3).success
+        } else {
+            // 回退：使用伪装文件名检测
+            val name = stealthBinName ?: ASSET_IMGUI
+            RootHelper.exec("pidof $name", timeoutSec = 3).success
+        }
         if (alive) {
-            diagLog("imgui process alive")
+            diagLog("imgui process alive (pid=$imguiPid)")
             writeStatus("运行中")
             updateNotification("运行中")
         } else {
             diagLog("imgui NOT alive!")
-            showError("悬浮窗进程启动失败，请检查日志")
+            showError("进程启动失败，请检查日志")
         }
     }
 
@@ -700,8 +733,17 @@ class CaptureService : Service() {
         try {
             mediaProjection?.stop()
         } catch (_: Exception) {}
-        // 停止 imgui 进程
-        RootHelper.killByPattern("imgui ")
+        // 停止 imgui 进程：优先使用 PID，避免暴露进程名
+        if (imguiPid > 0) {
+            RootHelper.exec("kill -9 $imguiPid", timeoutSec = 3)
+        } else {
+            val name = stealthBinName ?: ASSET_IMGUI
+            RootHelper.killByPattern(name)
+        }
+        imguiPid = -1
+        // 清理 T3AuthManager 状态
+        T3AuthManager.currentStealthName = null
+        T3AuthManager.currentImguiPid = -1
         T3AuthManager.stopHeartbeat()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
