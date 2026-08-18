@@ -714,8 +714,9 @@ class CaptureService : Service() {
         val channel = NotificationChannel(
             CHANNEL_ID, "红果免费短剧服务", NotificationManager.IMPORTANCE_MIN
         )
-        channel.enableSound(false)
-        channel.enableVibration(false)
+        // IMPORTANCE_MIN 默认无声音/无振动；显式置空确保不响铃
+        channel.setSound(null, null)
+        channel.setVibrationPattern(null)
         channel.setShowBadge(false)
         nm.createNotificationChannel(channel)
     }
