@@ -29,6 +29,20 @@ jobs:
           unzip -q ndk.zip
           echo "NDK_HOME=${GITHUB_WORKSPACE}/android-ndk-r25c" >> "${GITHUB_ENV}"
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 34
+          target: default
+
+      - name: Configure Gradle SDK path
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > YoloTouchImgui/local.properties
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "${GITHUB_ENV}"
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "${GITHUB_ENV}"
+          echo "local.properties created:"
+          cat YoloTouchImgui/local.properties
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -47,7 +61,7 @@ jobs:
           export PATH="${NDK_HOME}:${PATH}"
           # Application.mk 位于工程根目录，ndk-build 只在 $(NDK_PROJECT_PATH)/jni/ 下查找，
           # 因此 APP_STL / APP_ABI / APP_PLATFORM 需显式传入，否则 libc++ 不会链接导致 STL 符号未定义。
-          ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk APP_STL=c++_static APP_ABI=arm64-v8a APP_PLATFORM=android-21 -j2
+          ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk APP_STL=c++_shared APP_ABI=arm64-v8a APP_PLATFORM=android-21 -j2
 
       - name: Stage native files into APK assets
         working-directory: YoloTouchImgui
