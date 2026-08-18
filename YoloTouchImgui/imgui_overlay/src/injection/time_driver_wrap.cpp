@@ -53,10 +53,8 @@ void kdrv_exit(void) {
 // ─── 内核陀螺仪 ───
 bool kdrv_gyro_init(void) {
     if (!kdrv_init()) return false;
-    // 驱动仅用于陀螺仪自瞄：连接后立即关闭触摸接管（Touch_Disable），
-    // 避免驱动 Init/Touch hook 拦截真实触摸，导致系统/游戏（屏幕触控）与
-    // /dev/input 读取（ImGui 交互）都收不到触摸事件。
-    TIME_Driver->Touch_Disable();
+    // 仅初始化陀螺仪 hook，不再调用 Touch_Disable。
+    // 触摸注入由 TimeDriver 内核虚拟触摸设备统一负责，需要在需要时调用 kdrv_touch_init。
     bool ok = TIME_Driver->Gyro_Init();
     LOGD("kdrv gyro init ok=%d", (int)ok);
     return ok;
@@ -104,6 +102,8 @@ void kdrv_touch_cleanup(void) {
         LOGD("kdrv touch cleanup");
     }
 }
+
+bool kdrv_touch_inited(void) { return g_touchInited; }
 
 bool kdrv_touch_down(int id, int x, int y) {
     if (!g_touchInited || !TIME_Driver) return false;

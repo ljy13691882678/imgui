@@ -37,7 +37,6 @@ LOCAL_C_INCLUDES += $(LOCAL_PATH)/driver
 LOCAL_SRC_FILES := \
     src/main.cpp \
     src/Android_draw/draw.cpp \
-    src/Android_touch/TouchHelperA.cpp \
     src/ImGui/imgui.cpp \
     src/ImGui/imgui_demo.cpp \
     src/ImGui/imgui_draw.cpp \
@@ -70,7 +69,7 @@ LOCAL_LDLIBS += -L$(LOCAL_PATH)/lib/arm64-v8a
 LOCAL_LDLIBS += -ltensorflowlite_jni
 LOCAL_LDLIBS += -lQnnTFLiteDelegate -lQnnHtp -lQnnSystem
 
-# 内核驱动（TimeDriver）静态库：arm64-v8a 预编译 .a，提供内核陀螺仪 hook（触摸仍走 uinput）
+# 内核驱动（TimeDriver）静态库：arm64-v8a 预编译 .a，提供内核陀螺仪 hook + 内核触摸注入
 LOCAL_LDLIBS += -L$(LOCAL_PATH)/driver/arm64-v8a
 LOCAL_LDLIBS += -ltime_driver
 

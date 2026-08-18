@@ -39,7 +39,7 @@ import java.util.concurrent.atomic.AtomicLong
  *   1. MediaProjection 录屏 → ImageReader 获取 RGBA 帧
  *   2. 帧数据写入共享内存文件（frame.bin，双缓冲，头部与 imgui 侧 ShmFrameHeader 严格一致）
  *   3. 从 assets 解压 imgui 可执行文件 + .so + 模型
- *   4. 通过 su 以 root 拉起 imgui 进程（悬浮窗 + 推理 + 自瞄 + uinput 注入）
+ *   4. 通过 su 以 root 拉起 imgui 进程（悬浮窗 + 推理 + 自瞄 + 内核驱动注入）
  */
 class CaptureService : Service() {
 

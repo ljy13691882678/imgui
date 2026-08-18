@@ -6,7 +6,7 @@
     <string name="status_running">录屏中，悬浮窗已启动</string>
     <string name="start_capture">开始录屏并启动</string>
     <string name="stop_service">停止服务</string>
-    <string name="hint_root">需要 root 权限：将通过 su 以 root 运行（悬浮窗 + uinput 注入）</string>
+    <string name="hint_root">需要 root 权限：将通过 su 以 root 运行（悬浮窗 + 内核驱动注入）</string>
     <string name="hint_model">模型：valorant_256_v26n.tflite（YOLOv26n 256 INT8）</string>
 
     <!-- 卡密验证 -->

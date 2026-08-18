@@ -28,7 +28,6 @@
 #include "ImGui/imgui_internal.h"
 //#include "ImGui/backends/imgui_impl_opengl3.h"
 #include "ImGui/backends/imgui_impl_android.h"
-#include "Android_touch/TouchHelperA.h"
 
 #if defined(USE_OPENGL)
     #include "ImGui/backends/imgui_impl_opengl3.h"

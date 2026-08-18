@@ -1,6 +1,6 @@
 // touch_core.cpp — Core touch injection logic
-// Based on native_touch.cpp + reader threads from TouchHelperA
-// Shared by JNI (Shizuku) and root_daemon (su)
+// 注：触摸注入统一走 TimeDriver 内核驱动，已移除所有 uinput 相关代码。
+// 设备 reader 线程仅用于读取物理手指状态供区域判断/自瞄触发门控。
 
 #include "touch_core.h"
 #include "time_driver_wrap.h"
@@ -8,11 +8,9 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/input.h>
-#include <linux/uinput.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
-#include <array>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
@@ -32,10 +30,7 @@
 
 // ─── Constants ───────────────────────────────────────────────────────
 
-static constexpr int maxE = 5;
 static constexpr int maxF = 10;
-static constexpr int UNGRAB = 0;
-static constexpr int GRAB = 1;
 
 // ─── Data structures ────────────────────────────────────────────────
 
@@ -43,7 +38,6 @@ struct Vec2 {
     float x = 0.0f, y = 0.0f;
     Vec2() = default;
     Vec2(float px, float py) : x(px), y(py) {}
-    Vec2 operator*(const Vec2& o) const { return {x * o.x, y * o.y}; }
 };
 
 struct TouchObj {
@@ -66,19 +60,12 @@ struct Zone {
     volatile int finger_inside = 0;
 };
 
-struct InputBuffer {
-    input_event event[512]{};
-};
-
 // ─── Global state ────────────────────────────────────────────────────
 
 static std::vector<Device> g_devices;
-static std::array<std::array<bool, maxF>, maxE> g_uploadedFingerDown{};
-static InputBuffer g_inputBuffer{};
 static Vec2 g_touchScale{1.0f, 1.0f};
 static Vec2 g_screenSize{};
 static std::mutex g_mutex;
-static int g_outputFd = 0;
 static bool g_initialized = false;
 
 // Screen params
@@ -97,25 +84,6 @@ static Zone g_joystick_zone;
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
-static void genRandomString(char* str, int len) {
-    srand(static_cast<unsigned>(time(nullptr)) + len);
-    for (int i = 0; i < len - 1; ++i) {
-        int flag = rand() % 3;
-        if (flag == 0)      str[i] = static_cast<char>('A' + rand() % 26);
-        else if (flag == 1) str[i] = static_cast<char>('a' + rand() % 26);
-        else                str[i] = static_cast<char>('0' + rand() % 10);
-    }
-    str[len - 1] = '\0';
-}
-
-static void pushEvent(int& count, unsigned short type, unsigned short code, int value) {
-    if (count >= static_cast<int>(std::size(g_inputBuffer.event))) return;
-    g_inputBuffer.event[count].type = type;
-    g_inputBuffer.event[count].code = code;
-    g_inputBuffer.event[count].value = value;
-    ++count;
-}
-
 static bool pointInZone(const Zone& z, int sx, int sy) {
     return z.l < z.r && z.t < z.b &&
            sx >= z.l && sx <= z.r && sy >= z.t && sy <= z.b;
@@ -131,7 +99,6 @@ static bool isTrackedPhysicalFinger(size_t deviceIndex, int fingerIndex) {
     if (!finger.isDown) {
         return false;
     }
-    // Mirror the helper behavior: ignore injected fingers and only judge real fingers.
     if (deviceIndex == 0 && (fingerIndex == TOUCH_VIRTUAL_SLOT || fingerIndex == TOUCH_TRIGGER_SLOT)) {
         return false;
     }
@@ -229,55 +196,6 @@ static void touchToScreen(float devX, float devY, int touchMaxX, int touchMaxY, 
     sy = std::clamp(static_cast<int>(std::lround(rawScreenY)), 0, std::max(0, g_screen_h));
 }
 
-// ─── Upload (from native_touch.cpp) ─────────────────────────────────
-// 重要：只注入虚拟手指（自瞄/扳机等合成触摸），不重新注入物理手指。
-// 物理触摸事件由 Android 原生输入管线直接送达系统/游戏，reader 线程仅被动读取
-// 手指状态用于区域判断/自瞄触发门控，不再重新注入物理触摸。
-// 这样避免了“抓取设备→重新注入”的链路延迟与冲突，物理触摸与 ImGui 都能稳定工作。
-static void upload() {
-    if (g_outputFd <= 0) return;
-    int count = 0;
-    int activeVirtualCount = 0;
-    bool hasActiveVirtualFinger = false;
-
-    // 只遍历虚拟手指槽位：TOUCH_VIRTUAL_SLOT(8), TOUCH_TRIGGER_SLOT(9)
-    // 不重新注入物理手指（它们已通过原生输入管线到达系统）
-    for (int fi = 0; fi < maxF; ++fi) {
-        if (fi != TOUCH_VIRTUAL_SLOT && fi != TOUCH_TRIGGER_SLOT) continue;
-
-        const TouchObj& finger = g_devices[0].fingers[fi];
-        bool wasUploaded = g_uploadedFingerDown[0][fi];
-
-        if (finger.isDown) {
-            hasActiveVirtualFinger = true;
-            ++activeVirtualCount;
-            pushEvent(count, EV_ABS, ABS_MT_SLOT, fi);
-            if (!wasUploaded)
-                pushEvent(count, EV_ABS, ABS_MT_TRACKING_ID, finger.id);
-            pushEvent(count, EV_ABS, ABS_MT_POSITION_X, static_cast<int>(finger.pos.x));
-            pushEvent(count, EV_ABS, ABS_MT_POSITION_Y, static_cast<int>(finger.pos.y));
-            pushEvent(count, EV_ABS, ABS_X, static_cast<int>(finger.pos.x));
-            pushEvent(count, EV_ABS, ABS_Y, static_cast<int>(finger.pos.y));
-            g_uploadedFingerDown[0][fi] = true;
-        } else if (wasUploaded) {
-            pushEvent(count, EV_ABS, ABS_MT_SLOT, fi);
-            pushEvent(count, EV_ABS, ABS_MT_TRACKING_ID, -1);
-            g_uploadedFingerDown[0][fi] = false;
-        }
-    }
-
-    pushEvent(count, EV_KEY, BTN_TOUCH, hasActiveVirtualFinger ? 1 : 0);
-    pushEvent(count, EV_KEY, BTN_TOOL_FINGER, activeVirtualCount == 1 ? 1 : 0);
-    pushEvent(count, EV_KEY, BTN_TOOL_DOUBLETAP, activeVirtualCount == 2 ? 1 : 0);
-    pushEvent(count, EV_KEY, BTN_TOOL_TRIPLETAP, activeVirtualCount == 3 ? 1 : 0);
-    pushEvent(count, EV_KEY, BTN_TOOL_QUADTAP, activeVirtualCount == 4 ? 1 : 0);
-    pushEvent(count, EV_KEY, BTN_TOOL_QUINTTAP, activeVirtualCount >= 5 ? 1 : 0);
-    pushEvent(count, EV_SYN, SYN_REPORT, 0);
-    write(g_outputFd, g_inputBuffer.event, sizeof(input_event) * count);
-}
-
-// ─── Zone detection ─────────────────────────────────────────────────
-
 // ─── Device scanning ────────────────────────────────────────────────
 
 static bool checkDeviceIsTouch(int fd) {
@@ -306,93 +224,6 @@ static bool checkDeviceIsTouch(int fd) {
     return hasSlot && hasX && hasY;
 }
 
-// ─── uinput device creation ─────────────────────────────────────────
-
-static bool createUinputDevice(int screenX, int screenY, int sourceFd) {
-    uinput_user_dev uiDev{};
-    g_outputFd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
-    if (g_outputFd <= 0) {
-        LOGE("open /dev/uinput failed");
-        return false;
-    }
-
-    char randomName[16]{};
-    genRandomString(randomName, sizeof(randomName));
-    strncpy(uiDev.name, randomName, UINPUT_MAX_NAME_SIZE);
-    uiDev.id.bustype = 0;
-    uiDev.id.vendor = rand() % 10 + 5;
-    uiDev.id.product = rand() % 10 + 5;
-    uiDev.id.version = rand() % 10 + 5;
-
-    ioctl(g_outputFd, UI_SET_PROPBIT, INPUT_PROP_POINTER);
-    // 不使用 INPUT_PROP_DIRECT，否则游戏会优先处理虚拟触摸，忽略物理触摸
-    // 使用 POINTER 属性，让虚拟手指被识别为指针设备，不干扰物理手指
-    ioctl(g_outputFd, UI_SET_EVBIT, EV_ABS);
-    ioctl(g_outputFd, UI_SET_ABSBIT, ABS_X);
-    ioctl(g_outputFd, UI_SET_ABSBIT, ABS_Y);
-    ioctl(g_outputFd, UI_SET_ABSBIT, ABS_MT_SLOT);
-    ioctl(g_outputFd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
-    ioctl(g_outputFd, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
-    ioctl(g_outputFd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
-    ioctl(g_outputFd, UI_SET_EVBIT, EV_SYN);
-    ioctl(g_outputFd, UI_SET_EVBIT, EV_KEY);
-    ioctl(g_outputFd, UI_SET_KEYBIT, BTN_TOOL_FINGER);
-    ioctl(g_outputFd, UI_SET_KEYBIT, BTN_TOOL_DOUBLETAP);
-    ioctl(g_outputFd, UI_SET_KEYBIT, BTN_TOOL_TRIPLETAP);
-    ioctl(g_outputFd, UI_SET_KEYBIT, BTN_TOOL_QUADTAP);
-    ioctl(g_outputFd, UI_SET_KEYBIT, BTN_TOOL_QUINTTAP);
-    ioctl(g_outputFd, UI_SET_KEYBIT, BTN_TOUCH);
-
-    char randomPhys[16]{};
-    genRandomString(randomPhys, sizeof(randomPhys));
-    ioctl(g_outputFd, UI_SET_PHYS, randomPhys);
-
-    input_id id{};
-    if (ioctl(sourceFd, EVIOCGID, &id) == 0) uiDev.id = id;
-
-    uint8_t* bits = nullptr;
-    ssize_t bitsSize = 0;
-    int res = 0;
-    while (true) {
-        res = ioctl(sourceFd, EVIOCGBIT(EV_KEY, bitsSize), bits);
-        if (res < bitsSize) break;
-        bitsSize = res + 16;
-        bits = static_cast<uint8_t*>(realloc(bits, bitsSize * 2));
-    }
-    for (int j = 0; j < res; ++j) {
-        for (int k = 0; k < 8; ++k) {
-            int code = j * 8 + k;
-            if (bits[j] & (1 << k)) {
-                if (code == BTN_TOUCH || code == BTN_TOOL_FINGER) continue;
-                ioctl(g_outputFd, UI_SET_KEYBIT, code);
-            }
-        }
-    }
-    free(bits);
-
-    uiDev.absmin[ABS_MT_SLOT] = 0;
-    uiDev.absmax[ABS_MT_SLOT] = maxE * maxF - 1;
-    uiDev.absmin[ABS_MT_POSITION_X] = 0;
-    uiDev.absmax[ABS_MT_POSITION_X] = screenX;
-    uiDev.absmin[ABS_MT_POSITION_Y] = 0;
-    uiDev.absmax[ABS_MT_POSITION_Y] = screenY;
-    uiDev.absmin[ABS_X] = 0;
-    uiDev.absmax[ABS_X] = screenX;
-    uiDev.absmin[ABS_Y] = 0;
-    uiDev.absmax[ABS_Y] = screenY;
-    uiDev.absmin[ABS_MT_TRACKING_ID] = 0;
-    uiDev.absmax[ABS_MT_TRACKING_ID] = 65535;
-    write(g_outputFd, &uiDev, sizeof(uiDev));
-
-    if (ioctl(g_outputFd, UI_DEV_CREATE)) {
-        LOGE("UI_DEV_CREATE failed");
-        close(g_outputFd);
-        g_outputFd = 0;
-        return false;
-    }
-    return true;
-}
-
 // ─── Close ──────────────────────────────────────────────────────────
 
 static void closeTouchLocked() {
@@ -401,13 +232,6 @@ static void closeTouchLocked() {
         close(device.fd);
         device.fd = 0;
     }
-    if (g_outputFd > 0) {
-        ioctl(g_outputFd, UI_DEV_DESTROY);
-        close(g_outputFd);
-        g_outputFd = 0;
-    }
-    memset(g_inputBuffer.event, 0, sizeof(g_inputBuffer.event));
-    g_uploadedFingerDown = {};
     g_initialized = false;
     g_devices.clear();
 }
@@ -461,10 +285,6 @@ static void* deviceReader(void* arg) {
                     break;
                 }
             }
-
-            if (ie.type == EV_SYN && ie.code == SYN_REPORT) {
-                upload();
-            }
         }
     }
 
@@ -505,12 +325,8 @@ bool touch_init(int screenW, int screenH) {
         if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &device.absX) == 0 &&
             ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &device.absY) == 0) {
             device.fd = fd;
-            // 不再使用 EVIOCGRAB 抓取触摸设备。
-            // 抓取会阻断 Android 原生输入管线，需要重新注入物理触摸，
-            // 带来延迟/丢帧，导致“物理触摸有时不工作”甚至与 ImGui 冲突。
-            // 改为被动监听（open 读模式）：物理触摸自然流向系统/游戏，
-            // reader 线程仅用于读取手指状态供区域判断/自瞄触发门控，
-            // 虚拟手指（aim/trigger）仍走 uinput 注入。
+            // 被动监听（open 读模式）：物理触摸自然流向系统/游戏，
+            // reader 线程仅用于读取手指状态供区域判断/自瞄触发门控。
             g_devices.push_back(device);
             LOGD("touch device %s max=%d,%d (passive monitor)", path, device.absX.maximum, device.absY.maximum);
         } else {
@@ -523,10 +339,6 @@ bool touch_init(int screenW, int screenH) {
 
     int touchMaxX = g_devices[0].absX.maximum;
     int touchMaxY = g_devices[0].absY.maximum;
-
-    // touch_init 只做设备扫描与坐标准备（供 ImGui 交互/区域判断），不创建 uinput
-    // 注入设备——需要自瞄/扳机/压枪时由面板调用 touch_inject_init。
-    // 触摸注入统一走 uinput（真实手指自然透传系统，合成手指经 uinput 注入）。
 
     for (auto& device : g_devices) {
         device.s2tx = static_cast<float>(touchMaxX) / std::max(1, device.absX.maximum);
@@ -549,51 +361,25 @@ void touch_close(void) {
 }
 
 bool touch_is_initialized(void) { return g_initialized; }
-int  touch_get_output_fd(void)   { return g_outputFd; }
 int  touch_device_count(void)    { return static_cast<int>(g_devices.size()); }
 
-// ─── uinput 注入设备生命周期 ───
-// uinput 注入设备是否已就绪（触摸注入可用）
-bool touch_inject_ready(void) { return g_initialized && g_outputFd > 0; }
+// ─── 内核触摸（TimeDriver，唯一触摸注入路径） ───
 
-// 按需创建 uinput 注入设备（触摸注入就绪）。幂等：已就绪直接返回 true。
-// 触摸注入统一走 uinput；内核陀螺仪模式下不调用本函数（屏蔽 uinput 初始化）。
-bool touch_inject_init(void) {
-    std::lock_guard<std::mutex> guard(g_mutex);
-    if (!g_initialized || g_devices.empty()) return false;
-    if (g_outputFd > 0) return true;  // 已就绪
-    const int touchMaxX = std::max(1, g_devices[0].absX.maximum);
-    const int touchMaxY = std::max(1, g_devices[0].absY.maximum);
-    if (!createUinputDevice(touchMaxX, touchMaxY, g_devices[0].fd)) {
-        LOGE("touch inject init failed (need root + /dev/uinput)");
-        return false;
-    }
-    LOGD("touch inject ready (uinput)");
-    return true;
+bool touch_kernel_touch_init(int w, int h, int orientation) {
+    return kdrv_touch_init(w, h, orientation);
 }
 
-// 销毁 uinput 注入设备（停止触摸注入）
-void touch_inject_close(void) {
-    std::lock_guard<std::mutex> guard(g_mutex);
-    if (g_outputFd > 0) {
-        ioctl(g_outputFd, UI_DEV_DESTROY);
-        close(g_outputFd);
-        g_outputFd = 0;
-    }
-    g_uploadedFingerDown = {};
-    LOGD("touch inject closed");
+void touch_kernel_touch_cleanup(void) {
+    kdrv_touch_cleanup();
 }
 
-// ─── 内核陀螺仪（TimeDriver，仅陀螺仪；触摸注入统一走 uinput） ───
+// ─── 内核陀螺仪（TimeDriver，用于自瞄/压枪） ───
+
 bool touch_kernel_gyro_init(void) {
-    // 惰性连接驱动 + 关闭触摸接管 + 初始化陀螺仪 hook（内部已做幂等）
     return kdrv_gyro_init();
 }
 
 void touch_gyro_apply(bool enable, float pitch, float yaw) {
-    // 重要：陀螺仪注入【不依赖 uinput】。陀螺仪模式正是要屏蔽 uinput 的触摸及初始化，
-    // 若此处以 g_initialized（uinput 初始化状态）门控，uinput 未初始化时注入会被静默
-    // 跳过，导致“对接了也没效果”。这里只依赖驱动连接状态。
     if (!kdrv_connected() && !touch_kernel_gyro_init()) return;
     kdrv_gyro_set(enable, pitch, yaw, (uint32_t)g_rotation, 1, TIME_GYRO_MASK_ALL);
 }
@@ -643,31 +429,28 @@ void touch_set_screen_params(int w, int h, int rotation) {
     g_rotation = normalizeRotation(rotation);
 }
 
-void touch_down(int slot, int id, int screenX, int screenY) {
-    std::lock_guard<std::mutex> guard(g_mutex);
-    if (!g_initialized || g_devices.empty()) return;
-    float tx, ty;
-    screenToTouch(screenX, screenY, tx, ty);
-    g_devices[0].fingers[slot].id = id;
-    g_devices[0].fingers[slot].pos = Vec2(tx, ty);
-    g_devices[0].fingers[slot].isDown = true;
-    upload();
+// ─── 触摸注入（统一走 TimeDriver 内核驱动） ───
+// 注：与之前 uinput 实现不同，这里 screen 坐标直接交给 TimeDriver，
+// 由驱动内部按 orientation 处理坐标变换。
+// slot → id 映射：down 时使用的 tracking id，move/up 必须使用相同 id。
+
+static int slot_to_id(int slot) {
+    if (slot == TOUCH_VIRTUAL_SLOT) return TOUCH_VIRTUAL_ID;
+    if (slot == TOUCH_TRIGGER_SLOT) return TOUCH_TRIGGER_ID;
+    return slot;
 }
 
-void touch_move(int slot, int screenX, int screenY) {
-    std::lock_guard<std::mutex> guard(g_mutex);
-    if (!g_initialized || g_devices.empty()) return;
-    float tx, ty;
-    screenToTouch(screenX, screenY, tx, ty);
-    g_devices[0].fingers[slot].pos = Vec2(tx, ty);
-    upload();
+bool touch_down(int slot, int id, int screenX, int screenY) {
+    (void)slot;
+    return kdrv_touch_down(id, screenX, screenY);
 }
 
-void touch_up(int slot) {
-    std::lock_guard<std::mutex> guard(g_mutex);
-    if (!g_initialized || g_devices.empty()) return;
-    g_devices[0].fingers[slot].isDown = false;
-    upload();
+bool touch_move(int slot, int screenX, int screenY) {
+    return kdrv_touch_move(slot_to_id(slot), screenX, screenY);
+}
+
+bool touch_up(int slot) {
+    return kdrv_touch_up(slot_to_id(slot));
 }
 
 void touch_set_trigger_zone(int l, int t, int r, int b)  { g_trigger_zone = {l, t, r, b, 0}; }
@@ -728,8 +511,6 @@ bool touch_lift_joystick_finger(void) {
             }
         }
     }
-
-    if (lifted) upload();
     return lifted;
 }
 

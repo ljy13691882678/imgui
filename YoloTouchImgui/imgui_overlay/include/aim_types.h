@@ -132,20 +132,17 @@ struct AimConfig {
     // 压枪（独立功能：检测物理手指按在“开枪区”时视角自动下拉补偿后坐力，不依赖扳机）
     bool  recoilEnabled = false;   // 压枪总开关
     int   recoilStartMs = 250;     // 压枪开始时间：开枪键按住后延迟多久开始下拉（ms）
-    int   recoilStrength = 300;    // 压枪力度(uinput模式)：下拉速度（px/s），0=关闭
+    int   recoilStrength = 300;    // 压枪力度(触摸注入模式)：下拉速度（px/s），0=关闭
     float recoilDegPerSec = 60.0f; // 压枪力度(陀螺仪模式)：下拉角速度（°/s）
 
-    // 内核陀螺仪（TimeDriver）模式：勾选后自瞄转向/压枪走内核陀螺仪 hook（pitch/yaw 角度注入），
-    // 屏蔽 uinput 触摸注入及初始化，扳机禁用；取消勾选回到纯 uinput 模式。
+    // 内核陀螺仪（TimeDriver）模式：勾选后自瞄转向/压枪走内核陀螺仪 hook（pitch/yaw 角度注入）
     bool  gyroAim = false;              // 内核陀螺仪模式开关
     float gyroSens = 0.01f;             // 陀螺仪灵敏度（屏幕像素增量 → 角度系数）
     float gyroMaxDeg = 15.0f;           // 自瞄单帧最大注入角度（°）
     bool  gyroInvertPitch = false;      // 反转 Pitch（上下）
     bool  gyroInvertYaw = false;        // 反转 Yaw（左右）
 
-    // 内核触摸（TimeDriver 触摸注入，替代 uinput）
-    // 勾选后自瞄/压枪/扳机的虚拟触摸走 TimeDriver 内核驱动注入，
-    // 而非 uinput。物理触摸不受影响（Touch_Init 后立即 Touch_Disable）。
+    // 内核触摸（TimeDriver）：触摸注入统一走 TimeDriver 内核驱动
     bool  kernelTouch = false;
 
     // 屏幕捕获设置

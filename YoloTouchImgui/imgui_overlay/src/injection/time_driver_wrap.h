@@ -25,11 +25,11 @@ void kdrv_gyro_set(bool enable, float pitch, float yaw,
 void kdrv_gyro_stop(uint32_t orientation);             // 停止注入（enable=false）
 void kdrv_gyro_disable(void);
 
-// 内核触摸（TimeDriver 触摸注入，替代 uinput）
-// 调用 Touch_Init 创建虚拟触摸设备，随后 Touch_Disable 关闭触摸接管，
-// 物理触摸不受影响，仅虚拟手指走内核驱动注入。
-bool kdrv_touch_init(int width, int height, int orientation);  // 创建虚拟触摸设备 + 关闭触摸接管
+// 内核触摸（TimeDriver 触摸注入）
+// 调用 Touch_Init 创建虚拟触摸设备；物理触摸不受影响。
+bool kdrv_touch_init(int width, int height, int orientation);  // 创建虚拟触摸设备
 void kdrv_touch_cleanup(void);                                  // 销毁虚拟触摸设备
+bool kdrv_touch_inited(void);                                   // 虚拟触摸设备是否已创建
 bool kdrv_touch_down(int id, int x, int y);
 bool kdrv_touch_move(int id, int x, int y);
 bool kdrv_touch_up(int id);
