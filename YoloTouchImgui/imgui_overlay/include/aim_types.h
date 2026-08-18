@@ -56,7 +56,8 @@ struct AimConfig {
     float deadZone = 0.02f;        // 归一化死区（中心距离小于此不移动）
     float smoothX = 0.5f;          // 平滑系数 0~1
     float smoothY = 0.5f;
-    float aimSpeed = 1.0f;         // 速度增益
+    float aimSpeedMin = 0.5f;      // 速度增益最小值（随机速度下限）
+    float aimSpeedMax = 1.5f;       // 速度增益最大值（随机速度上限）
     float predictGain = 0.05f;     // 预判增益（秒）
     int   aimLockTimeMs = 300;     // 锁定时间
     // 自瞄锁定部位：0=中心 1=头部 2=身体（按目标框计算瞄准点，头部/身体按类别名 head/body 识别）

@@ -140,7 +140,7 @@ static void saveConfig() {
     FILE* f = fopen(g_cfgFile.c_str(), "wb");
     if (!f) return;
     const char magic[4] = {'Y', 'T', 'C', 'T'};
-    uint32_t version = 1;
+    uint32_t version = 2;  // 版本 2: 新增 aimSpeedMin/aimSpeedMax 随机速度范围
     fwrite(magic, 1, 4, f);
     fwrite(&version, 4, 1, f);
     fwrite(&g_cfg, 1, sizeof(g_cfg), f);
@@ -155,7 +155,7 @@ static bool loadConfig() {
     uint32_t version = 0;
     bool ok = false;
     if (fread(magic, 1, 4, f) == 4 && fread(&version, 4, 1, f) == 1 &&
-        memcmp(magic, "YTCT", 4) == 0 && version == 1) {
+        memcmp(magic, "YTCT", 4) == 0 && version == 2) {
         AimConfig cfg;
         if (fread(&cfg, 1, sizeof(cfg), f) == sizeof(cfg)) {
             g_cfg = cfg;
@@ -1520,7 +1520,8 @@ static void drawControlPanel() {
     ImGui::SliderFloat("X 平滑", &g_cfg.smoothX, 0.0f, 0.95f);
     ImGui::SliderFloat("Y 平滑", &g_cfg.smoothY, 0.0f, 0.95f);
     ImGui::SliderFloat("瞄准点平滑", &g_cfg.aimPointSmooth, 0.0f, 0.95f);
-    ImGui::SliderFloat("自瞄速度", &g_cfg.aimSpeed, 0.1f, 3.0f);
+    ImGui::SliderFloat("自瞄最小速度", &g_cfg.aimSpeedMin, 0.1f, 3.0f);
+    ImGui::SliderFloat("自瞄最大速度", &g_cfg.aimSpeedMax, 0.1f, 3.0f);
     ImGui::SliderFloat("预判", &g_cfg.predictGain, 0.0f, 0.2f);
     // 自瞄回正速度（归一化每帧最大瞄准点移动距离）：目标在裁剪框边缘时防止准星甩飞
     ImGui::SliderFloat("回正速度", &g_cfg.aimApproachSpeed, 0.0f, 0.1f, "%.4f");

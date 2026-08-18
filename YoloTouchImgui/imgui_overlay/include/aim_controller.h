@@ -11,6 +11,8 @@ public:
         m_lastX = -1.0f;
         m_lastY = -1.0f;
         m_lastTargetId = -1;
+        // 重置时重新初始化随机种子
+        std::srand(static_cast<unsigned int>(std::time(nullptr)));
     }
 
     // screenCx/screenCy：准星位置（归一化），默认屏幕中心 0.5,0.5
@@ -40,8 +42,14 @@ public:
             ease = std::clamp((dist - cfg.deadZone) / (cfg.deadZone * 2.0f), 0.0f, 1.0f);
         }
 
+        // 随机速度：在设置的最小值和最大值之间生成随机速度
+        float speedMin = std::min(cfg.aimSpeedMin, cfg.aimSpeedMax);
+        float speedMax = std::max(cfg.aimSpeedMin, cfg.aimSpeedMax);
+        float randomSpeed = speedMin + static_cast<float>(std::rand()) /
+                             (static_cast<float>(RAND_MAX) + 1.0f) * (speedMax - speedMin);
+
         // PID 比例控制（这里用 P 项 + 平滑 + 减速区）
-        float kP = cfg.aimSpeed * 0.5f * ease;
+        float kP = randomSpeed * 0.5f * ease;
         float moveX = dx * kP;
         float moveY = dy * kP;
 
