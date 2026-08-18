@@ -78,6 +78,13 @@ struct AimConfig {
     float pidKi = 0.02f;          // 积分系数
     float pidKd = 0.08f;          // 微分系数
     float pidSamplePeriodMs = 8.0f; // PID 采样周期（固定值，ms）
+    // 拟人模式参数（PID 算法专用，模拟真人移动特征）
+    bool  humanLikeEnabled = false;  // 启用人性化模式
+    float humanLikeAccel = 2.0f;    // 加速度系数（控制加速曲线，值越大加速越快）
+    float humanLikeJitter = 1.5f;   // 微抖动强度（像素），模拟人手自然抖动
+    float humanLikeOvershoot = 8.0f; // 过冲幅度（像素），偶尔超过目标再回拉
+    float humanLikeOvershootChance = 0.05f; // 过冲概率（0~1，越低越罕见）
+    float humanLikeTimeJitter = 0.3f; // 时间抖动（0~1），采样时间随机化程度
     // 贝塞尔参数（executeAimingBezier 移植，slow-fast-slow smoothstep 计时）
     float bezierDuration = 30.0f; // 贝塞尔移动时长基准（ms 系数，最终随距离调整）
     // 收敛阈值（像素）：|误差| 小于该值认为已对准，停止拖拽（PID/贝塞尔共用）

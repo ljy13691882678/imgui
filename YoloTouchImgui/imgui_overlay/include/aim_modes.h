@@ -66,25 +66,43 @@ public:
         // 像素误差（相对准星/屏幕中心）
         float errX = (px - screenCx) * scrW;
         float errY = (py - screenCy) * scrH;
+        float dist = std::sqrt(errX * errX + errY * errY);
+
+        // 拟人模式：收敛阈值动态化
+        float convergeThresh = cfg.convergeThresh;
+        if (cfg.humanLikeEnabled) {
+            // 拟人模式下收敛阈值稍大，模拟人手不会精确对齐
+            convergeThresh *= 1.5f;
+        }
 
         // 收敛：进入像素阈值框内停止拖拽
-        if (std::fabs(errX) < cfg.convergeThresh && std::fabs(errY) < cfg.convergeThresh) {
+        if (std::fabs(errX) < convergeThresh && std::fabs(errY) < convergeThresh) {
             m_lastX = 0.0f; m_lastY = 0.0f;
+            m_humanAccelProgress = 0.0f;
+            m_overshootActive = false;
             return out;
         }
+
         // 归一化死区
-        float dist = std::sqrt(errX * errX + errY * errY);
         if (dist < cfg.deadZone * std::min(scrW, scrH)) {
             m_lastX = 0.0f; m_lastY = 0.0f;
+            m_humanAccelProgress = 0.0f;
+            m_overshootActive = false;
             return out;
         }
+
+        // 拟人模式：时间抖动
+        float sample = cfg.pidSamplePeriodMs / 1000.0f;
+        if (cfg.humanLikeEnabled && cfg.humanLikeTimeJitter > 0.0f) {
+            // 时间抖动：采样时间在 ±jitter*sample 范围内随机波动
+            float jitterRange = cfg.humanLikeTimeJitter * sample;
+            sample += (static_cast<float>(std::rand()) / (static_cast<float>(RAND_MAX) + 1.0f) - 0.5f) * 2.0f * jitterRange;
+        }
+        if (sample < 0.001f) sample = 0.001f;
 
         // 误差变号则清零积分（抗积分饱和 / 防过冲回摆）
         if (errX * m_prevErrX <= 0.0f) m_integralX = 0.0f;
         if (errY * m_prevErrY <= 0.0f) m_integralY = 0.0f;
-        // 固定采样周期（与参考实现一致，非真实帧间隔）
-        float sample = cfg.pidSamplePeriodMs / 1000.0f;
-        if (sample < 0.001f) sample = 0.001f;
         m_integralX += errX * sample;
         m_integralY += errY * sample;
         const float integralLimit = 100.0f;
@@ -96,6 +114,55 @@ public:
         float moveX = errX * cfg.pidKp + m_integralX * cfg.pidKi + derivX * cfg.pidKd;
         float moveY = errY * cfg.pidKp + m_integralY * cfg.pidKi + derivY * cfg.pidKd;
         m_prevErrX = errX; m_prevErrY = errY;
+
+        // 拟人模式处理
+        if (cfg.humanLikeEnabled) {
+            // 1. 加速曲线：模拟人手加速-减速特征
+            // 使用 sigmoid 曲线，开始慢、中间快、接近目标时减速
+            float accel = cfg.humanLikeAccel;
+            float progress = 1.0f - (dist / std::max(dist, 1.0f)); // 避免除零
+            // 根据距离更新加速进度
+            float targetProgress = std::clamp(dist / 200.0f, 0.0f, 1.0f);
+            m_humanAccelProgress = m_humanAccelProgress * 0.9f + targetProgress * 0.1f;
+            // sigmoid 加速曲线：在中间距离最快，两端最慢
+            float accelCurve = 1.0f / (1.0f + std::exp(-accel * (m_humanAccelProgress - 0.5f)));
+            // 调整加速曲线：前期慢、中期快、后期慢
+            accelCurve = 0.3f + 0.7f * accelCurve;
+            moveX *= accelCurve;
+            moveY *= accelCurve;
+
+            // 2. 微抖动：添加微小随机偏移
+            if (cfg.humanLikeJitter > 0.0f) {
+                float jitterX = (static_cast<float>(std::rand()) / (static_cast<float>(RAND_MAX) + 1.0f) - 0.5f) * 2.0f * cfg.humanLikeJitter;
+                float jitterY = (static_cast<float>(std::rand()) / (static_cast<float>(RAND_MAX) + 1.0f) - 0.5f) * 2.0f * cfg.humanLikeJitter;
+                moveX += jitterX;
+                moveY += jitterY;
+            }
+
+            // 3. 随机过冲：偶尔超过目标再回拉
+            if (!m_overshootActive && cfg.humanLikeOvershootChance > 0.0f) {
+                if (static_cast<float>(std::rand()) / (static_cast<float>(RAND_MAX) + 1.0f) < cfg.humanLikeOvershootChance) {
+                    m_overshootActive = true;
+                    m_overshootDirX = (errX >= 0) ? 1.0f : -1.0f;
+                    m_overshootDirY = (errY >= 0) ? 1.0f : -1.0f;
+                    m_overshootFrames = 3 + (std::rand() % 5); // 3-7 帧过冲
+                    float overshootFactor = 0.5f + static_cast<float>(std::rand()) / (static_cast<float>(RAND_MAX) + 1.0f) * 0.5f;
+                    m_overshootAmountX = m_overshootDirX * cfg.humanLikeOvershoot * overshootFactor;
+                    m_overshootAmountY = m_overshootDirY * cfg.humanLikeOvershoot * overshootFactor;
+                }
+            }
+            if (m_overshootActive) {
+                // 过冲阶段：先向目标方向过冲，然后回拉
+                float overshootProgress = 1.0f - (m_overshootFrames / 10.0f);
+                float overshootDecay = std::exp(-overshootProgress * 3.0f);
+                moveX += m_overshootAmountX * overshootDecay;
+                moveY += m_overshootAmountY * overshootDecay;
+                m_overshootFrames--;
+                if (m_overshootFrames <= 0) {
+                    m_overshootActive = false;
+                }
+            }
+        }
 
         // 随机速度增益（在设定的最小值和最大值之间生成随机速度）
         float randomSpeed = getRandomSpeed(cfg);
@@ -109,7 +176,11 @@ public:
         m_lastX = moveX; m_lastY = moveY;
 
         // 单帧最大步长（像素，参考实现为 1200，基本无约束）
-        const float maxPerFrame = 1200.0f;
+        float maxPerFrame = 1200.0f;
+        // 拟人模式下单帧最大步长略小，更接近真人
+        if (cfg.humanLikeEnabled) {
+            maxPerFrame = 800.0f;
+        }
         float md = std::sqrt(moveX * moveX + moveY * moveY);
         if (md > maxPerFrame) {
             moveX *= maxPerFrame / md;
@@ -128,12 +199,27 @@ public:
         m_prevErrX = 0.0f; m_prevErrY = 0.0f;
         m_integralX = 0.0f; m_integralY = 0.0f;
         m_lastX = 0.0f; m_lastY = 0.0f;
+        m_humanAccelProgress = 0.0f;
+        m_overshootActive = false;
+        m_overshootFrames = 0;
+        m_overshootAmountX = 0.0f;
+        m_overshootAmountY = 0.0f;
+        m_overshootDirX = 0.0f;
+        m_overshootDirY = 0.0f;
     }
 
 private:
     float m_prevErrX = 0.0f, m_prevErrY = 0.0f;
     float m_integralX = 0.0f, m_integralY = 0.0f;
     float m_lastX = 0.0f, m_lastY = 0.0f;
+    // 拟人模式状态
+    float m_humanAccelProgress = 0.0f;  // 加速曲线进度
+    bool  m_overshootActive = false;    // 过冲是否激活
+    int   m_overshootFrames = 0;        // 过冲剩余帧数
+    float m_overshootAmountX = 0.0f;    // X 轴过冲量
+    float m_overshootAmountY = 0.0f;    // Y 轴过冲量
+    float m_overshootDirX = 0.0f;       // X 轴过冲方向
+    float m_overshootDirY = 0.0f;       // Y 轴过冲方向
 };
 
 // 贝塞尔自瞄控制器（slow-fast-slow 缓动移动，像素空间计算，输出归一化增量）

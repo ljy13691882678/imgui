@@ -140,7 +140,7 @@ static void saveConfig() {
     FILE* f = fopen(g_cfgFile.c_str(), "wb");
     if (!f) return;
     const char magic[4] = {'Y', 'T', 'C', 'T'};
-    uint32_t version = 2;  // 版本 2: 新增 aimSpeedMin/aimSpeedMax 随机速度范围
+    uint32_t version = 3;  // 版本 3: 新增拟人模式参数（humanLike*）
     fwrite(magic, 1, 4, f);
     fwrite(&version, 4, 1, f);
     fwrite(&g_cfg, 1, sizeof(g_cfg), f);
@@ -155,7 +155,7 @@ static bool loadConfig() {
     uint32_t version = 0;
     bool ok = false;
     if (fread(magic, 1, 4, f) == 4 && fread(&version, 4, 1, f) == 1 &&
-        memcmp(magic, "YTCT", 4) == 0 && version == 2) {
+        memcmp(magic, "YTCT", 4) == 0 && (version == 2 || version == 3)) {
         AimConfig cfg;
         if (fread(&cfg, 1, sizeof(cfg), f) == sizeof(cfg)) {
             g_cfg = cfg;
@@ -1532,6 +1532,19 @@ static void drawControlPanel() {
         ImGui::SliderFloat("I##pidKi", &g_cfg.pidKi, 0.0f, 0.020f);
         ImGui::SliderFloat("D##pidKd", &g_cfg.pidKd, 0.0f, 0.010f);
         ImGui::SliderFloat("采样周期(ms)", &g_cfg.pidSamplePeriodMs, 1.0f, 50.0f);
+
+        // 拟人模式参数
+        ImGui::Separator();
+        ImGui::Text("拟人模式（防检测）");
+        ImGui::Checkbox("启用人性化模式", &g_cfg.humanLikeEnabled);
+        if (g_cfg.humanLikeEnabled) {
+            ImGui::SliderFloat("加速度系数", &g_cfg.humanLikeAccel, 0.5f, 5.0f);
+            ImGui::SliderFloat("微抖动(px)", &g_cfg.humanLikeJitter, 0.0f, 5.0f);
+            ImGui::SliderFloat("过冲幅度(px)", &g_cfg.humanLikeOvershoot, 0.0f, 30.0f);
+            ImGui::SliderFloat("过冲概率", &g_cfg.humanLikeOvershootChance, 0.0f, 0.3f);
+            ImGui::SliderFloat("时间抖动", &g_cfg.humanLikeTimeJitter, 0.0f, 1.0f);
+            ImGui::TextDisabled("模拟真人移动特征：加速曲线、微抖动、随机过冲、时间波动");
+        }
     }
     if (g_cfg.aimMode == 1) {
         ImGui::Text("贝塞尔参数");
