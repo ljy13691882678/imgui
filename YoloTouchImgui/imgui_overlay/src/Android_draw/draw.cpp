@@ -1,4 +1,5 @@
 #include "Android_draw/draw.h"
+#include "touch_core.h"
 
 // Var
 EGLDisplay display = EGL_NO_DISPLAY;
@@ -146,7 +147,9 @@ void drawBegin() {
     screen_config();
     if (::orientation != displayInfo.orientation) {
         ::orientation = displayInfo.orientation;
-        UpdateScreenData(displayInfo.width, displayInfo.height, displayInfo.orientation);
+        // 屏幕旋转时同步坐标映射给触摸 reader（ImGui 交互/区域判断依赖）
+        touch_set_screen_params((int)displayInfo.width, (int)displayInfo.height,
+                               (int)displayInfo.orientation);
 
         // 屏幕旋转后宽高互换，旧的 native window 尺寸不再匹配：
         // 必须重建 native window，并同步重建渲染上下文与 ImGui 渲染后端，
