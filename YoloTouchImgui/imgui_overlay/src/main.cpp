@@ -905,6 +905,37 @@ static void mapSrcToScreen(float nx, float ny, int rot,
     }
 }
 
+// 把“相对全屏的归一化坐标”映射到悬浮窗屏幕坐标。
+// 检测框/辅助线坐标为裁剪推理图像经 offset 回映射到全屏的归一化坐标，与裁剪框
+// 同坐标空间。横屏下裁剪框在屏幕上是个用 rotation 转置得到的正方形；检测内容也要
+// 相对该裁剪正方形定位、再套用裁剪框的屏幕转置矩形，才能与裁剪框对齐且方向正确。
+// 竖屏时本式退化为 p=(nx*sx, ny*sy)，与原先直接缩放一致（无回归）。
+static void mapCropToScreen(float nx, float ny, float sx, float sy,
+                            float& ox, float& oy) {
+    if (g_shm && g_shm->valid()) {
+        auto ci = g_shm->cropInfo();
+        if (ci.size > 0 && ci.fullW > 0 && ci.fullH > 0 &&
+            ci.size <= ci.fullW && ci.size <= ci.fullH) {
+            float cnx = ci.offX / (float)ci.fullW;
+            float cny = ci.offY / (float)ci.fullH;
+            float cw = ci.size / (float)ci.fullW;
+            float chh = ci.size / (float)ci.fullH;
+            float ccx1, ccy1, ccx2, ccy2;
+            mapSrcToScreen(cnx, cny, ci.rotation, sx, sy, ccx1, ccy1);
+            mapSrcToScreen(cnx + cw, cny + chh, ci.rotation, sx, sy, ccx2, ccy2);
+            float scW = ccx2 - ccx1, scH = ccy2 - ccy1;
+            ox = ccx1 + (nx - cnx) / cw * scW;
+            oy = ccy1 + (ny - cny) / chh * scH;
+            return;
+        }
+        // 全屏模式（cropSize=0）：与裁剪框一致，按 rotation 转置映射
+        mapSrcToScreen(nx, ny, ci.rotation, sx, sy, ox, oy);
+        return;
+    }
+    ox = nx * sx;
+    oy = ny * sy;
+}
+
 static void drawDetectionOverlay() {
     if (!g_cfg.showBoxes && !g_cfg.showFps && !g_cfg.showCropBox && !g_cfg.showZones) return;
 
@@ -1096,14 +1127,12 @@ static void drawDetectionOverlay() {
             }
 
             // === 绘制 ===
-            // 检测框坐标为源帧(固定竖屏自然分辨率)归一化坐标；当前屏可能横屏，
-            // 按 rotation 旋转映射回屏幕，保证横屏下检测框仍为正方形。
-            float curRot = 0;
-            if (g_shm && g_shm->valid())
-                curRot = (float)g_shm->cropInfo().rotation;
+            // 检测坐标是相对全屏(固定竖屏自然分辨率)的归一化坐标，与裁剪框同坐标
+            // 空间。用 mapCropToScreen 相对裁剪正方形定位并套用裁剪框在屏幕上的
+            // 转置矩形：竖屏退化为直接缩放(与原先一致)，横屏时与裁剪框一起对齐。
             float p1x, p1y, p2x, p2y;
-            mapSrcToScreen(pcx - hw, pcy - hh, (int)curRot, sx, sy, p1x, p1y);
-            mapSrcToScreen(pcx + hw, pcy + hh, (int)curRot, sx, sy, p2x, p2y);
+            mapCropToScreen(pcx - hw, pcy - hh, sx, sy, p1x, p1y);
+            mapCropToScreen(pcx + hw, pcy + hh, sx, sy, p2x, p2y);
             ImVec2 p1(p1x, p1y);
             ImVec2 p2(p2x, p2y);
             int thick = std::max(1, g_cfg.boxThickness);
@@ -1143,12 +1172,11 @@ static void drawDetectionOverlay() {
     if (g_cfg.showAimLines && g_cfg.showBoxes) {
         ImVec2 anchor(sx * 0.5f, 0.0f);
         draw->AddCircleFilled(anchor, 5.0f, IM_COL32(0, 255, 255, 255), 12);
-        int ar = 0;
-        if (g_shm && g_shm->valid()) ar = (int)g_shm->cropInfo().rotation;
         for (const auto& t : g_tracks) {
             float hh = (t.y2 - t.y1) * 0.5f;
+            // 与检测框一致：相对裁剪正方形定位，套用裁剪框的屏幕转置矩形
             float bx, by;
-            mapSrcToScreen(t.cx, t.cy - hh, ar, sx, sy, bx, by);
+            mapCropToScreen(t.cx, t.cy - hh, sx, sy, bx, by);
             ImVec2 boxTop(bx, by);
             draw->AddLine(anchor, boxTop, IM_COL32(0, 255, 255, 150), 1.5f);
         }
