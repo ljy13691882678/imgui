@@ -893,12 +893,12 @@ static void mapSrcToScreen(float nx, float ny, int rot,
                            float scrW, float scrH,
                            float& ox, float& oy) {
     int r = ((rot % 4) + 4) % 4;
-    if (r == 1) {         // 90°：内容在源缓冲中逆时针存放，映射时旋转回来
-        ox = (1.0f - ny) * scrW;
-        oy = nx * scrH;
-    } else if (r == 3) {  // 270°：反向旋转
+    if (r == 1) {         // 90°：内容在源缓冲中顺时针存放，映射时逆时针转回
         ox = ny * scrW;
         oy = (1.0f - nx) * scrH;
+    } else if (r == 3) {  // 270°：反向
+        ox = (1.0f - ny) * scrW;
+        oy = nx * scrH;
     } else {
         ox = nx * scrW;
         oy = ny * scrH;
