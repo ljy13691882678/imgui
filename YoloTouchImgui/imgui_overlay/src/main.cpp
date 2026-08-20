@@ -1316,6 +1316,95 @@ static void exitImgui() {
     _exit(0);
 }
 
+// ---------------------------------------------------------------------------
+// 新手简易自瞄调节
+// ---------------------------------------------------------------------------
+static bool g_simpleUi = true;   // true=简易版(新手)  false=专业版(全部参数)
+
+static inline float fclamp(float v, float lo, float hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+// 手感预设：0=保守(稳/慢) 1=均衡 2=激进(快/跟手但可能略晃)
+static void applyAimProfile(int prof) {
+    if (prof == 0) {          // 保守
+        g_cfg.aimSpeedMin = 0.3f;  g_cfg.aimSpeedMax = 0.8f;
+        g_cfg.smoothX = 0.70f;     g_cfg.smoothY = 0.70f;
+        g_cfg.aimPointSmooth = 0.80f;
+        g_cfg.aimMoveSmooth = 0.70f;
+        g_cfg.deadZone = 0.045f;
+        g_cfg.predictGain = 0.02f;
+        g_cfg.pidKp = 0.15f;
+        g_cfg.convergeThresh = 20.0f;
+    } else if (prof == 1) {   // 均衡（默认）
+        g_cfg.aimSpeedMin = 0.5f;  g_cfg.aimSpeedMax = 1.2f;
+        g_cfg.smoothX = 0.50f;     g_cfg.smoothY = 0.50f;
+        g_cfg.aimPointSmooth = 0.62f;
+        g_cfg.aimMoveSmooth = 0.45f;
+        g_cfg.deadZone = 0.030f;
+        g_cfg.predictGain = 0.05f;
+        g_cfg.pidKp = 0.26f;
+        g_cfg.convergeThresh = 12.0f;
+    } else {                  // 激进
+        g_cfg.aimSpeedMin = 0.8f;  g_cfg.aimSpeedMax = 2.0f;
+        g_cfg.smoothX = 0.25f;     g_cfg.smoothY = 0.25f;
+        g_cfg.aimPointSmooth = 0.40f;
+        g_cfg.aimMoveSmooth = 0.20f;
+        g_cfg.deadZone = 0.014f;
+        g_cfg.predictGain = 0.08f;
+        g_cfg.pidKp = 0.34f;
+        g_cfg.convergeThresh = 8.0f;
+    }
+    // 速度下限不得高于上限
+    if (g_cfg.aimSpeedMin > g_cfg.aimSpeedMax) g_cfg.aimSpeedMin = g_cfg.aimSpeedMax * 0.6f;
+    printf("[profile] apply profile %d\n", prof);
+}
+
+// 微调自瞄手感：dir>0 让自瞄更快/更跟手(治"太软"、跟不住)；
+// dir<0 让自瞄更慢/更稳(治"太快"、太晃)。每次只动一小步，便于级进细调。
+static void tweakAim(float dir) {
+    // 快慢基准：速度上限
+    g_cfg.aimSpeedMax = fclamp(g_cfg.aimSpeedMax + dir * 0.10f, 0.3f, 3.0f);
+    g_cfg.aimSpeedMin = fclamp(g_cfg.aimSpeedMin + dir * 0.05f, 0.1f, g_cfg.aimSpeedMax);
+    // 更快 -> 降低平滑（跟手）；更慢 -> 提高平滑（更稳）
+    g_cfg.smoothX = fclamp(g_cfg.smoothX - dir * 0.03f, 0.0f, 0.95f);
+    g_cfg.smoothY = fclamp(g_cfg.smoothY - dir * 0.03f, 0.0f, 0.95f);
+    g_cfg.aimPointSmooth = fclamp(g_cfg.aimPointSmooth - dir * 0.03f, 0.0f, 0.95f);
+    g_cfg.aimMoveSmooth = fclamp(g_cfg.aimMoveSmooth - dir * 0.03f, 0.0f, 0.95f);
+    // 更快 -> 死区更小（响应更灵敏）；更慢 -> 死区更大（更稳但迟钝）
+    g_cfg.deadZone = fclamp(g_cfg.deadZone - dir * 0.002f, 0.005f, 0.10f);
+    if (g_cfg.aimMode == 0) {
+        g_cfg.pidKp = fclamp(g_cfg.pidKp + dir * 0.004f, 0.0f, 0.05f);
+    }
+    printf("[tweak] dir=%+.1f speed=%.2f~%.2f smooth=%.2f\n",
+           dir, g_cfg.aimSpeedMin, g_cfg.aimSpeedMax, g_cfg.smoothX);
+}
+
+// 简易版新手自瞄调节面板
+static void drawSimpleAimUi() {
+    ImGui::Checkbox("自瞄开关##aim", &g_cfg.aimEnabled);
+    if (g_cfg.aimEnabled) {
+        ImGui::TextDisabled("手感选择：先选一个预设，觉得不对再点下面微调");
+        if (ImGui::Button("保守（稳、慢）")) applyAimProfile(0);
+        ImGui::SameLine();
+        if (ImGui::Button("均衡（推荐）")) applyAimProfile(1);
+        ImGui::SameLine();
+        if (ImGui::Button("激进（快、略晃）")) applyAimProfile(2);
+
+        ImGui::Separator();
+        ImGui::Text("用着不太对？点这里微调：");
+        if (ImGui::Button("自瞄太软 / 跟不住（加快）")) tweakAim(+1.0f);
+        ImGui::SameLine();
+        if (ImGui::Button("自瞄太快 / 太晃（减慢）")) tweakAim(-1.0f);
+        ImGui::TextDisabled("每点一下只调一点点，反复点到手感合适为止");
+
+        ImGui::Separator();
+        ImGui::Text("当前手感：速度 %0.1f~%.1f  平滑 %.2f  死区 %.3f",
+                    g_cfg.aimSpeedMin, g_cfg.aimSpeedMax, g_cfg.smoothX, g_cfg.deadZone);
+        ImGui::TextDisabled("注：锁头部/锁身子等进阶到“专业”切换后调节");
+    }
+}
+
 static void drawControlPanel() {
     ImGui::SetNextWindowPos(ImVec2(20, 80), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(360, 580), ImGuiCond_FirstUseEver);
@@ -1375,6 +1464,14 @@ static void drawControlPanel() {
     ImGui::Text("帧源: %llu FPS | 推理: %llu FPS",
                 (unsigned long long)g_srcFps.load(),
                 (unsigned long long)g_inferFps.load());
+    ImGui::Separator();
+
+    // ===== UI 模式切换：新手简易版 / 专业版 =====
+    ImGui::Text("UI 模式:");
+    ImGui::SameLine();
+    if (ImGui::RadioButton("简易（新手）", g_simpleUi)) g_simpleUi = true;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("专业（全部参数）", !g_simpleUi)) g_simpleUi = false;
     ImGui::Separator();
 
     // ===== 推理分类 =====
@@ -1495,6 +1592,11 @@ static void drawControlPanel() {
     ImGui::Separator();
 
     // ===== 自瞄分类 =====
+    if (g_simpleUi) {
+        // 简易版：新手一键自瞄调节（档位预设 + 快/慢微调）
+        drawSimpleAimUi();
+        ImGui::Separator();
+    } else
     if (ImGui::CollapsingHeader("自瞄", ImGuiTreeNodeFlags_DefaultOpen)) {
         // 注意：显示标签必须与折叠头区分 —— 若 Checkbox 与 CollapsingHeader("自瞄")
         // 显示文本相同，二者会在 ImGui 内部被当作同一控件（同 label 同 ID），
