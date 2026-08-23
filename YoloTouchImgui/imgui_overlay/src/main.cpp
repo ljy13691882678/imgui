@@ -692,12 +692,13 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
                 g_aimY = out.targetY;
             }
         } else {
-            // 目标丢失：通知主线程停止注入
+            // 目标丢失/自瞄锁定：通知主线程渐停注入。
+            // 只清 active，保留 g_gyroLastTargetPitch/Yaw 作为最近一次真实注入角记忆，
+            // 解锁重新追时基于上一真实角度接续，而非从 0 突跳，
+            // 避免陀螺仪注入角度 0↔值 反复突变造成“时拉时卡”。
             {
                 std::lock_guard<std::mutex> lock(g_gyroMutex);
                 g_gyroTargetActive = false;
-                g_gyroLastTargetPitch = 0.0f;
-                g_gyroLastTargetYaw = 0.0f;
                 g_gyroTargetDirReversed = false;
             }
             g_aimActive = false;
@@ -2168,14 +2169,22 @@ int main(int argc, char* argv[]) {
                 
                 g_gyroSmoothPitch += pitchAlpha * pitchDiff;
                 g_gyroSmoothYaw   += yawAlpha * yawDiff;
+                // 渐停式：目标已基本对准（残余角极小）直接吸住，
+                // 避免慢速 EMA 永远差一点点而持续微注入造成发飘/卡顿
+                if (std::fabs(pitchDiff) < 0.3f && std::fabs(yawDiff) < 0.3f) {
+                    g_gyroSmoothPitch = g_gyroTargetPitch;
+                    g_gyroSmoothYaw   = g_gyroTargetYaw;
+                }
                 touch_gyro_apply(true, g_gyroSmoothPitch, g_gyroSmoothYaw);
             } else if (!g_gyroTargetActive) {
+                // 渐停式锁定：锁定后不硬切归零，而是按阶梯衰减、每帧持续注入当前衰减值；
+                // 直到残余角足够小(<0.3°)才吸住归零停注，杜绝准星“咔”的突变与长尾毛毛刺。
                 g_gyroSmoothPitch *= 0.85f;
                 g_gyroSmoothYaw   *= 0.85f;
                 g_gyroTargetDirReversed = false;
                 float mag = std::sqrt(g_gyroSmoothPitch*g_gyroSmoothPitch
                                     + g_gyroSmoothYaw*g_gyroSmoothYaw);
-                if (mag < 0.01f) {
+                if (mag < 0.3f) {
                     touch_gyro_stop();
                     g_gyroSmoothPitch = 0.0f;
                     g_gyroSmoothYaw   = 0.0f;
