@@ -65,14 +65,24 @@ public:
         float errX = (px - screenCx) * scrW;
         float errY = (py - screenCy) * scrH;
 
-        // 收敛：进入像素阈值框内停止拖拽
-        if (std::fabs(errX) < cfg.convergeThresh && std::fabs(errY) < cfg.convergeThresh) {
-            m_lastX = 0.0f; m_lastY = 0.0f;
-            return out;
-        }
-        // 归一化死区
+        // 锁住滞回（hysteresis）：进入死区/收敛阈值框即锁死停住，
+        // 需误差明显超出 band*阈值 才解锁恢复，杜绝在阈值边界反复启停造成的“时拉时卡”抽筋。
         float dist = std::sqrt(errX * errX + errY * errY);
-        if (dist < cfg.deadZone * std::min(scrW, scrH)) {
+        const float band = 2.0f;
+        bool inside = (std::fabs(errX) < cfg.convergeThresh && std::fabs(errY) < cfg.convergeThresh) ||
+                      (dist < cfg.deadZone * std::min(scrW, scrH));
+        if (m_locked) {
+            // 已锁定：只要误差仍处于 band*阈值 的保留带内就保持停住（不抬手、不重按）
+            bool insideKeep =
+                (std::fabs(errX) < cfg.convergeThresh * band && std::fabs(errY) < cfg.convergeThresh * band) ||
+                (dist < cfg.deadZone * std::min(scrW, scrH) * band);
+            if (insideKeep) {
+                m_lastX = 0.0f; m_lastY = 0.0f;
+                return out;
+            }
+            m_locked = false;  // 目标已明显偏离，解除锁定并重新追
+        } else if (inside) {
+            m_locked = true;
             m_lastX = 0.0f; m_lastY = 0.0f;
             return out;
         }
@@ -121,12 +131,14 @@ public:
         m_prevErrX = 0.0f; m_prevErrY = 0.0f;
         m_integralX = 0.0f; m_integralY = 0.0f;
         m_lastX = 0.0f; m_lastY = 0.0f;
+        m_locked = false;
     }
 
 private:
     float m_prevErrX = 0.0f, m_prevErrY = 0.0f;
     float m_integralX = 0.0f, m_integralY = 0.0f;
     float m_lastX = 0.0f, m_lastY = 0.0f;
+    bool  m_locked = false;      // 收敛锁住滞回：锁定后需误差明显超阈值才解锁
 };
 
 // 贝塞尔自瞄控制器（slow-fast-slow 缓动移动，像素空间计算，输出归一化增量）
@@ -143,8 +155,22 @@ public:
         float errX = (px - screenCx) * scrW;
         float errY = (py - screenCy) * scrH;
 
-        // 收敛：进入像素阈值框内停止拖拽
-        if (std::fabs(errX) < cfg.convergeThresh && std::fabs(errY) < cfg.convergeThresh) {
+        // 锁住滞回（hysteresis）：进入阈值框即锁死停住，需误差明显超 2*阈值 才解锁
+        bool inside = (std::fabs(errX) < cfg.convergeThresh && std::fabs(errY) < cfg.convergeThresh);
+        if (m_locked) {
+            bool insideKeep = (std::fabs(errX) < cfg.convergeThresh * 2.0f &&
+                               std::fabs(errY) < cfg.convergeThresh * 2.0f);
+            if (insideKeep) {
+                m_lastX = 0.0f; m_lastY = 0.0f;
+                m_prevMoveX = 0.0f; m_prevMoveY = 0.0f;
+                m_mover.cancel();
+                m_lastTrackId = t.trackId;
+                m_cooldownUntil = 0;
+                return out;
+            }
+            m_locked = false;  // 目标已明显偏离，解除锁定重新追
+        } else if (inside) {
+            m_locked = true;
             m_lastX = 0.0f; m_lastY = 0.0f;
             m_prevMoveX = 0.0f; m_prevMoveY = 0.0f;
             m_mover.cancel();
@@ -251,6 +277,7 @@ public:
         m_prevMoveX = 0.0f; m_prevMoveY = 0.0f;
         m_lastTrackId = -1;
         m_cooldownUntil = 0;
+        m_locked = false;
     }
 
 private:
@@ -264,4 +291,5 @@ private:
     float m_prevMoveX = 0.0f, m_prevMoveY = 0.0f;
     int   m_lastTrackId = -1;
     long long m_cooldownUntil = 0;  // 过冲后冷却截止时间
+    bool  m_locked = false;          // 收敛锁住滞回
 };
