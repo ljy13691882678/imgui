@@ -36,6 +36,13 @@ LOCAL_MODULE := imgui
 LOCAL_CFLAGS := -std=c++17
 LOCAL_CPPFLAGS := -std=c++17
 
+# 坐标解密/Unicorn 的可执行 TLS 段必须原生 TLS（不能 emutls）：
+# 关闭模拟 TLS，让 main.cpp 里的 alignas(64) thread_local 落到真实 .tbss，
+# 才能把可执行文件 PT_TLS p_align 抬到 64，满足 ARM64 Bionic loader
+# ("TLS segment is underaligned") 的加载要求。
+LOCAL_CPPFLAGS += -fno-emulated-tls
+LOCAL_CFLAGS += -fno-emulated-tls
+
 # T3 验证 SDK 依赖异常与 RTTI
 LOCAL_CPPFLAGS += -fexceptions -frtti
 

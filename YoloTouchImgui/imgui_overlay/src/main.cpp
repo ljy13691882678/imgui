@@ -40,6 +40,14 @@ bool main_thread_flag = true;
 int abs_ScreenX = 0;
 int abs_ScreenY = 0;
 
+// ARM64 Bionic 要求可执行文件的静态 TLS 段对齐至少为 64 字节。
+// Unicorn 等静态库中的 .tbss (thread_local BSS) 段对齐不足(8 字节)，
+// 会导致装载时 SIGABRT: "executable's TLS segment is underaligned"。
+// 配合 Android.mk 的 -fno-emulated-tls，让该 alignas(64) thread_local
+// 以原生 TLS 落到真实 .tbss，把 PT_TLS p_align 抬到 64。
+// 必须在 main() 里用 volatile 锚定读取，避免 --gc-sections 把该 TLS 段清除。
+alignas(64) thread_local int g_tls_align_dummy = 0;
+
 // 当前推理引擎（main 创建，推理线程只读调用）
 static InferenceEngine* g_engine = nullptr;
 static std::atomic<bool> g_engineReady{false};
@@ -1995,6 +2003,15 @@ static void drawLoginWindow() {
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
+    // 保持 g_tls_align_dummy 存活：--gc-sections 会移除未被引用的 TLS 段，
+    // 使可执行文件 PT_TLS 对齐跌回 8，ARM64 Bionic loader 以 SIGABRT 拒绝装载
+    // ("TLS segment is underaligned")。这里用 volatile 局部变量承接 thread_local
+    // 的读取，使访问指令无法被优化器消除，符号引用保留，TLS 段成为 GC root，
+    // PT_TLS p_align 得以保持在 64。零副作用锚定读取。
+    {
+        volatile int tls_anchor = g_tls_align_dummy;
+        (void)tls_anchor;
+    }
     // 参数：model_path shm_path [workdir] [card]
     if (argc < 3) {
         printf("Usage: %s <model.tflite> <shm_path> [workdir] [card]\n", argv[0]);
