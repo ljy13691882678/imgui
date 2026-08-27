@@ -709,13 +709,15 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
 void Loop() {
     MemRW rw;
     while (memEspRunning()) {
+        // —— 防机制：驱动未正常连接时，一律不允许任何内核读写透视 ——
+        // 只有 TIME_Driver 已连接才允许继续（读 libUE4 模块内存、解析人物/物资）。
         rw.connected = TIME_Driver && TIME_Driver->IsConnected();
         if (!rw.connected) {
             MemEspSnapshot s;
             s.status = "驱动未连接";
             std::lock_guard<std::mutex> lk(gSnapMutex);
             gSnap = s;
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::this_thread::sleep_for(std::chrono::milliseconds(700));
             continue;
         }
         if (rw.pid <= 0) {
@@ -769,9 +771,16 @@ bool memEspRunning() {
 }
 
 bool memEspGetSnapshot(MemEspSnapshot &out) {
-    std::lock_guard<std::mutex> lk(gSnapMutex);
+    // 用 try_lock：渲染主线程绝不因等待快照锁而阻塞，
+    // 避免内存读线程异常/长期持锁时悬浮窗冻结、无法交互。
+    if (!gSnapMutex.try_lock())
+        return false;
     out = gSnap;
-    return out.ts != 0 && !out.status.empty();
+    gSnapMutex.unlock();
+    // 只要有状态即视为“已发布快照”：
+    // - 面板据此显示真实状态（驱动未连接 / 未找到游戏 / DX: N人N物）
+    // - 绘制侧另行判断 ts（>0 才真正投影绘制），未连接时 ts=0 自动跳过
+    return !out.status.empty();
 }
 
 // ============================================================================
