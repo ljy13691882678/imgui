@@ -337,11 +337,12 @@ class CaptureService : Service() {
         }
 
         // 2. 解压 imgui 可执行文件
+        // 注意：必须【每次都覆盖】。覆盖安装(adb install -r)时应用数据区的旧
+        // /data/user/0/.../files/bin/imgui 不会自动更新；若仅在不存在时才解压，
+        // 每次启动都会跑上一版的陈旧二进制，导致本机验证/交付拿到错误版本。
         val imgui = File(binDir, ASSET_IMGUI)
-        if (!imgui.exists() || imgui.length() == 0L) {
-            assets.open("$ASSET_NATIVE_DIR/$ASSET_IMGUI").use { input ->
-                FileOutputStream(imgui).use { output -> input.copyTo(output) }
-            }
+        assets.open("$ASSET_NATIVE_DIR/$ASSET_IMGUI").use { input ->
+            FileOutputStream(imgui).use { output -> input.copyTo(output) }
         }
         imgui.setExecutable(true, true)
 
