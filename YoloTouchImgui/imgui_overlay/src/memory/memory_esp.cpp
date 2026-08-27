@@ -5,6 +5,7 @@
 
 #include "time_driver.h"
 #include "item_database.h"
+#include "udp_actors.h"
 
 #include "ImGui/imgui.h"
 
@@ -440,6 +441,7 @@ static std::thread gThread;
 static std::atomic<bool> gRun{false};
 static MemEspSnapshot gSnap;
 static std::mutex gSnapMutex;
+static std::atomic<bool> gUdpDecrypt{false}; // UDP 明文解包绘制开关
 
 // ============================================================================
 // 快照采集
@@ -579,7 +581,16 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
                 snap.camera.FOV = fov > 1.0f ? fov : 90.0f;
             }
             const uint64_t myPawn = rw.read<uint64_t>(pc + dfmoff::AcknowledgedPawn);
-            if (myPawn) snap.myTeam = GetTeamId(rw, myPawn);
+            if (myPawn) {
+                snap.myTeam = GetTeamId(rw, myPawn);
+                // UDP 解包用自机坐标锚定原点；这里同时留存当前自机坐标供面板显示
+                const uint64_t pmrc = rw.read<uint64_t>(myPawn + dfmoff::RootComponent);
+                if (pmrc) {
+                    MemVec3 sp{};
+                    if (rw.RM(sp, pmrc + dfmoff::Translation))
+                        snap.selfPos = sp;
+                }
+            }
         } else {
             snap.status = "未取到相机";
         }
@@ -706,6 +717,39 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
     snap.status = st;
 }
 
+// UDP 明文解包绘制：喂给 udp_actors 自机内存坐标(用于原点对齐)，
+// 并把解出的真实世界坐标人物合并进同一快照。坐标是明文真实帧，不随内存加密偏移。
+inline void FeedUdp(MemEspSnapshot &snap) {
+    g_Config.EnableUdpDecrypt = gUdpDecrypt.load();
+    const bool on = gUdpDecrypt.load();
+
+    const MemVec3 &sp = snap.selfPos;
+    const bool haveSelf = std::isfinite(sp.x) && std::isfinite(sp.y) && std::isfinite(sp.z) &&
+                          (std::fabs(sp.x) + std::fabs(sp.y) + std::fabs(sp.z)) > 1.0f;
+    const Vector3 memSelf = {sp.x, sp.y, sp.z};
+    // 关闭时也要调用 Tick(nullptr) 让内部 StopCapture 停掉 tcpdump 子进程
+    UdpActors::Tick(on && haveSelf ? &memSelf : nullptr, /*approximate=*/false);
+    if (!on) return;
+
+    for (const UdpActors::ActorPose &pose : UdpActors::Snapshot()) {
+        if (!std::isfinite(pose.world.x) || !std::isfinite(pose.world.y) || !std::isfinite(pose.world.z))
+            continue;
+        MemEspPlayer P;
+        P.actor = UdpActors::ActorId(pose.channel, pose.slot);
+        P.cat = 1; // 真人
+        P.teamId = 0;
+        P.health = 100.0f;
+        P.maxHealth = 100.0f;
+        P.alive = true;
+        P.worldPos = {pose.world.x, pose.world.y, pose.world.z};
+        P.hasBones = false; // UDP 无骨骼，走身高推算方框
+        const char *nm = pose.name.empty() ? "UDP" : pose.name.c_str();
+        snprintf(P.name, sizeof(P.name), "%s", nm);
+        snap.players.push_back(P);
+        ++snap.playerCount;
+    }
+}
+
 void Loop() {
     MemRW rw;
     while (memEspRunning()) {
@@ -745,6 +789,7 @@ void Loop() {
 
         MemEspSnapshot s;
         Capture(rw, s);
+        FeedUdp(s); // UDP 明文解包：自机锚点 + 合入 UDP 人物
         {
             std::lock_guard<std::mutex> lk(gSnapMutex);
             gSnap = std::move(s);
@@ -1029,4 +1074,26 @@ void memEspDraw(ImDrawList *draw, const MemEspDrawCfg &cfg, float sx, float sy) 
     }
 
     (void)anyDraw;
+}
+
+// ============================================================================
+// UDP 明文解包：开关 / 读取状态
+// ============================================================================
+void memEspSetUdpDecrypt(bool on) {
+    gUdpDecrypt.store(on);
+}
+
+bool memEspGetUdpStats(MemEspUdpStats &out) {
+    out = MemEspUdpStats();
+    out.enabled = gUdpDecrypt.load();
+    const UdpActors::Stats st = UdpActors::GetStats();
+    out.capturing = st.capturing;
+    out.originValid = st.originValid;
+    out.poses = st.poses;
+    out.names = st.names;
+    out.mvOk = st.mvOk;
+    out.mvFails = st.mvFails;
+    out.packets = st.packets;
+    out.gamePackets = st.gamePackets;
+    return true;
 }

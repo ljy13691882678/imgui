@@ -1822,6 +1822,46 @@ static void drawControlPanel() {
         ImGui::SameLine(); ImGui::Checkbox("容器", &g_memEspCfg.container);
         ImGui::Checkbox("尸体袋", &g_memEspCfg.deadbody);
         ImGui::SameLine(); ImGui::Checkbox("保险箱", &g_memEspCfg.safebox);
+        // ===== UDP 明文解包：不偏框的真实坐标 + 读取状态显示框 =====
+        ImGui::Separator();
+        ImGui::Text("UDP解包");
+        ImGui::SameLine();
+        static bool g_udpOn = false;
+        if (ImGui::Checkbox("UDP解密", &g_udpOn)) {
+            memEspSetUdpDecrypt(g_udpOn);
+            printf("[memesp] udp decrypt %s\n", g_udpOn ? "ON" : "OFF");
+        }
+        {
+            MemEspSnapshot st;
+            memEspGetSnapshot(st);
+            MemEspUdpStats us;
+            memEspGetUdpStats(us);
+
+            char box[512];
+            int off = 0;
+            off += snprintf(box + off, sizeof(box) - (size_t)off,
+                            "自机坐标: (%.1f, %.1f, %.1f)\n", st.selfPos.x, st.selfPos.y, st.selfPos.z);
+            off += snprintf(box + off, sizeof(box) - (size_t)off,
+                            "相机坐标: (%.1f, %.1f, %.1f)\n",
+                            st.camera.Location.x, st.camera.Location.y, st.camera.Location.z);
+            off += snprintf(box + off, sizeof(box) - (size_t)off,
+                            "状态: %s | %s%s\n",
+                            us.capturing ? "抓包中" : "未抓包",
+                            us.originValid ? "原点已对齐" : "原点未对齐",
+                            us.enabled ? " | 已开启" : " | 已关闭");
+            off += snprintf(box + off, sizeof(box) - (size_t)off,
+                            "人物%d 名字%d 包%d/游戏%d 解析成功%d/失败%d\n",
+                            us.poses, us.names, us.packets, us.gamePackets, us.mvOk, us.mvFails);
+
+            const ImVec4 ucol = (us.enabled && us.poses > 0)
+                                    ? ImVec4(0.40f, 1.0f, 0.40f, 1.0f)
+                                    : ImVec4(0.90f, 0.90f, 0.90f, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, ucol);
+            ImGui::InputTextMultiline("##udpBox", box, sizeof(box),
+                                      ImVec2(-1.0f, 4 * ImGui::GetTextLineHeightWithSpacing() + 10.0f),
+                                      ImGuiInputTextFlags_ReadOnly);
+            ImGui::PopStyleColor();
+        }
     }
     ImGui::End();
 }

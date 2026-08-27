@@ -87,6 +87,7 @@ struct MemEspLoot {
 struct MemEspSnapshot {
     int64_t ts = 0;
     MemCamera camera{};
+    MemVec3   selfPos{0.0f, 0.0f, 0.0f}; // 本地自机世界坐标 (显示用)
     int   myTeam = 0;
     int   actorCount = 0;
     int   playerCount = 0;
@@ -94,6 +95,19 @@ struct MemEspSnapshot {
     std::vector<MemEspPlayer> players;
     std::vector<MemEspLoot>   loots;
     std::string status;
+};
+
+// UDP 解密读取状态快照 (来自 udp_actors.h Stats，供悬浮窗显示当前坐标与读取状态)
+struct MemEspUdpStats {
+    bool enabled = false;
+    bool capturing = false;   // 是否已在抓包(tcpdump)
+    bool originValid = false; // 是否已通过自机坐标锁定原点对齐
+    int  poses = 0;           // 已解出的人物数
+    int  names = 0;           // 已解析昵称数
+    int  mvOk = 0;            // 移动解析成功次数
+    int  mvFails = 0;         // 移动解析失败次数
+    long packets = 0;         // 收到包总数
+    long gamePackets = 0;     // 游戏包数
 };
 
 // 物资分类 (与参考 dfm_classification.h 一致)
@@ -117,3 +131,8 @@ bool memEspGetSnapshot(MemEspSnapshot& out);
 
 // 绘制到 drawlist；sx/sy = 悬浮窗屏幕尺寸 (native_window_screen_x/y)
 void memEspDraw(ImDrawList* draw, const MemEspDrawCfg& cfg, float sx, float sy);
+
+// UDP 明文解包绘制开关（false 时立即停抓包）
+void memEspSetUdpDecrypt(bool on);
+// 取 UDP 解密读取状态（悬浮窗“当前坐标/读取状态”显示框用）
+bool memEspGetUdpStats(MemEspUdpStats& out);
