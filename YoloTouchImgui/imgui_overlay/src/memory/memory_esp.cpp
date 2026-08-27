@@ -556,6 +556,7 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
     snap.ts = (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now().time_since_epoch()).count();
 
+    uint64_t myPawn = 0; // 本机 Pawn：绘制时排除自己
     if (!rw.connected || !rw.libUE4) {
         snap.status = "驱动未连接或未找到 libUE4";
         return;
@@ -580,7 +581,7 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
                 rw.RM(fov, pov + 0x1C);
                 snap.camera.FOV = fov > 1.0f ? fov : 90.0f;
             }
-            const uint64_t myPawn = rw.read<uint64_t>(pc + dfmoff::AcknowledgedPawn);
+            myPawn = rw.read<uint64_t>(pc + dfmoff::AcknowledgedPawn);
             if (myPawn) {
                 snap.myTeam = GetTeamId(rw, myPawn);
                 // UDP 解包用自机坐标锚定原点；这里同时留存当前自机坐标供面板显示
@@ -612,6 +613,7 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
 
     for (uint64_t actor : actors) {
         if (!actor) continue;
+        if (actor == myPawn) continue; // 不绘制自己
 
         const std::string cls = GetClassName(rw, actor);
         if (cls.empty()) continue;
@@ -718,7 +720,8 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
 }
 
 // UDP 明文解包绘制：喂给 udp_actors 自机内存坐标(用于原点对齐)，
-// 并把解出的真实世界坐标人物合并进同一快照。坐标是明文真实帧，不随内存加密偏移。
+// 并把解出的真实世界坐标合并进内存透视的人物(保留内存人物UI与名字)，
+// 而不是单独用 "UDP" 命名重画方框。坐标是明文真实帧，不随内存加密偏移。
 inline void FeedUdp(MemEspSnapshot &snap) {
     g_Config.EnableUdpDecrypt = gUdpDecrypt.load();
     const bool on = gUdpDecrypt.load();
@@ -731,22 +734,65 @@ inline void FeedUdp(MemEspSnapshot &snap) {
     UdpActors::Tick(on && haveSelf ? &memSelf : nullptr, /*approximate=*/false);
     if (!on) return;
 
+    // 原点对齐前 UDP 世界坐标不可信(整体偏移会很远)，先不混入绘制。
+    const bool trusted = UdpActors::GetStats().originValid;
+    if (!trusted) return;
+
+    const float selfR2 = 200.0f * 200.0f;
+
     for (const UdpActors::ActorPose &pose : UdpActors::Snapshot()) {
         if (!std::isfinite(pose.world.x) || !std::isfinite(pose.world.y) || !std::isfinite(pose.world.z))
             continue;
-        MemEspPlayer P;
-        P.actor = UdpActors::ActorId(pose.channel, pose.slot);
-        P.cat = 1; // 真人
-        P.teamId = 0;
-        P.health = 100.0f;
-        P.maxHealth = 100.0f;
-        P.alive = true;
-        P.worldPos = {pose.world.x, pose.world.y, pose.world.z};
-        P.hasBones = false; // UDP 无骨骼，走身高推算方框
-        const char *nm = pose.name.empty() ? "UDP" : pose.name.c_str();
-        snprintf(P.name, sizeof(P.name), "%s", nm);
-        snap.players.push_back(P);
-        ++snap.playerCount;
+        // 自机：不绘制
+        if (haveSelf) {
+            const float dx = pose.world.x - sp.x, dy = pose.world.y - sp.y, dz = pose.world.z - sp.z;
+            if (dx * dx + dy * dy + dz * dz <= selfR2) continue;
+        }
+
+        MemEspPlayer UDPp;
+        UDPp.actor = UdpActors::ActorId(pose.channel, pose.slot);
+        UDPp.cat = 1; // 真人
+        UDPp.teamId = 0;
+        UDPp.health = 100.0f;
+        UDPp.maxHealth = 100.0f;
+        UDPp.alive = true;
+        UDPp.worldPos = {pose.world.x, pose.world.y, pose.world.z};
+        UDPp.hasBones = false;
+        const char *onm = pose.name.empty() ? "" : pose.name.c_str();
+        snprintf(UDPp.name, sizeof(UDPp.name), "%s", onm);
+
+        // 与最近的内存人物配对：命中则用 UDP 真实坐标修正其位置并整体平移骨骼，
+        // 继续沿用内存人物的方框/血条/名字/队伍 UI。
+        MemEspPlayer *best = nullptr;
+        float bestD = 1e18f;
+        for (MemEspPlayer &mp : snap.players) {
+            if (!mp.alive) continue;
+            const float dx = mp.worldPos.x - pose.world.x;
+            const float dy = mp.worldPos.y - pose.world.y;
+            const float dz = mp.worldPos.z - pose.world.z;
+            const float d = dx * dx + dy * dy + dz * dz;
+            if (d < bestD) { bestD = d; best = &mp; }
+        }
+        constexpr float kMergeTol2 = 4000.0f * 4000.0f; // ≤40m 视为同一人物
+        if (best && bestD <= kMergeTol2) {
+            const MemVec3 dv = {pose.world.x - best->worldPos.x,
+                                pose.world.y - best->worldPos.y,
+                                pose.world.z - best->worldPos.z};
+            best->worldPos = {pose.world.x, pose.world.y, pose.world.z};
+            for (int i = 0; i < MEM_ESP_BONE_COUNT; ++i) {
+                best->bones[i].x += dv.x;
+                best->bones[i].y += dv.y;
+                best->bones[i].z += dv.z;
+            }
+            // 内存名字为空时，用 UDP 网络昵称补上(仍走内存UI显示)
+            if (!best->name[0] && UDPp.name[0])
+                snprintf(best->name, sizeof(best->name), "%s", UDPp.name);
+        } else if (UDPp.name[0]) {
+            // 未配对到内存人物：作为独立人物用同一套 UI 显示(UDP 提供的网络昵称)
+            snap.players.push_back(UDPp);
+            ++snap.playerCount;
+        }
+        // 既没配对、又无昵称的 UDP 数据：忽略，避免凭空多出未知方框
     }
 }
 
@@ -866,17 +912,22 @@ inline bool ComputePlayerBox(const MemEspPlayer &p, const MemCamera &cam, float 
         return true;
     }
 
-    // 回退：投影脚底 + 身高
-    const MemVec2 feet = WorldToScreenCamera(p.worldPos, cam, sx, sy);
-    if (feet.x <= -9990.0f && feet.y <= -9990.0f) return false;
-    if (feet.x < 0.0f || feet.y < 0.0f || feet.x > sx || feet.y > sy) return false;
-    const MemVec3 head3 = {p.worldPos.x, p.worldPos.y, p.worldPos.z + 175.0f};
+    // 回退：无骨骼时用身高推算方框。RootComponent 平移一般约在人物身体中部，
+    // 因此以 worldPos 为中心向上下各外扩约半个人高(92cm≈成人半身高)，
+    // 使框能覆盖从脚底到头顶的整个人物，而不是从胸部开始往上。
+    constexpr float kHalfBody = 92.0f;
+    const MemVec2 ctr = WorldToScreenCamera(p.worldPos, cam, sx, sy);
+    if (ctr.x <= -9990.0f && ctr.y <= -9990.0f) return false;
+    if (ctr.x < 0.0f || ctr.y < 0.0f || ctr.x > sx || ctr.y > sy) return false;
+    const MemVec3 feet3 = {p.worldPos.x, p.worldPos.y, p.worldPos.z - kHalfBody};
+    const MemVec3 head3 = {p.worldPos.x, p.worldPos.y, p.worldPos.z + kHalfBody};
+    const MemVec2 feet = WorldToScreenCamera(feet3, cam, sx, sy);
     const MemVec2 head = WorldToScreenCamera(head3, cam, sx, sy);
     const float h = std::fabs(feet.y - head.y);
     if (h < 2.0f) return false;
     const float w = h * 0.5f;
-    mn = ImVec2(feet.x - w * 0.5f, head.y);
-    mx = ImVec2(feet.x + w * 0.5f, feet.y);
+    mn = ImVec2(ctr.x - w * 0.5f, std::fminf(head.y, feet.y));
+    mx = ImVec2(ctr.x + w * 0.5f, std::fmaxf(head.y, feet.y));
     return true;
 }
 
