@@ -57,8 +57,12 @@ constexpr uint64_t ActorCount             = 0xA0;
 constexpr uint64_t RootComponent          = 0x180;
 constexpr uint64_t ComponentToWorld       = 0x210;
 constexpr uint64_t Translation            = 0x220;
+constexpr uint64_t RelativeRotation       = 0x178; // RootComponent::RelativeRotation
+constexpr uint64_t RelativeScale3D        = 0x184; // RootComponent::RelativeScale3D
 
 // ACharacter
+constexpr uint64_t CapsuleComponent       = 0x3E0; // UCapsuleComponent*
+constexpr uint64_t CapsuleHalfHeight      = 0x5A0; // UCapsuleComponent::CapsuleHalfHeight
 constexpr uint64_t Mesh                   = 0x3D0;
 constexpr uint64_t Mesh_BoneArray         = 0x730;
 constexpr uint64_t BoneTransformStride    = 0x30;
@@ -515,12 +519,55 @@ inline void ReadPlayerName(const MemRW &rw, uint64_t actor, char *outName, size_
         snprintf(outName, cap, "%s", nm.c_str());
 }
 
+inline MemQuat BoneRotatorToQuat(const MemRotator &rotation) {
+    constexpr float kDegToRad = 3.14159265358979323846f / 180.0f;
+    const float pitch = rotation.x * kDegToRad * 0.5f;
+    const float yaw   = rotation.y * kDegToRad * 0.5f;
+    const float roll  = rotation.z * kDegToRad * 0.5f;
+    const float sp = std::sin(pitch), cp = std::cos(pitch);
+    const float sy = std::sin(yaw),   cy = std::cos(yaw);
+    const float sr = std::sin(roll),  cr = std::cos(roll);
+    MemQuat q;
+    q.W = cr * cp * cy + sr * sp * sy;
+    q.X = cr * sp * sy - sr * cp * cy;
+    q.Y = -cr * sp * cy - sr * cp * sy;
+    q.Z = cr * cp * sy - sr * sp * cy;
+    return q;
+}
+
+// 谨慎按参考 decrypt 路径重建骨骼组件变换，修正“整体偏上”：
+//   - 旋转只用 RootComponent.RelativeRotation(yaw-90) 转四元数；
+//   - 平移 = actor 世界坐标，Z 再减去胶囊半高，使骨骼从脚底抬起 (太过用 mesh ComponentToWorld 会整体偏上)；
+//   - 缩放用 RootComponent.RelativeScale3D。
 inline bool ReadBones(const MemRW &rw, MemEspPlayer &p) {
     const uint64_t mesh = rw.read<uint64_t>(p.actor + dfmoff::Mesh);
     if (!mesh) return false;
-    MemTransform ct = rw.read<MemTransform>(mesh + dfmoff::ComponentToWorld);
+
+    MemTransform ct;
     ct.translation = p.worldPos;
-    ct.Scale3D = MemVec3{1.0f, 1.0f, 1.0f};
+    {
+        const uint64_t root = rw.read<uint64_t>(p.actor + dfmoff::RootComponent);
+        MemRotator rot;
+        MemVec3 scale;
+        const bool haveRot = root && rw.RM(rot, root + dfmoff::RelativeRotation);
+        const bool haveScl = root && rw.RM(scale, root + dfmoff::RelativeScale3D);
+        if (haveRot) {
+            MemRotator adj = rot;
+            adj.y -= 90.0f; // 参考实现的 Yaw 坐标轴修正
+            ct.Rotation = BoneRotatorToQuat(adj);
+        } else {
+            ct.Rotation = MemQuat{};
+        }
+        ct.Scale3D = haveScl ? scale : MemVec3{1.0f, 1.0f, 1.0f};
+
+        float capsuleHalfHeight = 0.0f;
+        const uint64_t cap = rw.read<uint64_t>(p.actor + dfmoff::CapsuleComponent);
+        if (cap) rw.RM(capsuleHalfHeight, cap + dfmoff::CapsuleHalfHeight);
+        if (!std::isfinite(capsuleHalfHeight) || capsuleHalfHeight <= 0.0f || capsuleHalfHeight >= 100.0f)
+            capsuleHalfHeight = 88.0f; // 默认约 175cm 角色
+        ct.translation.z -= capsuleHalfHeight;
+    }
+
     const uint64_t rawBone = rw.read<uint64_t>(mesh + dfmoff::Mesh_BoneArray);
     const uint64_t boneArr = rawBone & 0x00FFFFFFFFFFFFFFULL;
     if (boneArr < 0x10000000ULL || boneArr >= 0x10000000000ULL) return false;
