@@ -10,6 +10,7 @@
 #include "inference/litert_engine.h"
 #include "injection/touch_core.h"
 #include "injection/time_driver_wrap.h"
+#include "memory/memory_esp.h"
 #include "auth/t3auth.h"
 
 #include <atomic>
@@ -56,6 +57,10 @@ static int g_rotation = 0;
 
 // 控制配置
 static AimConfig g_cfg;
+
+// 内存透视/物资 (三角洲行动): 主开关 + 绘制选项 + 线程生命周期
+static bool g_memEspOn = false;
+static MemEspDrawCfg g_memEspCfg;
 
 // 触摸注入
 static bool g_touchReady = false;
@@ -1778,6 +1783,46 @@ static void drawControlPanel() {
                                 diagDown ? " 按下" : "");
         }
     }
+    ImGui::Separator();
+
+    // ===== 内存透视/物资 (三角洲行动) =====
+    if (ImGui::CollapsingHeader("透视/物资", g_memEspOn ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
+        // 主开关：启动/停止内存读取线程
+        if (ImGui::Checkbox("内存透视/物资", &g_memEspOn)) {
+            if (g_memEspOn) { memEspStart(); printf("[memesp] start\n"); }
+            else            { memEspStop();  printf("[memesp] stop\n"); }
+        }
+        if (g_memEspOn) {
+            ImGui::SameLine();
+            if (memEspRunning()) {
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.3f, 1.0f), "读取中…");
+                MemEspSnapshot st;
+                if (memEspGetSnapshot(st) && !st.status.empty())
+                    ImGui::TextDisabled("状态: %s", st.status.c_str());
+            } else {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "启动中…");
+            }
+        }
+        // 人物选项
+        ImGui::Separator();
+        ImGui::Text("人物");
+        ImGui::SameLine(); ImGui::Checkbox("方框", &g_memEspCfg.box);
+        ImGui::SameLine(); ImGui::Checkbox("血条", &g_memEspCfg.health);
+        ImGui::SameLine(); ImGui::Checkbox("名字", &g_memEspCfg.name);
+        ImGui::Checkbox("队伍", &g_memEspCfg.team);
+        ImGui::SameLine(); ImGui::Checkbox("距离", &g_memEspCfg.dist);
+        ImGui::SameLine(); ImGui::Checkbox("骨骼", &g_memEspCfg.skeleton);
+        ImGui::Checkbox("忽略人机", &g_memEspCfg.ignoreBot);
+        ImGui::SameLine(); ImGui::Checkbox("忽略队友", &g_memEspCfg.ignoreTeam);
+        // 物资选项
+        ImGui::Separator();
+        ImGui::Text("物资");
+        ImGui::SameLine(); ImGui::Checkbox("地面物资", &g_memEspCfg.loot);
+        ImGui::SameLine(); ImGui::Checkbox("容器", &g_memEspCfg.container);
+        ImGui::Checkbox("尸体袋", &g_memEspCfg.deadbody);
+        ImGui::SameLine(); ImGui::Checkbox("保险箱", &g_memEspCfg.safebox);
+    }
     ImGui::End();
 }
 
@@ -1811,6 +1856,11 @@ void Layout_tick_UI() {
     else drawControlPanel();
     drawDetectionOverlay();
     drawZoneEditor();
+    // 内存透视/物资：独立于 YOLO 检测框绘制
+    if (g_memEspOn && memEspRunning()) {
+        memEspDraw(ImGui::GetBackgroundDrawList(), g_memEspCfg,
+                   (float)native_window_screen_x, (float)native_window_screen_y);
+    }
 }
 
 // ---------------------------------------------------------------------------

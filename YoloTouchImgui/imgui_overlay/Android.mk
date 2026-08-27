@@ -50,6 +50,7 @@ LOCAL_SRC_FILES := \
     src/injection/touch_core.cpp \
     src/injection/time_driver_wrap.cpp \
     src/injection/stderr_shim.cpp \
+    src/memory/memory_esp.cpp \
     src/t3sdk/t3sdk.cpp \
     src/auth/t3auth.cpp
 
