@@ -5,6 +5,7 @@
 
 #include "time_driver.h"
 #include "item_database.h"
+#include "jiemi/coord_decrypt.h"
 
 #include "ImGui/imgui.h"
 
@@ -442,6 +443,7 @@ inline std::string ReadPwdDigitArray(const MemRW &rw, uint64_t addr) {
 // ============================================================================
 static std::thread gThread;
 static std::atomic<bool> gRun{false};
+static std::atomic<bool> gUdpDecrypt{false}; // UDP 解密解包绘制开关
 static MemEspSnapshot gSnap;
 static std::mutex gSnapMutex;
 
@@ -477,6 +479,13 @@ inline bool GetWorldPos(const MemRW &rw, uint64_t actor, MemVec3 &out) {
     const uint64_t rc = rw.read<uint64_t>(actor + dfmoff::RootComponent);
     if (!rc) return false;
     if (!rw.RM(out, rc + dfmoff::Translation)) return false;
+    // UDP 解密解包绘制：用已解密的真实世界坐标覆盖明文坐标，防止游戏坐标加密导致的偏框。
+    // TryRead 内部有缓存，未就绪时返回 false，此时回退到明文坐标，保证能持续绘制。
+    if (gUdpDecrypt.load()) {
+        CoordDecrypt::Coordinate cd{};
+        if (CoordDecrypt::TryRead(rc, cd) && std::isfinite(cd.x) && std::isfinite(cd.y) && std::isfinite(cd.z))
+            out = {cd.x, cd.y, cd.z};
+    }
     return std::isfinite(out.x) && std::isfinite(out.y) && std::isfinite(out.z);
 }
 
@@ -790,6 +799,9 @@ void Loop() {
             }
         }
 
+        // UDP 解密解包绘制：每帧喂给解密引擎；未开启时 Tick 内部会 Reset 停机。
+        CoordDecrypt::Tick(gUdpDecrypt.load(), rw.libUE4);
+
         MemEspSnapshot s;
         Capture(rw, s);
         {
@@ -815,6 +827,14 @@ void memEspStop() {
 
 bool memEspRunning() {
     return gRun.load();
+}
+
+void memEspSetUdpDecrypt(bool enabled) {
+    gUdpDecrypt.store(enabled);
+}
+
+bool memEspUdpDecrypt() {
+    return gUdpDecrypt.load();
 }
 
 bool memEspGetSnapshot(MemEspSnapshot &out) {

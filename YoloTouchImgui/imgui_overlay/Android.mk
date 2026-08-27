@@ -1,5 +1,32 @@
 LOCAL_PATH := $(call my-dir)
 
+# ===================== Capstone 反汇编库（坐标解密 ring-service 发现） =====================
+include $(CLEAR_VARS)
+LOCAL_MODULE := jiemi_capstone
+LOCAL_C_INCLUDES += $(LOCAL_PATH)/3rd/capstone/include
+LOCAL_C_INCLUDES += $(LOCAL_PATH)/3rd/capstone
+LOCAL_CFLAGS := -DCAPSTONE_HAS_ARM64 -DCAPSTONE_USE_SYS_DYN_MEM -DCAPSTONE_AARCH64_COMPAT_HEADER
+LOCAL_SRC_FILES := \
+    3rd/capstone/cs.c \
+    3rd/capstone/utils.c \
+    3rd/capstone/MCInst.c \
+    3rd/capstone/MCInstrDesc.c \
+    3rd/capstone/MCRegisterInfo.c \
+    3rd/capstone/Mapping.c \
+    3rd/capstone/SStream.c \
+    3rd/capstone/arch/AArch64/AArch64BaseInfo.c \
+    3rd/capstone/arch/AArch64/AArch64Disassembler.c \
+    3rd/capstone/arch/AArch64/AArch64InstPrinter.c \
+    3rd/capstone/arch/AArch64/AArch64Mapping.c \
+    3rd/capstone/arch/AArch64/AArch64Module.c
+include $(BUILD_STATIC_LIBRARY)
+
+# ===================== Unicorn 模拟器库（坐标解密执行） =====================
+include $(CLEAR_VARS)
+LOCAL_MODULE := jiemi_unicorn
+LOCAL_SRC_FILES := 3rd/unicorn/lib/libunicorn.a
+include $(PREBUILT_STATIC_LIBRARY)
+
 include $(CLEAR_VARS)
 # 使用 opengl 绘制（1=opengl，0=vulkan）
 OPENGL_DRAW = 0
@@ -14,6 +41,11 @@ LOCAL_CPPFLAGS += -fexceptions -frtti
 
 LOCAL_CFLAGS += -DVK_USE_PLATFORM_ANDROID_KHR
 LOCAL_CPPFLAGS += -DVK_USE_PLATFORM_ANDROID_KHR
+
+# 坐标解密（jiemi）：启用 Unicorn 解密执行 + Capstone ARM64 反汇编
+LOCAL_CFLAGS += -DCAPSTONE_HAS_ARM64 -DCAPSTONE_USE_SYS_DYN_MEM -DCAPSTONE_AARCH64_COMPAT_HEADER
+LOCAL_CPPFLAGS += -DCAPSTONE_HAS_ARM64 -DCAPSTONE_USE_SYS_DYN_MEM -DCAPSTONE_AARCH64_COMPAT_HEADER
+LOCAL_CPPFLAGS += -DJIEMI_WITH_UNICORN
 
 ifeq ($(OPENGL_DRAW), 1)
     LOCAL_CFLAGS += -DUSE_OPENGL
@@ -32,6 +64,9 @@ LOCAL_C_INCLUDES += $(LOCAL_PATH)/src
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/src/inference
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/src/injection
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/driver
+LOCAL_C_INCLUDES += $(LOCAL_PATH)/3rd/capstone/include
+LOCAL_C_INCLUDES += $(LOCAL_PATH)/3rd/capstone
+LOCAL_C_INCLUDES += $(LOCAL_PATH)/3rd/unicorn
 
 # 源码
 LOCAL_SRC_FILES := \

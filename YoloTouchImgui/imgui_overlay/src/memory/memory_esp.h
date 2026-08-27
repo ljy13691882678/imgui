@@ -112,6 +112,11 @@ void memEspStart();
 void memEspStop();
 bool memEspRunning();
 
+// UDP 解密解包绘制开关：开启后人物/物资坐标会用 CoordDecrypt 解密的真实坐标覆盖明文坐标，
+// 防止游戏坐标加密导致的偏框。需在启动内存透视后生效。
+void memEspSetUdpDecrypt(bool enabled);
+bool memEspUdpDecrypt();
+
 // 取最新快照副本 (线程安全)，未连接/无数据返回 false
 bool memEspGetSnapshot(MemEspSnapshot& out);
 

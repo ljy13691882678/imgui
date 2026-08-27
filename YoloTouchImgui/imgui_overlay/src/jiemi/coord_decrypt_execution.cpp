@@ -18,7 +18,7 @@
 #include <vector>
 
 #if defined(JIEMI_WITH_UNICORN)
-#include <unicorn/unicorn.h>
+#include "unicorn.h" // 3rd/unicorn 解锁头为平铺布局，与参考的 unicorn/unicorn.h 对齐到 -I3rd/unicorn
 #endif
 
 namespace CoordDecrypt::detail
@@ -99,7 +99,7 @@ void StoreComponentPagePlan(const DecryptTask &task,
         return;
     std::lock_guard<std::mutex> lock(gPagePlanMutex);
     if (gComponentPagePlans.size() >= kMaximumComponentPagePlans &&
-        !gComponentPagePlans.contains(task.sceneComponent))
+        gComponentPagePlans.count(task.sceneComponent) == 0)
         gComponentPagePlans.clear();
     gComponentPagePlans[task.sceneComponent] = {
         task.environmentEpoch,
@@ -595,7 +595,7 @@ private:
 
         const uint64_t sourcePage = canonical & ~(kPageSize - 1);
         const uint64_t accessPage = address & ~(kPageSize - 1);
-        if (mappedAccessPages_.contains(accessPage))
+        if (mappedAccessPages_.count(accessPage) > 0)
             return true;
 
         auto backing = remotePageBackings_.find(sourcePage);
@@ -657,7 +657,7 @@ private:
 
     bool MapMirroredPage(uint64_t pageAddress, std::array<uint8_t, kPageSize> &page)
     {
-        if (mappedAccessPages_.contains(pageAddress))
+        if (mappedAccessPages_.count(pageAddress) > 0)
             return true;
 
         const uc_err mapError = uc_mem_map_ptr(engine_, pageAddress, kPageSize, UC_PROT_ALL, page.data());
