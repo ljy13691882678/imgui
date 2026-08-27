@@ -40,6 +40,13 @@ bool main_thread_flag = true;
 int abs_ScreenX = 0;
 int abs_ScreenY = 0;
 
+// ARM64 Bionic 要求可执行文件的静态 TLS 段对齐至少为 64 字节。
+// Unicorn 等静态库中的 .tbss (thread_local BSS) 段对齐不足(8 字节)，
+// 会导致装载时 SIGABRT: "executable's TLS segment is underaligned"。
+// 在可执行文件中放一个 alignas(64) 的 thread_local 变量，把整个 TLS
+// 段的 p_align 提升到 64，从而满足 loader 检查。
+alignas(64) thread_local int g_tls_align_dummy = 0;
+
 // 当前推理引擎（main 创建，推理线程只读调用）
 static InferenceEngine* g_engine = nullptr;
 static std::atomic<bool> g_engineReady{false};
