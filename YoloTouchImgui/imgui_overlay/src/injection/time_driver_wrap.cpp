@@ -3,6 +3,7 @@
 #include "time_driver.h"
 
 #include <stdio.h>
+#include <mutex>
 
 #ifdef ANDROID
 #include <android/log.h>
@@ -16,6 +17,13 @@
 
 static bool g_inited = false;
 static bool g_connected = false;
+
+// item 9: 统一驱动会话引用计数（线程安全）
+static std::mutex g_lifeMutex;
+static int        g_sessionRef = 0;
+// 各功能是否已持有会话（防止重复/过度释放导致把共享驱动提前退出）
+static bool g_gyroHeld  = false;
+static bool g_touchHeld = false;
 
 bool kdrv_init(void) {
     if (g_connected) return true;
@@ -37,6 +45,25 @@ bool kdrv_init(void) {
 
 bool kdrv_connected(void) { return g_connected && TIME_Driver && TIME_Driver->IsConnected(); }
 
+// item 9: 功能需要驱动时调用。首个 acquire 负责初始化驱动；返回当前会话引用数。
+int kdrv_acquire(void) {
+    std::lock_guard<std::mutex> lk(g_lifeMutex);
+    if (g_sessionRef == 0) {
+        if (!kdrv_init()) return 0; // 初始化失败不占引用
+    }
+    ++g_sessionRef;
+    return g_sessionRef;
+}
+
+// item 9: 功能不再需要驱动时调用。引用归零才真正退出驱动，
+// 避免多线程/多功能互相打断（如内存透视读取中把驱动退出）。
+void kdrv_release(void) {
+    std::lock_guard<std::mutex> lk(g_lifeMutex);
+    if (g_sessionRef <= 0) return;
+    if (--g_sessionRef == 0)
+        kdrv_exit();
+}
+
 uint32_t kdrv_version(void) {
     return TIME_Driver ? TIME_Driver->Get_Version() : 0;
 }
@@ -52,12 +79,14 @@ void kdrv_exit(void) {
 
 // ─── 内核陀螺仪 ───
 bool kdrv_gyro_init(void) {
-    if (!kdrv_init()) return false;
+    if (g_gyroHeld) return true;
+    if (!kdrv_acquire()) return false;
     // 驱动仅用于陀螺仪自瞄：连接后立即关闭触摸接管（Touch_Disable），
     // 避免驱动 Init/Touch hook 拦截真实触摸，导致系统/游戏（屏幕触控）与
     // /dev/input 读取（ImGui 交互）都收不到触摸事件。
     TIME_Driver->Touch_Disable();
     bool ok = TIME_Driver->Gyro_Init();
+    if (ok) g_gyroHeld = true;
     LOGD("kdrv gyro init ok=%d", (int)ok);
     return ok;
 }

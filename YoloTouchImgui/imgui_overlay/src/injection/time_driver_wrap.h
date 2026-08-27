@@ -16,6 +16,15 @@ bool     kdrv_connected(void);         // 是否已连接
 uint32_t kdrv_version(void);           // 驱动版本号
 void     kdrv_exit(void);              // 退出驱动
 
+// item 9: 统一管理 TimeDriver 多线程生命周期。
+// 陀螺仪 / 触摸 / 内存透视等多个功能共享同一个内核驱动，各自独立调用
+// kdrv_init/kdrv_exit 会造成竞态或把仍在使用的驱动提前退出。统一改为：
+//   功能需要驱动时调用 kdrv_acquire()（负责首次初始化并递增会话引用）；
+//   功能不再需要时调用 kdrv_release()（递减引用，归零才真正退出驱动）。
+// 返回 acquire 后当前的会话引用计数。
+int  kdrv_acquire(void);
+void kdrv_release(void);
+
 // 内核陀螺仪
 bool kdrv_gyro_init(void);                             // 连接驱动 + 关闭触摸接管 + 初始化陀螺仪 hook
 void kdrv_gyro_set(bool enable, float pitch, float yaw,

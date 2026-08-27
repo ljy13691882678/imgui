@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <string>
 #include <vector>
+#include <memory>
 
 struct ImDrawList;
 
@@ -29,7 +30,12 @@ struct MemTransform {
     MemQuat    Rotation{};
     MemVec3    translation{0.0f, 0.0f, 0.0f};
     MemVec3    Scale3D{1.0f, 1.0f, 1.0f};
+    // 补齐到 0x30 (48B) 布局，与骨骼元素步长 BoneTransformStride=0x30 一致。
+    // 缺失该尾随 padding 会让 sizeof(MemTransform)=0x28，与 0x30 骨骼布局不匹配，
+    // 读取后填充/对齐错误易导致骨骼偏移或整体变形。
+    uint8_t    Padding[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 };
+static_assert(sizeof(MemTransform) == 0x30, "MemTransform must be 0x30 (48B) layout");
 struct MemCamera {
     MemVec3    Location{0.0f, 0.0f, 0.0f};
     float      Padding_0C = 0.0f;
@@ -112,8 +118,16 @@ void memEspStart();
 void memEspStop();
 bool memEspRunning();
 
-// 取最新快照副本 (线程安全)，未连接/无数据返回 false
+// 版本/Build ID 偏移配置（item 6）：不同游戏版本可传入对应 BuildID 选择偏移表。
+// buildId 传 nullptr 或空串时使用默认偏移表。
+void memEspSetOffsetsForBuild(const char *buildId);
+
+// 取最新快照副本 (线程安全、无锁) 未连接/无数据返回 false
 bool memEspGetSnapshot(MemEspSnapshot& out);
+
+// 取当前快照的不可变共享指针 (原子发布，item 10)：
+// 渲染线程持有该指针即可安全读取，无需拷贝大 vector 也无需加锁。
+std::shared_ptr<const MemEspSnapshot> memEspGetSnapshotPtr();
 
 // 绘制到 drawlist；sx/sy = 悬浮窗屏幕尺寸 (native_window_screen_x/y)
 void memEspDraw(ImDrawList* draw, const MemEspDrawCfg& cfg, float sx, float sy);

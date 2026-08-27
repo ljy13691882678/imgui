@@ -4,6 +4,7 @@
 #include "memory_esp.h"
 
 #include "time_driver.h"
+#include "time_driver_wrap.h"
 #include "item_database.h"
 
 #include "ImGui/imgui.h"
@@ -18,6 +19,8 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <memory>
+#include <unordered_map>
 #include <cctype>
 #include <unistd.h>
 #include <dirent.h>
@@ -25,109 +28,127 @@
 #include <sys/types.h>
 
 // ============================================================================
-// DFM 内存偏移 (移植自 dfm_engine.h)
+// DFM 内存偏移配置 (item 6)
+// 偏移随游戏版本/Build ID 变化，这里集中成 DfmOffsets 表，运行时按 BuildID 选择，
+// 便于适配多个版本而不改动读取逻辑。
 // ============================================================================
-namespace dfmoff {
-constexpr uint64_t GWorld                 = 0x1C9C0A50;
-constexpr uint64_t GNames                 = 0x1CDCB8C0;
+struct DfmOffsets {
+    uint64_t GWorld = 0x1C9C0A50;
+    uint64_t GNames = 0x1CDCB8C0;
 
-// UWorld
-constexpr uint64_t PersistentLevel        = 0xF8;
-constexpr uint64_t OwningGameInstance     = 0x190;
+    // UWorld
+    uint64_t PersistentLevel = 0xF8;
+    uint64_t OwningGameInstance = 0x190;
 
-// UGameInstance
-constexpr uint64_t LocalPlayers           = 0x38;
+    // UGameInstance
+    uint64_t LocalPlayers = 0x38;
 
-// UPlayer->PlayerController
-constexpr uint64_t PlayerController       = 0x30;
+    // UPlayer->PlayerController
+    uint64_t PlayerController = 0x30;
 
-// APlayerController
-constexpr uint64_t AcknowledgedPawn       = 0x3F0;
-constexpr uint64_t PlayerCameraManager    = 0x408;
+    // APlayerController
+    uint64_t AcknowledgedPawn = 0x3F0;
+    uint64_t PlayerCameraManager = 0x408;
 
-// APlayerCameraManager
-constexpr uint64_t CameraCachePrivate     = 0x2BA0;
-constexpr uint64_t CamPOV                 = CameraCachePrivate + 0x10;
+    // APlayerCameraManager
+    uint64_t CameraCachePrivate = 0x2BA0;
+    uint64_t CamPOV = 0x2BA0 + 0x10;
 
-// ULevel
-constexpr uint64_t AActors                = 0x98;
-constexpr uint64_t ActorCount             = 0xA0;
+    // ULevel
+    uint64_t AActors = 0x98;
+    uint64_t ActorCount = 0xA0;
 
-// AActor / USceneComponent
-constexpr uint64_t RootComponent          = 0x180;
-constexpr uint64_t ComponentToWorld       = 0x210;
-constexpr uint64_t Translation            = 0x220;
-constexpr uint64_t RelativeRotation       = 0x178; // RootComponent::RelativeRotation
-constexpr uint64_t RelativeScale3D        = 0x184; // RootComponent::RelativeScale3D
+    // AActor / USceneComponent
+    uint64_t RootComponent = 0x180;
+    uint64_t ComponentToWorld = 0x210;
+    uint64_t Translation = 0x220;
+    uint64_t RelativeRotation = 0x178; // RootComponent::RelativeRotation
+    uint64_t RelativeScale3D = 0x184;  // RootComponent::RelativeScale3D
 
-// ACharacter
-constexpr uint64_t CapsuleComponent       = 0x3E0; // UCapsuleComponent*
-constexpr uint64_t CapsuleHalfHeight      = 0x5A0; // UCapsuleComponent::CapsuleHalfHeight
-constexpr uint64_t Mesh                   = 0x3D0;
-constexpr uint64_t Mesh_BoneArray         = 0x730;
-constexpr uint64_t BoneTransformStride    = 0x30;
+    // ACharacter
+    uint64_t CapsuleComponent = 0x3E0;   // UCapsuleComponent*
+    uint64_t CapsuleHalfHeight = 0x5A0;  // UCapsuleComponent::CapsuleHalfHeight
+    uint64_t Mesh = 0x3D0;
+    uint64_t Mesh_BoneArray = 0x730;
+    uint64_t BoneTransformStride = 0x30;
 
-// APawn / PlayerState
-constexpr uint64_t PlayerState            = 0x390;
-constexpr uint64_t PS_PlayerName          = 0x378;
-constexpr uint64_t PS_PlayerNamePrivate   = 0x470;
-constexpr uint64_t PS_bIsPlayerAI         = 0x510;
-constexpr uint64_t PS_TeamID              = 0x658;
+    // APawn / PlayerState
+    uint64_t PlayerState = 0x390;
+    uint64_t PS_PlayerName = 0x378;
+    uint64_t PS_PlayerNamePrivate = 0x470;
+    uint64_t PS_bIsPlayerAI = 0x510;
+    uint64_t PS_TeamID = 0x658;
 
-// AGPCharacterBase
-constexpr uint64_t HealthComp             = 0x10C8;
-constexpr uint64_t TeamComp               = 0x10D0;
-constexpr uint64_t TeamComp_TeamID        = 0x108;
-constexpr uint64_t BlackboardComp         = 0x1030;
-constexpr uint64_t BB_CharacterLiveStatus = 0x391;
+    // AGPCharacterBase
+    uint64_t HealthComp = 0x10C8;
+    uint64_t TeamComp = 0x10D0;
+    uint64_t TeamComp_TeamID = 0x108;
+    uint64_t BlackboardComp = 0x1030;
+    uint64_t BB_CharacterLiveStatus = 0x391;
 
-// UGPAttributeSetHealth (相对 HealthSet)
-constexpr uint64_t HealthSet              = 0x280;
-constexpr uint64_t Attr_Health            = 0x30;
-constexpr uint64_t Attr_MaxHealth         = 0x48;
-constexpr uint64_t Attr_Current           = 0xC;
+    // UGPAttributeSetHealth (相对 HealthSet)
+    uint64_t HealthSet = 0x280;
+    uint64_t Attr_Health = 0x30;
+    uint64_t Attr_MaxHealth = 0x48;
+    uint64_t Attr_Current = 0xC;
 
-// 存活状态枚举
-constexpr int Live_Alive = 1;
-constexpr int Live_Death = 2;
-constexpr int Live_Downed = 3;
+    // 存活状态枚举 (item 6: 随版本可能不同)
+    int Live_Alive = 1;
+    int Live_Death = 2;
+    int Live_Downed = 3;
 
-// UObject / FNamePool
-constexpr uint64_t UObject_ClassPrivate   = 0x8;
-constexpr uint64_t UObject_NamePrivate    = 0x1C;
-constexpr uint64_t FNamePool_Blocks       = 0x38;
-constexpr uint64_t FNamePool_Stride       = 0x2;
-constexpr uint32_t FNamePool_BlocksBit    = 18;
-constexpr uint64_t FNameEntry_Header      = 0x0;
+    // UObject / FNamePool
+    uint64_t UObject_ClassPrivate = 0x8;
+    uint64_t UObject_NamePrivate = 0x1C;
+    uint64_t FNamePool_Blocks = 0x38;
+    uint64_t FNamePool_Stride = 0x2;
+    uint32_t FNamePool_BlocksBit = 18;
+    uint64_t FNameEntry_Header = 0x0;
 
-// 物资
-constexpr uint64_t Pickup_InventoryIdName = 0xF98;
-constexpr uint64_t Pickup_ItemInfo        = 0x11E8;
-constexpr uint64_t ItemInfo_Category      = 0x10;
-constexpr uint64_t ItemInfo_Sequence      = 0x14;
-constexpr uint64_t ItemInfo_ItemCount     = 0x38;
-constexpr uint64_t Pickup_ValuePtr        = 0x11A8;
-constexpr uint64_t PickupValue_Value      = 0xDC;
+    // 物资
+    uint64_t Pickup_InventoryIdName = 0xF98;
+    uint64_t Pickup_ItemInfo = 0x11E8;
+    uint64_t ItemInfo_Category = 0x10;
+    uint64_t ItemInfo_Sequence = 0x14;
+    uint64_t ItemInfo_ItemCount = 0x38;
+    uint64_t Pickup_ValuePtr = 0x11A8;
+    uint64_t PickupValue_Value = 0xDC;
 
-constexpr uint64_t SIC_BoxId              = 0x1070;
-constexpr uint64_t SIC_ContainerType      = 0x10E0;
-constexpr uint64_t SIC_CachedOpenBox      = 0x1128;
-constexpr uint64_t SIC_bFinished          = 0x1158;
-constexpr uint64_t SIC_bSafeBoxUnlocked   = 0x1159;
+    uint64_t SIC_BoxId = 0x1070;
+    uint64_t SIC_ContainerType = 0x10E0;
+    uint64_t SIC_CachedOpenBox = 0x1128;
+    uint64_t SIC_bFinished = 0x1158;
+    uint64_t SIC_bSafeBoxUnlocked = 0x1159;
 
-constexpr uint64_t OpenBox_RealSafeBoxPwd = 0x2478;
-constexpr uint64_t OpenBox_SafeBoxPwd     = 0x2460;
+    uint64_t OpenBox_RealSafeBoxPwd = 0x2478;
+    uint64_t OpenBox_SafeBoxPwd = 0x2460;
 
-constexpr uint64_t HackPC_Password        = 0x1074;
-constexpr uint64_t CodedLock_PwdStr       = 0x10E0;
+    uint64_t HackPC_Password = 0x1074;
+    uint64_t CodedLock_PwdStr = 0x10E0;
 
-constexpr uint64_t DeadBody_PlayerName    = 0x2520;
-constexpr uint64_t DeadBody_IsAI          = 0x2662;
-constexpr uint64_t DeadBody_Looted        = 0x2678;
-constexpr uint64_t DeadBody_OwnerPS       = 0x2680;
+    uint64_t DeadBody_PlayerName = 0x2520;
+    uint64_t DeadBody_IsAI = 0x2662;
+    uint64_t DeadBody_Looted = 0x2678;
+    uint64_t DeadBody_OwnerPS = 0x2680;
 
-constexpr int kDfmBoneIndices[15] = {31, 30, 1, 34, 6, 35, 7, 36, 8, 58, 62, 59, 63, 60, 64};
-} // namespace dfmoff
+    int kDfmBoneIndices[15] = {31, 30, 1, 34, 6, 35, 7, 36, 8, 58, 62, 59, 63, 60, 64};
+};
+
+// 当前生效偏移（默认构造即为当前版本默认表）
+static DfmOffsets g_Off;
+
+// BuildID → 偏移表选择 (item 6)。未识别/为空时回退默认表。
+void memEspSetOffsetsForBuild(const char *buildId) {
+    if (!buildId || !buildId[0])
+        return; // 保持默认
+    const std::string id(buildId);
+    // 示例：不同 BuildID 对应不同偏移表。识别到已知版本时替换 g_Off。
+    if (id == "current") {
+        // 默认表，无需改动
+        return;
+    }
+    // 其它未知 BuildID：保持当前默认表（扩展点，后续这里按 id 装载对应偏移）。
+}
 
 // ============================================================================
 // 工具：UTF16→UTF8、投影、四元数旋转、颜色
@@ -338,13 +359,57 @@ public:
     pid_t pid = 0;
     uint64_t libUE4 = 0;
 
+    // item 5: 保留失败状态与诊断地址（mutable 以便 const 读取接口记录）
+    mutable bool     lastError = false;
+    mutable uint64_t lastErrorAddr = 0;
+
     bool ok(uint64_t a) const { return connected && pid > 0 && a > 0x1000000ULL && a < 0x100000000000ULL; }
     bool R(uint64_t a, void *b, size_t n) const {
-        if (!ok(a) || !TIME_Driver) return false;
-        return TIME_Driver->Read_Memory_Fast(pid, a, b, n);
+        if (!ok(a) || !TIME_Driver) { lastError = true; lastErrorAddr = a; return false; }
+        const bool okr = TIME_Driver->Read_Memory_Fast(pid, a, b, n);
+        lastError = !okr;
+        lastErrorAddr = okr ? 0 : a;
+        return okr;
     }
     template <class T> bool RM(T &o, uint64_t a) const { return R(a, &o, sizeof(o)); }
     template <class T> T read(uint64_t a) const { T v{}; RM(v, a); return v; }
+
+    // item 8: 批量读取 N 个 {addr,size} 到连续 out 缓冲（长度 = sum(size)）。
+    // 使用 TIME_Driver->Read_Mem_Batch_Fast，item 数据按请求顺序连续写入 data[]。
+    // 失败时返回 false，调用方可回退到逐项读取。
+    struct BatchItem { uint64_t addr; size_t size; };
+    bool BatchRead(const BatchItem *items, size_t n, void *outBuf, size_t outBytes) const {
+        if (!connected || pid <= 0 || !TIME_Driver || n == 0 || n > MAX_BATCH_READ) {
+            lastError = true; lastErrorAddr = items && n ? items[0].addr : 0;
+            return false;
+        }
+        TIME_READ_MEM_BATCH_REQ req;
+        memset(&req, 0, sizeof(req));
+        req.pid = pid;
+        req.count = (uint32_t)n;
+        size_t off = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (items[i].size == 0 || off + items[i].size > BATCH_DATA_SIZE) {
+                lastError = true; lastErrorAddr = items[i].addr;
+                return false;
+            }
+            req.items[i].addr = (uintptr_t)items[i].addr;
+            req.items[i].size = (uint32_t)items[i].size;
+            off += items[i].size;
+        }
+        if (off > outBytes) { lastError = true; return false; }
+        const bool okr = TIME_Driver->Read_Mem_Batch_Fast(&req);
+        if (!okr) { lastError = true; lastErrorAddr = items[0].addr; return false; }
+        // 布局：每项数据按请求顺序连续存放于 req.data[]
+        size_t o = 0;
+        for (size_t i = 0; i < n; ++i) {
+            memcpy((uint8_t *)outBuf + o, req.data + o, items[i].size);
+            o += items[i].size;
+        }
+        lastError = false;
+        lastErrorAddr = 0;
+        return true;
+    }
 };
 } // namespace
 
@@ -352,6 +417,24 @@ public:
 // FName 解析
 // ============================================================================
 namespace {
+
+// item 8: FName/Class 缓存。仅快照线程单线程访问，无需加锁。
+// 进程重启（PID/基址重置）时需调用 ClearNameCaches() 清空，避免命中旧地址。
+static std::unordered_map<uint32_t, std::string> g_fnameCache;
+static std::unordered_map<uint64_t, std::string> g_classNameCache; // class 指针 -> 类名
+static constexpr size_t kNameCacheCap = 4096;
+
+inline void ClearNameCaches() {
+    g_fnameCache.clear();
+    g_classNameCache.clear();
+}
+inline void GuardNameCache(std::unordered_map<uint64_t, std::string> &m) {
+    if (m.size() > kNameCacheCap) m.clear();
+}
+inline void GuardNameCache(std::unordered_map<uint32_t, std::string> &m) {
+    if (m.size() > kNameCacheCap) m.clear();
+}
+
 // 三角洲 FName 字符串解密
 inline std::string DecryptName(std::string name) {
     const uint32_t len = (uint32_t)name.length();
@@ -376,7 +459,7 @@ inline std::string DecryptName(std::string name) {
 
 inline std::string GetFNameEntry(const MemRW &rw, uint64_t entry) {
     if (!entry) return "";
-    const uint16_t header = rw.read<uint16_t>(entry + dfmoff::FNameEntry_Header);
+    const uint16_t header = rw.read<uint16_t>(entry + g_Off.FNameEntry_Header);
     const uint32_t len = header >> 6;
     if (len == 0 || len > 127) return "";
     const bool wide = (header & 0x1) != 0;
@@ -393,21 +476,34 @@ inline std::string GetFNameEntry(const MemRW &rw, uint64_t entry) {
 }
 
 inline std::string ResolveFName(const MemRW &rw, uint32_t idx) {
-    const uint32_t blockId = idx >> dfmoff::FNamePool_BlocksBit;
-    const uint32_t offset = idx & ((1u << dfmoff::FNamePool_BlocksBit) - 1u);
-    if (blockId >= 8192 || !rw.libUE4) return "";
-    const uint64_t pool = rw.libUE4 + dfmoff::GNames;
-    const uint64_t block = rw.read<uint64_t>(pool + dfmoff::FNamePool_Blocks + blockId * sizeof(uint64_t));
-    if (!block) return "";
-    return DecryptName(GetFNameEntry(rw, block + offset * dfmoff::FNamePool_Stride));
+    if (idx == 0) return "";
+    auto it = g_fnameCache.find(idx);
+    if (it != g_fnameCache.end()) return it->second;
+    std::string name;
+    const uint32_t blockId = idx >> g_Off.FNamePool_BlocksBit;
+    const uint32_t offset = idx & ((1u << g_Off.FNamePool_BlocksBit) - 1u);
+    if (blockId < 8192 && rw.libUE4) {
+        const uint64_t pool = rw.libUE4 + g_Off.GNames;
+        const uint64_t block = rw.read<uint64_t>(pool + g_Off.FNamePool_Blocks + blockId * sizeof(uint64_t));
+        if (block)
+            name = DecryptName(GetFNameEntry(rw, block + offset * g_Off.FNamePool_Stride));
+    }
+    GuardNameCache(g_fnameCache);
+    g_fnameCache[idx] = name;
+    return name;
 }
 
 inline std::string GetClassName(const MemRW &rw, uint64_t actor) {
     if (!actor) return "";
-    const uint64_t cls = rw.read<uint64_t>(actor + dfmoff::UObject_ClassPrivate);
+    const uint64_t cls = rw.read<uint64_t>(actor + g_Off.UObject_ClassPrivate);
     if (!cls) return "";
-    const uint32_t nameIdx = rw.read<uint32_t>(cls + dfmoff::UObject_NamePrivate);
-    return ResolveFName(rw, nameIdx);
+    auto it = g_classNameCache.find(cls);
+    if (it != g_classNameCache.end()) return it->second;
+    const uint32_t nameIdx = rw.read<uint32_t>(cls + g_Off.UObject_NamePrivate);
+    const std::string name = ResolveFName(rw, nameIdx);
+    GuardNameCache(g_classNameCache);
+    g_classNameCache[cls] = name;
+    return name;
 }
 
 inline std::string ReadFString16(const MemRW &rw, uint64_t addr) {
@@ -442,8 +538,21 @@ inline std::string ReadPwdDigitArray(const MemRW &rw, uint64_t addr) {
 // ============================================================================
 static std::thread gThread;
 static std::atomic<bool> gRun{false};
-static MemEspSnapshot gSnap;
-static std::mutex gSnapMutex;
+
+// item 10: 快照以“不可变 shared_ptr 指针”原子发布，渲染线程持有指针即持有一份
+// 一致的只读快照，无需互斥锁、无需拷贝大 vector，也不会在读取线程写入时被撕裂。
+static std::shared_ptr<const MemEspSnapshot> gSnapPtr;
+
+// item 7: 骨骼显示开关（由渲染线程每帧写入，快照线程读取，决定是否读骨骼）
+static std::atomic<bool> g_bonesNeeded{false};
+
+// 原子发布/取回当前快照（C++11 自由函数方式，线程安全）
+inline void PublishSnapshot(std::shared_ptr<const MemEspSnapshot> snap) {
+    std::atomic_store(&gSnapPtr, std::move(snap));
+}
+inline std::shared_ptr<const MemEspSnapshot> LoadSnapshot() {
+    return std::atomic_load(&gSnapPtr);
+}
 
 // ============================================================================
 // 快照采集
@@ -472,49 +581,66 @@ inline pid_t FindPidByPackage(const char *pkg) {
     return found;
 }
 
+// item 3: 判断某 PID 是否仍是目标游戏进程（读 /proc/<pid>/cmdline）。
+// 用于检测目标进程重启/消亡，从而重置 PID 与 libUE4 基址并重连。
+constexpr const char *kTargetPackage = "com.tencent.tmgp.dfm";
+
+inline bool PidMatchesPkg(pid_t pid, const char *pkg) {
+    if (pid <= 0 || !pkg) return false;
+    char path[64], line[512];
+    snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return false; // 进程已消亡
+    ssize_t n = read(fd, line, sizeof(line) - 1);
+    close(fd);
+    if (n <= 0) return false;
+    line[n] = 0;
+    return strstr(line, pkg) != nullptr;
+}
+
 inline bool GetWorldPos(const MemRW &rw, uint64_t actor, MemVec3 &out) {
     out = {0, 0, 0};
-    const uint64_t rc = rw.read<uint64_t>(actor + dfmoff::RootComponent);
+    const uint64_t rc = rw.read<uint64_t>(actor + g_Off.RootComponent);
     if (!rc) return false;
-    if (!rw.RM(out, rc + dfmoff::Translation)) return false;
+    if (!rw.RM(out, rc + g_Off.Translation)) return false;
     return std::isfinite(out.x) && std::isfinite(out.y) && std::isfinite(out.z);
 }
 
 inline int GetTeamId(const MemRW &rw, uint64_t actor) {
-    const uint64_t tc = rw.read<uint64_t>(actor + dfmoff::TeamComp);
+    const uint64_t tc = rw.read<uint64_t>(actor + g_Off.TeamComp);
     int t = 0;
-    if (tc) t = rw.read<int>(tc + dfmoff::TeamComp_TeamID);
+    if (tc) t = rw.read<int>(tc + g_Off.TeamComp_TeamID);
     if (t <= 0) {
-        const uint64_t ps = rw.read<uint64_t>(actor + dfmoff::PlayerState);
-        if (ps) t = rw.read<int>(ps + dfmoff::PS_TeamID);
+        const uint64_t ps = rw.read<uint64_t>(actor + g_Off.PlayerState);
+        if (ps) t = rw.read<int>(ps + g_Off.PS_TeamID);
     }
     return t;
 }
 
 inline void ReadHealth(const MemRW &rw, uint64_t actor, float &h, float &mh) {
     h = mh = 0.0f;
-    const uint64_t hc = rw.read<uint64_t>(actor + dfmoff::HealthComp);
+    const uint64_t hc = rw.read<uint64_t>(actor + g_Off.HealthComp);
     if (!hc) return;
-    const uint64_t hs = rw.read<uint64_t>(hc + dfmoff::HealthSet);
+    const uint64_t hs = rw.read<uint64_t>(hc + g_Off.HealthSet);
     if (!hs) return;
-    h = rw.read<float>(hs + dfmoff::Attr_Health + dfmoff::Attr_Current);
-    mh = rw.read<float>(hs + dfmoff::Attr_MaxHealth + dfmoff::Attr_Current);
+    h = rw.read<float>(hs + g_Off.Attr_Health + g_Off.Attr_Current);
+    mh = rw.read<float>(hs + g_Off.Attr_MaxHealth + g_Off.Attr_Current);
 }
 
 inline bool IsAlive(const MemRW &rw, uint64_t actor, float health, float maxHealth) {
-    const uint64_t bb = rw.read<uint64_t>(actor + dfmoff::BlackboardComp);
+    const uint64_t bb = rw.read<uint64_t>(actor + g_Off.BlackboardComp);
     int live = 0;
-    if (bb) live = rw.read<uint8_t>(bb + dfmoff::BB_CharacterLiveStatus);
-    if (live != 0) return live != dfmoff::Live_Death;
+    if (bb) live = rw.read<uint8_t>(bb + g_Off.BB_CharacterLiveStatus);
+    if (live != 0) return live != g_Off.Live_Death;
     return maxHealth > 0.0f && health > 0.0f;
 }
 
 inline void ReadPlayerName(const MemRW &rw, uint64_t actor, char *outName, size_t cap) {
     outName[0] = 0;
-    const uint64_t ps = rw.read<uint64_t>(actor + dfmoff::PlayerState);
+    const uint64_t ps = rw.read<uint64_t>(actor + g_Off.PlayerState);
     if (!ps) return;
-    std::string nm = ReadFString16(rw, ps + dfmoff::PS_PlayerName);
-    if (nm.empty()) nm = ReadFString16(rw, ps + dfmoff::PS_PlayerNamePrivate);
+    std::string nm = ReadFString16(rw, ps + g_Off.PS_PlayerName);
+    if (nm.empty()) nm = ReadFString16(rw, ps + g_Off.PS_PlayerNamePrivate);
     if (!nm.empty())
         snprintf(outName, cap, "%s", nm.c_str());
 }
@@ -540,17 +666,17 @@ inline MemQuat BoneRotatorToQuat(const MemRotator &rotation) {
 //   - 平移 = actor 世界坐标，Z 再减去胶囊半高，使骨骼从脚底抬起 (太过用 mesh ComponentToWorld 会整体偏上)；
 //   - 缩放用 RootComponent.RelativeScale3D。
 inline bool ReadBones(const MemRW &rw, MemEspPlayer &p) {
-    const uint64_t mesh = rw.read<uint64_t>(p.actor + dfmoff::Mesh);
+    const uint64_t mesh = rw.read<uint64_t>(p.actor + g_Off.Mesh);
     if (!mesh) return false;
 
     MemTransform ct;
     ct.translation = p.worldPos;
     {
-        const uint64_t root = rw.read<uint64_t>(p.actor + dfmoff::RootComponent);
+        const uint64_t root = rw.read<uint64_t>(p.actor + g_Off.RootComponent);
         MemRotator rot;
         MemVec3 scale;
-        const bool haveRot = root && rw.RM(rot, root + dfmoff::RelativeRotation);
-        const bool haveScl = root && rw.RM(scale, root + dfmoff::RelativeScale3D);
+        const bool haveRot = root && rw.RM(rot, root + g_Off.RelativeRotation);
+        const bool haveScl = root && rw.RM(scale, root + g_Off.RelativeScale3D);
         if (haveRot) {
             MemRotator adj = rot;
             adj.y -= 90.0f; // 参考实现的 Yaw 坐标轴修正
@@ -561,20 +687,37 @@ inline bool ReadBones(const MemRW &rw, MemEspPlayer &p) {
         ct.Scale3D = haveScl ? scale : MemVec3{1.0f, 1.0f, 1.0f};
 
         float capsuleHalfHeight = 0.0f;
-        const uint64_t cap = rw.read<uint64_t>(p.actor + dfmoff::CapsuleComponent);
-        if (cap) rw.RM(capsuleHalfHeight, cap + dfmoff::CapsuleHalfHeight);
+        const uint64_t cap = rw.read<uint64_t>(p.actor + g_Off.CapsuleComponent);
+        if (cap) rw.RM(capsuleHalfHeight, cap + g_Off.CapsuleHalfHeight);
         if (!std::isfinite(capsuleHalfHeight) || capsuleHalfHeight <= 0.0f || capsuleHalfHeight >= 100.0f)
             capsuleHalfHeight = 88.0f; // 默认约 175cm 角色
         ct.translation.z -= capsuleHalfHeight;
     }
 
-    const uint64_t rawBone = rw.read<uint64_t>(mesh + dfmoff::Mesh_BoneArray);
+    const uint64_t rawBone = rw.read<uint64_t>(mesh + g_Off.Mesh_BoneArray);
     const uint64_t boneArr = rawBone & 0x00FFFFFFFFFFFFFFULL;
     if (boneArr < 0x10000000ULL || boneArr >= 0x10000000000ULL) return false;
+
+    // item 8(批量读取): 一次内核批量调用读取 15 个骨骼变换，替代 15 次单读。
+    // 每项按 BoneTransformStride 步长散布，可安全地作为独立 batch item。
+    MemTransform local[MEM_ESP_BONE_COUNT];
+    bool batchOk = false;
+    {
+        MemRW::BatchItem items[MEM_ESP_BONE_COUNT];
+        for (int i = 0; i < MEM_ESP_BONE_COUNT; ++i)
+            items[i] = {boneArr + (uint64_t)g_Off.kDfmBoneIndices[i] * g_Off.BoneTransformStride,
+                        sizeof(MemTransform)};
+        batchOk = rw.BatchRead(items, MEM_ESP_BONE_COUNT, local, sizeof(local));
+    }
+    if (!batchOk) {
+        // 批量失败 → 回退逐项读取，保证骨骼可用
+        for (int i = 0; i < MEM_ESP_BONE_COUNT; ++i) {
+            const uint64_t ba = boneArr + (uint64_t)g_Off.kDfmBoneIndices[i] * g_Off.BoneTransformStride;
+            local[i] = rw.read<MemTransform>(ba);
+        }
+    }
     for (int i = 0; i < MEM_ESP_BONE_COUNT; ++i) {
-        const uint64_t ba = boneArr + (uint64_t)dfmoff::kDfmBoneIndices[i] * dfmoff::BoneTransformStride;
-        const MemTransform bl = rw.read<MemTransform>(ba);
-        const MemVec3 w = MultiplyBone(ct, bl);
+        const MemVec3 w = MultiplyBone(ct, local[i]);
         if (!std::isfinite(w.x) || !std::isfinite(w.y) || !std::isfinite(w.z)) return false;
         p.bones[i] = w;
     }
@@ -583,15 +726,15 @@ inline bool ReadBones(const MemRW &rw, MemEspPlayer &p) {
 
 inline uint64_t GetPickupItemId(const MemRW &rw, uint64_t actor) {
     if (!actor) return 0;
-    const uint32_t invNameIdx = rw.read<uint32_t>(actor + dfmoff::Pickup_InventoryIdName);
+    const uint32_t invNameIdx = rw.read<uint32_t>(actor + g_Off.Pickup_InventoryIdName);
     std::string invName = ResolveFName(rw, invNameIdx);
     if (!invName.empty() && invName != "None") {
         const uint64_t parsed = strtoull(invName.c_str(), nullptr, 10);
         if (parsed != 0) return parsed;
     }
-    const uint64_t base = actor + dfmoff::Pickup_ItemInfo;
-    const uint32_t cat = rw.read<uint32_t>(base + dfmoff::ItemInfo_Category);
-    const uint32_t seq = rw.read<uint32_t>(base + dfmoff::ItemInfo_Sequence);
+    const uint64_t base = actor + g_Off.Pickup_ItemInfo;
+    const uint32_t cat = rw.read<uint32_t>(base + g_Off.ItemInfo_Category);
+    const uint32_t seq = rw.read<uint32_t>(base + g_Off.ItemInfo_Sequence);
     if (cat == 0) return 0;
     return (uint64_t)cat * 10000ULL + seq;
 }
@@ -606,18 +749,22 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
         return;
     }
 
-    const uint64_t uworld = rw.read<uint64_t>(rw.libUE4 + dfmoff::GWorld);
-    if (!uworld) { snap.status = "UWorld=0 (未进对局)"; return; }
+    const uint64_t uworld = rw.read<uint64_t>(rw.libUE4 + g_Off.GWorld);
+    if (!uworld) {
+        // item 5: 失败时附带诊断地址，便于定位（常用：基址+偏移 校验）
+        snap.status = rw.lastErrorAddr ? ("UWorld=0 @0x" + ToHex(rw.lastErrorAddr)) : "UWorld=0 (未进对局)";
+        return;
+    }
 
     // 相机 (本地渲染层)
     {
-        const uint64_t ginst = rw.read<uint64_t>(uworld + dfmoff::OwningGameInstance);
-        const uint64_t lpArr = ginst ? rw.read<uint64_t>(ginst + dfmoff::LocalPlayers) : 0;
+        const uint64_t ginst = rw.read<uint64_t>(uworld + g_Off.OwningGameInstance);
+        const uint64_t lpArr = ginst ? rw.read<uint64_t>(ginst + g_Off.LocalPlayers) : 0;
         const uint64_t lplayer = lpArr ? rw.read<uint64_t>(lpArr) : 0;
-        const uint64_t pc = lplayer ? rw.read<uint64_t>(lplayer + dfmoff::PlayerController) : 0;
-        const uint64_t camMgr = pc ? rw.read<uint64_t>(pc + dfmoff::PlayerCameraManager) : 0;
+        const uint64_t pc = lplayer ? rw.read<uint64_t>(lplayer + g_Off.PlayerController) : 0;
+        const uint64_t camMgr = pc ? rw.read<uint64_t>(pc + g_Off.PlayerCameraManager) : 0;
         if (camMgr) {
-            const uint64_t pov = camMgr + dfmoff::CamPOV;
+            const uint64_t pov = camMgr + g_Off.CamPOV;
             MemVec3 loc{}; MemRotator rot{}; float fov = 90.0f;
             if (rw.RM(loc, pov) && rw.RM(rot, pov + 0x10)) {
                 snap.camera.Location = loc;
@@ -625,7 +772,7 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
                 rw.RM(fov, pov + 0x1C);
                 snap.camera.FOV = fov > 1.0f ? fov : 90.0f;
             }
-            const uint64_t myPawn = rw.read<uint64_t>(pc + dfmoff::AcknowledgedPawn);
+            const uint64_t myPawn = rw.read<uint64_t>(pc + g_Off.AcknowledgedPawn);
             if (myPawn) snap.myTeam = GetTeamId(rw, myPawn);
         } else {
             snap.status = "未取到相机";
@@ -633,10 +780,10 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
     }
 
     // Actor 数组
-    const uint64_t pl = rw.read<uint64_t>(uworld + dfmoff::PersistentLevel);
+    const uint64_t pl = rw.read<uint64_t>(uworld + g_Off.PersistentLevel);
     if (!pl) { snap.status = "PersistentLevel=0"; return; }
-    const uint64_t arr = rw.read<uint64_t>(pl + dfmoff::AActors);
-    int32_t count = rw.read<int32_t>(pl + dfmoff::ActorCount);
+    const uint64_t arr = rw.read<uint64_t>(pl + g_Off.AActors);
+    int32_t count = rw.read<int32_t>(pl + g_Off.ActorCount);
     if (!arr || count <= 0 || count > 65536) { snap.status = "无 Actor 数组"; return; }
 
     std::vector<uint64_t> actors((size_t)count);
@@ -665,16 +812,16 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
             case MemLoot_GroundItem: {
                 L.itemId = GetPickupItemId(rw, actor);
                 if (L.itemId == 0) continue;
-                L.count = rw.read<int32_t>(actor + dfmoff::Pickup_ItemInfo + dfmoff::ItemInfo_ItemCount);
-                const uint64_t vp = rw.read<uint64_t>(actor + dfmoff::Pickup_ValuePtr);
-                if (vp) L.value = rw.read<int32_t>(vp + dfmoff::PickupValue_Value);
+                L.count = rw.read<int32_t>(actor + g_Off.Pickup_ItemInfo + g_Off.ItemInfo_ItemCount);
+                const uint64_t vp = rw.read<uint64_t>(actor + g_Off.Pickup_ValuePtr);
+                if (vp) L.value = rw.read<int32_t>(vp + g_Off.PickupValue_Value);
                 const ItemDbEntry *e = FindItemById(L.itemId);
                 L.grade = e ? e->Grade : 0;
                 break;
             }
             case MemLoot_Container: {
-                L.finished = (rw.read<uint8_t>(actor + dfmoff::SIC_bFinished) & 0x1) != 0;
-                const uint8_t t = rw.read<uint8_t>(actor + dfmoff::SIC_ContainerType);
+                L.finished = (rw.read<uint8_t>(actor + g_Off.SIC_bFinished) & 0x1) != 0;
+                const uint8_t t = rw.read<uint8_t>(actor + g_Off.SIC_ContainerType);
                 switch (t) {
                 case 2: snprintf(L.label, sizeof(L.label), "武器箱"); break;
                 case 3: snprintf(L.label, sizeof(L.label), "储物柜"); break;
@@ -685,13 +832,13 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
                 break;
             }
             case MemLoot_DeadBody: {
-                const uint64_t ownerPS = rw.read<uint64_t>(actor + dfmoff::DeadBody_OwnerPS);
+                const uint64_t ownerPS = rw.read<uint64_t>(actor + g_Off.DeadBody_OwnerPS);
                 if (ownerPS)
-                    L.isBot = (rw.read<uint8_t>(ownerPS + dfmoff::PS_bIsPlayerAI) & 0x1) != 0;
+                    L.isBot = (rw.read<uint8_t>(ownerPS + g_Off.PS_bIsPlayerAI) & 0x1) != 0;
                 else
-                    L.isBot = (rw.read<uint8_t>(actor + dfmoff::DeadBody_IsAI) & 0x1) != 0;
-                L.finished = (rw.read<uint8_t>(actor + dfmoff::DeadBody_Looted) & 0x1) != 0;
-                const std::string nm = ReadFString16(rw, actor + dfmoff::DeadBody_PlayerName);
+                    L.isBot = (rw.read<uint8_t>(actor + g_Off.DeadBody_IsAI) & 0x1) != 0;
+                L.finished = (rw.read<uint8_t>(actor + g_Off.DeadBody_Looted) & 0x1) != 0;
+                const std::string nm = ReadFString16(rw, actor + g_Off.DeadBody_PlayerName);
                 if (L.isBot)
                     snprintf(L.label, sizeof(L.label), "人机遗物%s", L.finished ? " (已搜刮)" : "");
                 else if (!nm.empty())
@@ -701,18 +848,18 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
                 break;
             }
             case MemLoot_SafeBox: {
-                L.finished = (rw.read<uint8_t>(actor + dfmoff::SIC_bSafeBoxUnlocked) & 0x1) != 0;
+                L.finished = (rw.read<uint8_t>(actor + g_Off.SIC_bSafeBoxUnlocked) & 0x1) != 0;
                 snprintf(L.label, sizeof(L.label), L.finished ? "保险箱 (已开)" : "保险箱");
-                const uint64_t ob = rw.read<uint64_t>(actor + dfmoff::SIC_CachedOpenBox);
+                const uint64_t ob = rw.read<uint64_t>(actor + g_Off.SIC_CachedOpenBox);
                 if (ob) {
-                    std::string pwd = ReadPwdDigitArray(rw, ob + dfmoff::OpenBox_RealSafeBoxPwd);
-                    if (pwd.empty()) pwd = ReadPwdDigitArray(rw, ob + dfmoff::OpenBox_SafeBoxPwd);
+                    std::string pwd = ReadPwdDigitArray(rw, ob + g_Off.OpenBox_RealSafeBoxPwd);
+                    if (pwd.empty()) pwd = ReadPwdDigitArray(rw, ob + g_Off.OpenBox_SafeBoxPwd);
                     if (!pwd.empty()) snprintf(L.label, sizeof(L.label), "保险箱 密码%s", pwd.c_str());
                 }
                 break;
             }
             case MemLoot_Computer: {
-                const int32_t pwd = rw.read<int32_t>(actor + dfmoff::HackPC_Password);
+                const int32_t pwd = rw.read<int32_t>(actor + g_Off.HackPC_Password);
                 if (pwd > 0 && pwd <= 99999999)
                     snprintf(L.label, sizeof(L.label), "电脑 密码%d", (int)pwd);
                 else
@@ -720,7 +867,7 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
                 break;
             }
             case MemLoot_CodedLock: {
-                std::string pwd = ReadFString16(rw, actor + dfmoff::CodedLock_PwdStr);
+                std::string pwd = ReadFString16(rw, actor + g_Off.CodedLock_PwdStr);
                 if (pwd.size() <= 12)
                     snprintf(L.label, sizeof(L.label), "密码门 %s", pwd.c_str());
                 else
@@ -743,7 +890,8 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
         ReadHealth(rw, actor, P.health, P.maxHealth);
         P.alive = IsAlive(rw, actor, P.health, P.maxHealth);
         ReadPlayerName(rw, actor, P.name, sizeof(P.name));
-        P.hasBones = ReadBones(rw, P);
+        // item 7: 关闭骨骼显示时跳过骨骼读取，省掉每帧 15 次内核读
+        P.hasBones = g_bonesNeeded.load(std::memory_order_relaxed) ? ReadBones(rw, P) : false;
         snap.players.push_back(P);
         ++snap.playerCount;
     }
@@ -753,27 +901,45 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
     snap.status = st;
 }
 
+// item 5: 诊断地址 → 十六进制字符串
+inline std::string ToHex(uint64_t v) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%llX", (unsigned long long)v);
+    return std::string(buf);
+}
+// 异常分支发布一个只含 status 的不可变快照（item 4/10，无取锁）
+inline void publishStatus(const std::string &status, uint64_t diagAddr = 0);
+
 void Loop() {
     MemRW rw;
+    // 连续取不到 UWorld/产出为空时计数，阈值后按“进程可能重启”重置基址
+    int resetCounter = 0;
     while (memEspRunning()) {
         // —— 防机制：驱动未正常连接时，一律不允许任何内核读写透视 ——
         // 只有 TIME_Driver 已连接才允许继续（读 libUE4 模块内存、解析人物/物资）。
         rw.connected = TIME_Driver && TIME_Driver->IsConnected();
         if (!rw.connected) {
-            MemEspSnapshot s;
-            s.status = "驱动未连接";
-            std::lock_guard<std::mutex> lk(gSnapMutex);
-            gSnap = s;
+            resetCounter = 0;
+            publishStatus("驱动未连接");
             std::this_thread::sleep_for(std::chrono::milliseconds(700));
             continue;
         }
+        // item 3: 已持有 PID 时先确认它仍是目标进程；
+        // 进程重启/消亡 → 重置 PID 与 libUE4 基址并清空 FName/Class 缓存，重新连接。
+        if (rw.pid > 0 && !PidMatchesPkg(rw.pid, kTargetPackage)) {
+            rw.pid = 0;
+            rw.libUE4 = 0;
+            resetCounter = 0;
+            ClearNameCaches();
+            publishStatus("目标进程重启，重置 PID/基址");
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            continue;
+        }
         if (rw.pid <= 0) {
-            rw.pid = FindPidByPackage("com.tencent.tmgp.dfm");
+            rw.pid = FindPidByPackage(kTargetPackage);
             if (rw.pid <= 0) {
-                MemEspSnapshot s;
-                s.status = "未找到游戏进程";
-                std::lock_guard<std::mutex> lk(gSnapMutex);
-                gSnap = s;
+                resetCounter = 0;
+                publishStatus("未找到游戏进程");
                 std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                 continue;
             }
@@ -781,29 +947,58 @@ void Loop() {
         if (rw.libUE4 == 0) {
             rw.libUE4 = TIME_Driver->Get_Module_Base(rw.pid, "libUE4.so");
             if (rw.libUE4 == 0) {
-                MemEspSnapshot s;
-                s.status = "未找到 libUE4";
-                std::lock_guard<std::mutex> lk(gSnapMutex);
-                gSnap = s;
+                resetCounter = 0;
+                publishStatus("未找到 libUE4");
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 continue;
             }
+            ClearNameCaches(); // 新进程空间，清空旧缓存
         }
 
-        MemEspSnapshot s;
-        Capture(rw, s);
-        {
-            std::lock_guard<std::mutex> lk(gSnapMutex);
-            gSnap = std::move(s);
+        auto snap = std::make_shared<MemEspSnapshot>();
+        Capture(rw, *snap);
+        // item 3: 目标进程重启/丢模块后，UWorld 无法解析、快照也无数据 → 重置基址重连。
+        // 用 rw.lastError 诊断信息辅助判断。
+        const bool deadData = rw.libUE4 && snap->ts > 0 &&
+                              (snap->status.rfind("UWorld", 0) == 0 ||
+                               snap->status.rfind("无 Actor", 0) == 0 ||
+                               snap->status.rfind("读 Actor", 0) == 0 ||
+                               snap->status.rfind("PersistentLevel", 0) == 0);
+        if (deadData) {
+            if (++resetCounter >= 3) {
+                resetCounter = 0;
+                rw.libUE4 = 0; // 下轮重新 Get_Module_Base
+                publishStatus("模块数据异常，重置 libUE4 重连");
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                continue;
+            }
+        } else {
+            resetCounter = 0;
         }
+
+        // item 10: 以不可变 shared_ptr 原子发布快照（无锁）
+        PublishSnapshot(std::move(snap));
         std::this_thread::sleep_for(std::chrono::milliseconds(30)); // ~33Hz
     }
+}
+
+// item 4/10: 异常分支发布一个只含 status 的不可变快照（无取锁，作用域即单次原子存储）
+inline void publishStatus(const std::string &status, uint64_t diagAddr = 0) {
+    auto snap = std::make_shared<MemEspSnapshot>();
+    snap->status = status;
+    if (diagAddr)
+        snap->status += " @0x" + ToHex(diagAddr); // item 5: 附诊断地址
+    PublishSnapshot(std::move(snap));
 }
 
 } // namespace
 
 void memEspStart() {
     if (gRun.load()) return;
+    // item 2: 内存功能启动即主动初始化内核驱动（此前仅陀螺仪/触摸会调 kdrv_init，
+    // 单纯开内存透视时驱动永远未连接 → “内存功能没数据”）。item 9: 走统一会话管理，
+    // 驱动已由其它功能初始化时只递增会话引用，绝不重复/破坏。
+    kdrv_acquire();
     gRun.store(true);
     gThread = std::thread(Loop);
 }
@@ -811,6 +1006,9 @@ void memEspStart() {
 void memEspStop() {
     gRun.store(false);
     if (gThread.joinable()) gThread.join();
+    // item 9: 释放本功能持有的驱动会话（引计归零也不会影响仍在使用的陀螺仪/触摸）
+    kdrv_release();
+    g_bonesNeeded.store(false);
 }
 
 bool memEspRunning() {
@@ -818,16 +1016,15 @@ bool memEspRunning() {
 }
 
 bool memEspGetSnapshot(MemEspSnapshot &out) {
-    // 用 try_lock：渲染主线程绝不因等待快照锁而阻塞，
-    // 避免内存读线程异常/长期持锁时悬浮窗冻结、无法交互。
-    if (!gSnapMutex.try_lock())
-        return false;
-    out = gSnap;
-    gSnapMutex.unlock();
-    // 只要有状态即视为“已发布快照”：
-    // - 面板据此显示真实状态（驱动未连接 / 未找到游戏 / DX: N人N物）
-    // - 绘制侧另行判断 ts（>0 才真正投影绘制），未连接时 ts=0 自动跳过
+    // item 10: 无锁读不可变指针并拷贝；快照已发布且有状态才算就绪
+    std::shared_ptr<const MemEspSnapshot> sp = LoadSnapshot();
+    if (!sp) return false;
+    out = *sp;
     return !out.status.empty();
+}
+
+std::shared_ptr<const MemEspSnapshot> memEspGetSnapshotPtr() {
+    return LoadSnapshot();
 }
 
 // ============================================================================
@@ -895,17 +1092,20 @@ inline void DrawTextShadow(ImDrawList *d, ImFont *font, float size, const ImVec2
 
 void memEspDraw(ImDrawList *draw, const MemEspDrawCfg &cfg, float sx, float sy) {
     if (!draw || sx <= 0 || sy <= 0) return;
-    MemEspSnapshot snap;
-    if (!memEspGetSnapshot(snap) || snap.ts == 0) {
+    // item 7: 同步“骨骼显示”开关，供快照线程决定是否读取骨骼
+    g_bonesNeeded.store(cfg.skeleton, std::memory_order_relaxed);
+
+    // item 10: 直接取不可变快照指针（无锁、不拷贝大 vector）
+    std::shared_ptr<const MemEspSnapshot> snapPtr = memEspGetSnapshotPtr();
+    if (!snapPtr || snapPtr->ts == 0) {
 #if 0
         // 未就绪时在左上角给个状态提示 (可关)
-        const char* st = snap.status.empty() ? "内存穿透: 未连接" : snap.status.c_str();
-        draw->AddText(ImVec2(10, 10), IM_COL32(255, 80, 80, 200), st);
+        const std::string st = snapPtr ? snapPtr->status : "内存穿透: 未连接";
+        draw->AddText(ImVec2(10, 10), IM_COL32(255, 80, 80, 200), st.c_str());
 #endif
         return;
     }
-
-    const MemCamera &cam = snap.camera;
+    const MemEspSnapshot &snap = *snapPtr;
     ImFont *font = ImGui::GetFont();
     bool anyDraw = false;
 
