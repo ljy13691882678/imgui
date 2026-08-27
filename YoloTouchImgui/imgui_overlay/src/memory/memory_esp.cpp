@@ -5,7 +5,7 @@
 
 #include "time_driver.h"
 #include "item_database.h"
-#include "jiemi/coord_decrypt.h"
+#include "udp_actors.h"
 
 #include "ImGui/imgui.h"
 
@@ -58,12 +58,8 @@ constexpr uint64_t ActorCount             = 0xA0;
 constexpr uint64_t RootComponent          = 0x180;
 constexpr uint64_t ComponentToWorld       = 0x210;
 constexpr uint64_t Translation            = 0x220;
-constexpr uint64_t RelativeRotation       = 0x178; // RootComponent::RelativeRotation
-constexpr uint64_t RelativeScale3D        = 0x184; // RootComponent::RelativeScale3D
 
 // ACharacter
-constexpr uint64_t CapsuleComponent       = 0x3E0; // UCapsuleComponent*
-constexpr uint64_t CapsuleHalfHeight      = 0x5A0; // UCapsuleComponent::CapsuleHalfHeight
 constexpr uint64_t Mesh                   = 0x3D0;
 constexpr uint64_t Mesh_BoneArray         = 0x730;
 constexpr uint64_t BoneTransformStride    = 0x30;
@@ -443,9 +439,9 @@ inline std::string ReadPwdDigitArray(const MemRW &rw, uint64_t addr) {
 // ============================================================================
 static std::thread gThread;
 static std::atomic<bool> gRun{false};
-static std::atomic<bool> gUdpDecrypt{false}; // UDP 解密解包绘制开关
 static MemEspSnapshot gSnap;
 static std::mutex gSnapMutex;
+static std::atomic<bool> gUdpDecrypt{false}; // UDP 明文解包绘制开关
 
 // ============================================================================
 // 快照采集
@@ -479,13 +475,6 @@ inline bool GetWorldPos(const MemRW &rw, uint64_t actor, MemVec3 &out) {
     const uint64_t rc = rw.read<uint64_t>(actor + dfmoff::RootComponent);
     if (!rc) return false;
     if (!rw.RM(out, rc + dfmoff::Translation)) return false;
-    // UDP 解密解包绘制：用已解密的真实世界坐标覆盖明文坐标，防止游戏坐标加密导致的偏框。
-    // TryRead 内部有缓存，未就绪时返回 false，此时回退到明文坐标，保证能持续绘制。
-    if (gUdpDecrypt.load()) {
-        CoordDecrypt::Coordinate cd{};
-        if (CoordDecrypt::TryRead(rc, cd) && std::isfinite(cd.x) && std::isfinite(cd.y) && std::isfinite(cd.z))
-            out = {cd.x, cd.y, cd.z};
-    }
     return std::isfinite(out.x) && std::isfinite(out.y) && std::isfinite(out.z);
 }
 
@@ -528,55 +517,12 @@ inline void ReadPlayerName(const MemRW &rw, uint64_t actor, char *outName, size_
         snprintf(outName, cap, "%s", nm.c_str());
 }
 
-inline MemQuat BoneRotatorToQuat(const MemRotator &rotation) {
-    constexpr float kDegToRad = 3.14159265358979323846f / 180.0f;
-    const float pitch = rotation.x * kDegToRad * 0.5f;
-    const float yaw   = rotation.y * kDegToRad * 0.5f;
-    const float roll  = rotation.z * kDegToRad * 0.5f;
-    const float sp = std::sin(pitch), cp = std::cos(pitch);
-    const float sy = std::sin(yaw),   cy = std::cos(yaw);
-    const float sr = std::sin(roll),  cr = std::cos(roll);
-    MemQuat q;
-    q.W = cr * cp * cy + sr * sp * sy;
-    q.X = cr * sp * sy - sr * cp * cy;
-    q.Y = -cr * sp * cy - sr * cp * sy;
-    q.Z = cr * cp * sy - sr * sp * cy;
-    return q;
-}
-
-// 谨慎按参考 decrypt 路径重建骨骼组件变换，修正“整体偏上”：
-//   - 旋转只用 RootComponent.RelativeRotation(yaw-90) 转四元数；
-//   - 平移 = actor 世界坐标，Z 再减去胶囊半高，使骨骼从脚底抬起 (太过用 mesh ComponentToWorld 会整体偏上)；
-//   - 缩放用 RootComponent.RelativeScale3D。
 inline bool ReadBones(const MemRW &rw, MemEspPlayer &p) {
     const uint64_t mesh = rw.read<uint64_t>(p.actor + dfmoff::Mesh);
     if (!mesh) return false;
-
-    MemTransform ct;
+    MemTransform ct = rw.read<MemTransform>(mesh + dfmoff::ComponentToWorld);
     ct.translation = p.worldPos;
-    {
-        const uint64_t root = rw.read<uint64_t>(p.actor + dfmoff::RootComponent);
-        MemRotator rot;
-        MemVec3 scale;
-        const bool haveRot = root && rw.RM(rot, root + dfmoff::RelativeRotation);
-        const bool haveScl = root && rw.RM(scale, root + dfmoff::RelativeScale3D);
-        if (haveRot) {
-            MemRotator adj = rot;
-            adj.y -= 90.0f; // 参考实现的 Yaw 坐标轴修正
-            ct.Rotation = BoneRotatorToQuat(adj);
-        } else {
-            ct.Rotation = MemQuat{};
-        }
-        ct.Scale3D = haveScl ? scale : MemVec3{1.0f, 1.0f, 1.0f};
-
-        float capsuleHalfHeight = 0.0f;
-        const uint64_t cap = rw.read<uint64_t>(p.actor + dfmoff::CapsuleComponent);
-        if (cap) rw.RM(capsuleHalfHeight, cap + dfmoff::CapsuleHalfHeight);
-        if (!std::isfinite(capsuleHalfHeight) || capsuleHalfHeight <= 0.0f || capsuleHalfHeight >= 100.0f)
-            capsuleHalfHeight = 88.0f; // 默认约 175cm 角色
-        ct.translation.z -= capsuleHalfHeight;
-    }
-
+    ct.Scale3D = MemVec3{1.0f, 1.0f, 1.0f};
     const uint64_t rawBone = rw.read<uint64_t>(mesh + dfmoff::Mesh_BoneArray);
     const uint64_t boneArr = rawBone & 0x00FFFFFFFFFFFFFFULL;
     if (boneArr < 0x10000000ULL || boneArr >= 0x10000000000ULL) return false;
@@ -635,7 +581,16 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
                 snap.camera.FOV = fov > 1.0f ? fov : 90.0f;
             }
             const uint64_t myPawn = rw.read<uint64_t>(pc + dfmoff::AcknowledgedPawn);
-            if (myPawn) snap.myTeam = GetTeamId(rw, myPawn);
+            if (myPawn) {
+                snap.myTeam = GetTeamId(rw, myPawn);
+                // UDP 解包用自机坐标锚定原点；这里同时留存当前自机坐标供面板显示
+                const uint64_t pmrc = rw.read<uint64_t>(myPawn + dfmoff::RootComponent);
+                if (pmrc) {
+                    MemVec3 sp{};
+                    if (rw.RM(sp, pmrc + dfmoff::Translation))
+                        snap.selfPos = sp;
+                }
+            }
         } else {
             snap.status = "未取到相机";
         }
@@ -762,6 +717,39 @@ inline void Capture(MemRW &rw, MemEspSnapshot &snap) {
     snap.status = st;
 }
 
+// UDP 明文解包绘制：喂给 udp_actors 自机内存坐标(用于原点对齐)，
+// 并把解出的真实世界坐标人物合并进同一快照。坐标是明文真实帧，不随内存加密偏移。
+inline void FeedUdp(MemEspSnapshot &snap) {
+    g_Config.EnableUdpDecrypt = gUdpDecrypt.load();
+    const bool on = gUdpDecrypt.load();
+
+    const MemVec3 &sp = snap.selfPos;
+    const bool haveSelf = std::isfinite(sp.x) && std::isfinite(sp.y) && std::isfinite(sp.z) &&
+                          (std::fabs(sp.x) + std::fabs(sp.y) + std::fabs(sp.z)) > 1.0f;
+    const Vector3 memSelf = {sp.x, sp.y, sp.z};
+    // 关闭时也要调用 Tick(nullptr) 让内部 StopCapture 停掉 tcpdump 子进程
+    UdpActors::Tick(on && haveSelf ? &memSelf : nullptr, /*approximate=*/false);
+    if (!on) return;
+
+    for (const UdpActors::ActorPose &pose : UdpActors::Snapshot()) {
+        if (!std::isfinite(pose.world.x) || !std::isfinite(pose.world.y) || !std::isfinite(pose.world.z))
+            continue;
+        MemEspPlayer P;
+        P.actor = UdpActors::ActorId(pose.channel, pose.slot);
+        P.cat = 1; // 真人
+        P.teamId = 0;
+        P.health = 100.0f;
+        P.maxHealth = 100.0f;
+        P.alive = true;
+        P.worldPos = {pose.world.x, pose.world.y, pose.world.z};
+        P.hasBones = false; // UDP 无骨骼，走身高推算方框
+        const char *nm = pose.name.empty() ? "UDP" : pose.name.c_str();
+        snprintf(P.name, sizeof(P.name), "%s", nm);
+        snap.players.push_back(P);
+        ++snap.playerCount;
+    }
+}
+
 void Loop() {
     MemRW rw;
     while (memEspRunning()) {
@@ -799,11 +787,9 @@ void Loop() {
             }
         }
 
-        // UDP 解密解包绘制：每帧喂给解密引擎；未开启时 Tick 内部会 Reset 停机。
-        CoordDecrypt::Tick(gUdpDecrypt.load(), rw.libUE4);
-
         MemEspSnapshot s;
         Capture(rw, s);
+        FeedUdp(s); // UDP 明文解包：自机锚点 + 合入 UDP 人物
         {
             std::lock_guard<std::mutex> lk(gSnapMutex);
             gSnap = std::move(s);
@@ -827,14 +813,6 @@ void memEspStop() {
 
 bool memEspRunning() {
     return gRun.load();
-}
-
-void memEspSetUdpDecrypt(bool enabled) {
-    gUdpDecrypt.store(enabled);
-}
-
-bool memEspUdpDecrypt() {
-    return gUdpDecrypt.load();
 }
 
 bool memEspGetSnapshot(MemEspSnapshot &out) {
@@ -1096,4 +1074,26 @@ void memEspDraw(ImDrawList *draw, const MemEspDrawCfg &cfg, float sx, float sy) 
     }
 
     (void)anyDraw;
+}
+
+// ============================================================================
+// UDP 明文解包：开关 / 读取状态
+// ============================================================================
+void memEspSetUdpDecrypt(bool on) {
+    gUdpDecrypt.store(on);
+}
+
+bool memEspGetUdpStats(MemEspUdpStats &out) {
+    out = MemEspUdpStats();
+    out.enabled = gUdpDecrypt.load();
+    const UdpActors::Stats st = UdpActors::GetStats();
+    out.capturing = st.capturing;
+    out.originValid = st.originValid;
+    out.poses = st.poses;
+    out.names = st.names;
+    out.mvOk = st.mvOk;
+    out.mvFails = st.mvFails;
+    out.packets = st.packets;
+    out.gamePackets = st.gamePackets;
+    return true;
 }
