@@ -789,12 +789,13 @@ inline void FeedUdp(MemEspSnapshot &snap) {
             // 内存名字为空时，用 UDP 网络昵称补上(仍走内存UI显示)
             if (!best->name[0] && UDPp.name[0])
                 snprintf(best->name, sizeof(best->name), "%s", UDPp.name);
-        } else if (UDPp.name[0]) {
-            // 未配对到内存人物：作为独立人物用同一套 UI 显示(UDP 提供的网络昵称)
+        } else {
+            // 未配对到内存人物：作为独立人物用同一套 UI 显示。
+            // UDP 坐标是明文真实帧，名字可能为空(昵称只解析到部分人物)，
+            // 无论有没有名字都要画框，避免 UDP 抓到的人漏画。
             snap.players.push_back(UDPp);
             ++snap.playerCount;
         }
-        // 既没配对、又无昵称的 UDP 数据：忽略，避免凭空多出未知方框
     }
 }
 
@@ -914,22 +915,23 @@ inline bool ComputePlayerBox(const MemEspPlayer &p, const MemCamera &cam, float 
         return true;
     }
 
-    // 回退：无骨骼时用身高推算方框。RootComponent 平移一般约在人物身体中部，
-    // 因此以 worldPos 为中心向上下各外扩约半个人高(92cm≈成人半身高)，
-    // 使框能覆盖从脚底到头顶的整个人物，而不是从胸部开始往上。
-    constexpr float kHalfBody = 92.0f;
-    const MemVec2 ctr = WorldToScreenCamera(p.worldPos, cam, sx, sy);
-    if (ctr.x <= -9990.0f && ctr.y <= -9990.0f) return false;
-    if (ctr.x < 0.0f || ctr.y < 0.0f || ctr.x > sx || ctr.y > sy) return false;
-    const MemVec3 feet3 = {p.worldPos.x, p.worldPos.y, p.worldPos.z - kHalfBody};
-    const MemVec3 head3 = {p.worldPos.x, p.worldPos.y, p.worldPos.z + kHalfBody};
+    // 回退：无骨骼时用身高推算方框。按需求"以脚为底、往上绘制"。
+    // 内存 RootComponent 平移实测约在人物头顶(≈全身高)，把它当作人物顶部(头)，
+    // 向下 kBodyHeight 得到脚底，方框从脚底一直覆盖到头顶(不依赖投影原点)。
+    constexpr float kBodyHeight = 176.0f; // 世界单位≈cm，成人全身高
+    const MemVec3 head3 = {p.worldPos.x, p.worldPos.y, p.worldPos.z};
+    const MemVec3 feet3 = {p.worldPos.x, p.worldPos.y, p.worldPos.z - kBodyHeight};
     const MemVec2 feet = WorldToScreenCamera(feet3, cam, sx, sy);
     const MemVec2 head = WorldToScreenCamera(head3, cam, sx, sy);
+    // 任一端在相机后方即无法可靠投影，放弃本框
+    if (feet.x <= -9990.0f && feet.y <= -9990.0f) return false;
+    if (head.x <= -9990.0f && head.y <= -9990.0f) return false;
     const float h = std::fabs(feet.y - head.y);
     if (h < 2.0f) return false;
+    const float ctrx = (head.x + feet.x) * 0.5f;
     const float w = h * 0.5f;
-    mn = ImVec2(ctr.x - w * 0.5f, std::fminf(head.y, feet.y));
-    mx = ImVec2(ctr.x + w * 0.5f, std::fmaxf(head.y, feet.y));
+    mn = ImVec2(ctrx - w * 0.5f, std::fminf(head.y, feet.y));
+    mx = ImVec2(ctrx + w * 0.5f, std::fmaxf(head.y, feet.y));
     return true;
 }
 
