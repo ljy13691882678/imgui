@@ -758,6 +758,7 @@ inline void FeedUdp(MemEspSnapshot &snap) {
         UDPp.alive = true;
         UDPp.worldPos = {pose.world.x, pose.world.y, pose.world.z};
         UDPp.hasBones = false;
+        UDPp.viaUdp = true; // 坐标来自 UDP
         const char *onm = pose.name.empty() ? "" : pose.name.c_str();
         snprintf(UDPp.name, sizeof(UDPp.name), "%s", onm);
 
@@ -779,6 +780,7 @@ inline void FeedUdp(MemEspSnapshot &snap) {
                                 pose.world.y - best->worldPos.y,
                                 pose.world.z - best->worldPos.z};
             best->worldPos = {pose.world.x, pose.world.y, pose.world.z};
+            best->viaUdp = true; // 坐标已被 UDP 修正，标记为 UDP-only 过滤对象
             for (int i = 0; i < MEM_ESP_BONE_COUNT; ++i) {
                 best->bones[i].x += dv.x;
                 best->bones[i].y += dv.y;
@@ -954,7 +956,11 @@ void memEspDraw(ImDrawList *draw, const MemEspDrawCfg &cfg, float sx, float sy) 
         return;
     }
 
-    const MemCamera &cam = snap.camera;
+    // 投影矩阵基准：默认用相机坐标；切换为自机坐标时以自身位置作为视图原点(仍用相机朝向/FOV)
+    MemCamera vcam = snap.camera;
+    const MemVec3 &viewOrg = (cfg.matrixOrigin == 1) ? snap.selfPos : snap.camera.Location;
+    vcam.Location = viewOrg;
+    const MemCamera &cam = vcam;
     ImFont *font = ImGui::GetFont();
     bool anyDraw = false;
 
@@ -965,6 +971,8 @@ void memEspDraw(ImDrawList *draw, const MemEspDrawCfg &cfg, float sx, float sy) 
             if (!p.alive) continue;
             if (cfg.ignoreBot && p.cat == 3) continue;
             if (cfg.ignoreTeam && snap.myTeam > 0 && p.teamId == snap.myTeam) continue;
+            // UDP解密开启+仅UDP模式：只显示UDP抓到的人物，隐藏其余内存框
+            if (cfg.udpOnly && !p.viaUdp) continue;
 
             const float distMeters = GetDistance(p.worldPos, cam.Location) / 100.0f;
             const ImU32 catCol = GetCategoryColor(p.cat);

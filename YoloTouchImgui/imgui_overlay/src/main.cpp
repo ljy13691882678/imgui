@@ -1837,8 +1837,14 @@ static void drawControlPanel() {
         static bool g_udpOn = false;
         if (ImGui::Checkbox("UDP解密", &g_udpOn)) {
             memEspSetUdpDecrypt(g_udpOn);
+            g_memEspCfg.udpOnly = g_udpOn; // UDP开启时只画UDP人物，隐藏内存框
             printf("[memesp] udp decrypt %s\n", g_udpOn ? "ON" : "OFF");
         }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120.0f);
+        const char *matrixItems[] = {"相机坐标", "自机坐标"};
+        if (ImGui::Combo("##matrixOrigin", &g_memEspCfg.matrixOrigin, matrixItems, 2))
+            printf("[memesp] 投影基准: %s\n", matrixItems[g_memEspCfg.matrixOrigin]);
         {
             MemEspSnapshot st;
             memEspGetSnapshot(st);

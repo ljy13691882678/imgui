@@ -51,6 +51,8 @@ struct MemEspDrawCfg {
     bool safebox = false;   // 保险箱
     bool ignoreBot = true;  // 忽略人机
     bool ignoreTeam = false;// 忽略队友
+    bool udpOnly = false;   // UDP解密开启时：只画UDP抓到的人物，隐藏其余内存框
+    int  matrixOrigin = 0;  // 投影原点(矩阵基准)：0=相机坐标 1=自机坐标
 };
 
 #define MEM_ESP_BONE_COUNT 15
@@ -66,6 +68,7 @@ struct MemEspPlayer {
     char     name[48] = {0};
     MemVec3  worldPos{0.0f, 0.0f, 0.0f};
     bool     hasBones = false;
+    bool     viaUdp = false; // 本帧坐标来自 UDP 解包(用于 UDP-only 过滤)
     MemVec3  bones[MEM_ESP_BONE_COUNT] = {}; // 世界坐标
 };
 
