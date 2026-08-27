@@ -93,7 +93,8 @@ LOCAL_SRC_FILES := \
     src/jiemi/coord_decrypt_dump.cpp \
     src/jiemi/coord_decrypt_execution.cpp \
     src/jiemi/qarma_pac.cpp \
-    src/jiemi/coord_driver_bridge.cpp
+    src/jiemi/coord_driver_bridge.cpp \
+    src/jiemi/fortify_stubs.cpp
 
 ifeq ($(OPENGL_DRAW), 1)
     LOCAL_SRC_FILES += src/ImGui/backends/imgui_impl_opengl3.cpp
