@@ -183,7 +183,7 @@ bool QueueDecryptTask(uint64_t sceneComponent)
             g_session.failedUntil.erase(failed);
         }
 
-        if (g_session.pendingComponents.contains(sceneComponent) ||
+        if (g_session.pendingComponents.count(sceneComponent) > 0 ||
             g_session.tasks.size() >= kMaximumPendingDecryptTasks)
             return false;
 

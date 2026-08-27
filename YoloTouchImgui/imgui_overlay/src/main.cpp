@@ -1822,6 +1822,15 @@ static void drawControlPanel() {
         ImGui::SameLine(); ImGui::Checkbox("容器", &g_memEspCfg.container);
         ImGui::Checkbox("尸体袋", &g_memEspCfg.deadbody);
         ImGui::SameLine(); ImGui::Checkbox("保险箱", &g_memEspCfg.safebox);
+        // UDP 解密：切换 UDP 解包绘制，防止游戏坐标加密导致的偏框
+        ImGui::Separator();
+        static bool udpDecryptOn = false;
+        if (ImGui::Checkbox("UDP解密解包绘制", &udpDecryptOn)) {
+            memEspSetUdpDecrypt(udpDecryptOn);
+            printf("[memesp] udp decrypt %s\n", udpDecryptOn ? "ON" : "OFF");
+        }
+        if (udpDecryptOn)
+            ImGui::TextDisabled("解密中：用解包坐标替代明文坐标");
     }
     ImGui::End();
 }
