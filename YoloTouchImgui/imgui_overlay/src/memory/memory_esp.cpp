@@ -897,22 +897,26 @@ inline bool ComputePlayerBox(const MemEspPlayer &p, const MemCamera &cam, float 
                 pts[i] = ImVec2(0, 0);
             }
         }
-        if (!any) return false;
-        float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
-        for (int i = 0; i < MEM_ESP_BONE_COUNT; ++i) {
-            if (!IsValidScreen(pts[i])) continue;
-            if (pts[i].x < minX) minX = pts[i].x;
-            if (pts[i].x > maxX) maxX = pts[i].x;
-            if (pts[i].y < minY) minY = pts[i].y;
-            if (pts[i].y > maxY) maxY = pts[i].y;
+        if (any) {
+            float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
+            for (int i = 0; i < MEM_ESP_BONE_COUNT; ++i) {
+                if (!IsValidScreen(pts[i])) continue;
+                if (pts[i].x < minX) minX = pts[i].x;
+                if (pts[i].x > maxX) maxX = pts[i].x;
+                if (pts[i].y < minY) minY = pts[i].y;
+                if (pts[i].y > maxY) maxY = pts[i].y;
+            }
+            const float w = maxX - minX, h = maxY - minY;
+            if (h >= 2.0f && w >= 1.0f) {
+                const float padX = ClampFloat(w * 0.18f, 3.0f, 18.0f);
+                const float padY = ClampFloat(h * 0.08f, 4.0f, 22.0f);
+                mn = ImVec2(minX - padX, minY - padY);
+                mx = ImVec2(maxX + padX, maxY + padY);
+                return true;
+            }
         }
-        const float w = maxX - minX, h = maxY - minY;
-        if (h < 2.0f || w < 1.0f) return false;
-        const float padX = ClampFloat(w * 0.18f, 3.0f, 18.0f);
-        const float padY = ClampFloat(h * 0.08f, 4.0f, 22.0f);
-        mn = ImVec2(minX - padX, minY - padY);
-        mx = ImVec2(maxX + padX, maxY + padY);
-        return true;
+        // 骨骼不可用/本次投影失败时：不直接返回 false(否则该玩家整帧消失、闪烁)，
+        // 继续落到下方身高推算，保证 UDP 抓到的人都稳定有框。
     }
 
     // 回退：无骨骼时用身高推算方框。按需求"以脚为底、往上绘制"。
