@@ -87,7 +87,13 @@ LOCAL_SRC_FILES := \
     src/injection/stderr_shim.cpp \
     src/memory/memory_esp.cpp \
     src/t3sdk/t3sdk.cpp \
-    src/auth/t3auth.cpp
+    src/auth/t3auth.cpp \
+    src/jiemi/coord_decrypt.cpp \
+    src/jiemi/coord_decrypt_discovery.cpp \
+    src/jiemi/coord_decrypt_dump.cpp \
+    src/jiemi/coord_decrypt_execution.cpp \
+    src/jiemi/qarma_pac.cpp \
+    src/jiemi/coord_driver_bridge.cpp
 
 ifeq ($(OPENGL_DRAW), 1)
     LOCAL_SRC_FILES += src/ImGui/backends/imgui_impl_opengl3.cpp
@@ -109,5 +115,8 @@ LOCAL_LDLIBS += -lQnnTFLiteDelegate -lQnnHtp -lQnnSystem
 # 内核驱动（TimeDriver）静态库：arm64-v8a 预编译 .a，提供内核陀螺仪 hook（触摸仍走 uinput）
 LOCAL_LDLIBS += -L$(LOCAL_PATH)/driver/arm64-v8a
 LOCAL_LDLIBS += -ltime_driver
+
+# 坐标解密静态库：Capstone 反汇编 + Unicorn 模拟器
+LOCAL_STATIC_LIBRARIES += jiemi_capstone jiemi_unicorn
 
 include $(BUILD_EXECUTABLE)
