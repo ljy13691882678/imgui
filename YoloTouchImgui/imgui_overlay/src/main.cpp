@@ -10,7 +10,6 @@
 #include "inference/litert_engine.h"
 #include "injection/touch_core.h"
 #include "injection/time_driver_wrap.h"
-#include "memory/memory_esp.h"
 #include "auth/t3auth.h"
 
 #include <atomic>
@@ -40,14 +39,6 @@ bool main_thread_flag = true;
 int abs_ScreenX = 0;
 int abs_ScreenY = 0;
 
-// ARM64 Bionic 要求可执行文件的静态 TLS 段对齐至少为 64 字节。
-// Unicorn 等静态库中的 .tbss (thread_local BSS) 段对齐不足(8 字节)，
-// 会导致装载时 SIGABRT: "executable's TLS segment is underaligned"。
-// 配合 Android.mk 的 -fno-emulated-tls，让该 alignas(64) thread_local
-// 以原生 TLS 落到真实 .tbss，把 PT_TLS p_align 抬到 64。
-// 必须在 main() 里用 volatile 锚定读取，避免 --gc-sections 把该 TLS 段清除。
-alignas(64) thread_local int g_tls_align_dummy = 0;
-
 // 当前推理引擎（main 创建，推理线程只读调用）
 static InferenceEngine* g_engine = nullptr;
 static std::atomic<bool> g_engineReady{false};
@@ -65,10 +56,6 @@ static int g_rotation = 0;
 
 // 控制配置
 static AimConfig g_cfg;
-
-// 内存透视/物资 (三角洲行动): 主开关 + 绘制选项 + 线程生命周期
-static bool g_memEspOn = false;
-static MemEspDrawCfg g_memEspCfg;
 
 // 触摸注入
 static bool g_touchReady = false;
@@ -1791,92 +1778,6 @@ static void drawControlPanel() {
                                 diagDown ? " 按下" : "");
         }
     }
-    ImGui::Separator();
-
-    // ===== 内存透视/物资 (三角洲行动) =====
-    if (ImGui::CollapsingHeader("透视/物资", g_memEspOn ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
-        // 主开关：启动/停止内存读取线程
-        if (ImGui::Checkbox("内存透视/物资", &g_memEspOn)) {
-            if (g_memEspOn) { memEspStart(); printf("[memesp] start\n"); }
-            else            { memEspStop();  printf("[memesp] stop\n"); }
-        }
-        if (g_memEspOn) {
-            ImGui::SameLine();
-            if (memEspRunning()) {
-                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.3f, 1.0f), "读取中…");
-                MemEspSnapshot st;
-                if (memEspGetSnapshot(st) && !st.status.empty())
-                    ImGui::TextDisabled("状态: %s", st.status.c_str());
-            } else {
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "启动中…");
-            }
-        }
-        // 人物选项
-        ImGui::Separator();
-        ImGui::Text("人物");
-        ImGui::SameLine(); ImGui::Checkbox("方框", &g_memEspCfg.box);
-        ImGui::SameLine(); ImGui::Checkbox("血条", &g_memEspCfg.health);
-        ImGui::SameLine(); ImGui::Checkbox("名字", &g_memEspCfg.name);
-        ImGui::Checkbox("队伍", &g_memEspCfg.team);
-        ImGui::SameLine(); ImGui::Checkbox("距离", &g_memEspCfg.dist);
-        ImGui::SameLine(); ImGui::Checkbox("骨骼", &g_memEspCfg.skeleton);
-        ImGui::Checkbox("忽略人机", &g_memEspCfg.ignoreBot);
-        ImGui::SameLine(); ImGui::Checkbox("忽略队友", &g_memEspCfg.ignoreTeam);
-        // 物资选项
-        ImGui::Separator();
-        ImGui::Text("物资");
-        ImGui::SameLine(); ImGui::Checkbox("地面物资", &g_memEspCfg.loot);
-        ImGui::SameLine(); ImGui::Checkbox("容器", &g_memEspCfg.container);
-        ImGui::Checkbox("尸体袋", &g_memEspCfg.deadbody);
-        ImGui::SameLine(); ImGui::Checkbox("保险箱", &g_memEspCfg.safebox);
-// ===== UDP 明文解包：不偏框的真实坐标 + 读取状态显示框 =====
-        ImGui::Separator();
-        ImGui::Text("UDP解包");
-        ImGui::SameLine();
-        static bool g_udpOn = false;
-        if (ImGui::Checkbox("UDP解密", &g_udpOn)) {
-            memEspSetUdpDecrypt(g_udpOn);
-            g_memEspCfg.udpOnly = g_udpOn; // UDP开启时只画UDP人物，隐藏内存框
-            printf("[memesp] udp decrypt %s\n", g_udpOn ? "ON" : "OFF");
-        }
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(120.0f);
-        const char *matrixItems[] = {"相机坐标", "自机坐标"};
-        if (ImGui::Combo("##matrixOrigin", &g_memEspCfg.matrixOrigin, matrixItems, 2))
-            printf("[memesp] 投影基准: %s\n", matrixItems[g_memEspCfg.matrixOrigin]);
-        {
-            MemEspSnapshot st;
-            memEspGetSnapshot(st);
-            MemEspUdpStats us;
-            memEspGetUdpStats(us);
-
-            char box[512];
-            int off = 0;
-            off += snprintf(box + off, sizeof(box) - (size_t)off,
-                            "自机坐标: (%.1f, %.1f, %.1f)\n", st.selfPos.x, st.selfPos.y, st.selfPos.z);
-            off += snprintf(box + off, sizeof(box) - (size_t)off,
-                            "相机坐标: (%.1f, %.1f, %.1f)\n",
-                            st.camera.Location.x, st.camera.Location.y, st.camera.Location.z);
-            off += snprintf(box + off, sizeof(box) - (size_t)off,
-                            "状态: %s | %s%s\n",
-                            us.capturing ? "抓包中" : "未抓包",
-                            us.originValid ? "原点已对齐" : "原点未对齐",
-                            us.enabled ? " | 已开启" : " | 已关闭");
-            off += snprintf(box + off, sizeof(box) - (size_t)off,
-                            "人物%d 名字%d 包%d/游戏%d 解析成功%d/失败%d\n",
-                            us.poses, us.names, us.packets, us.gamePackets, us.mvOk, us.mvFails);
-
-            const ImVec4 ucol = (us.enabled && us.poses > 0)
-                                    ? ImVec4(0.40f, 1.0f, 0.40f, 1.0f)
-                                    : ImVec4(0.90f, 0.90f, 0.90f, 1.0f);
-            ImGui::PushStyleColor(ImGuiCol_Text, ucol);
-            ImGui::InputTextMultiline("##udpBox", box, sizeof(box),
-                                      ImVec2(-1.0f, 4 * ImGui::GetTextLineHeightWithSpacing() + 10.0f),
-                                      ImGuiInputTextFlags_ReadOnly);
-            ImGui::PopStyleColor();
-        }
-    }
     ImGui::End();
 }
 
@@ -1910,11 +1811,6 @@ void Layout_tick_UI() {
     else drawControlPanel();
     drawDetectionOverlay();
     drawZoneEditor();
-    // 内存透视/物资：独立于 YOLO 检测框绘制
-    if (g_memEspOn && memEspRunning()) {
-        memEspDraw(ImGui::GetBackgroundDrawList(), g_memEspCfg,
-                   (float)native_window_screen_x, (float)native_window_screen_y);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2040,15 +1936,6 @@ static void drawLoginWindow() {
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
-    // 保持 g_tls_align_dummy 存活：--gc-sections 会移除未被引用的 TLS 段，
-    // 使可执行文件 PT_TLS 对齐跌回 8，ARM64 Bionic loader 以 SIGABRT 拒绝装载
-    // ("TLS segment is underaligned")。这里用 volatile 局部变量承接 thread_local
-    // 的读取，使访问指令无法被优化器消除，符号引用保留，TLS 段成为 GC root，
-    // PT_TLS p_align 得以保持在 64。零副作用锚定读取。
-    {
-        volatile int tls_anchor = g_tls_align_dummy;
-        (void)tls_anchor;
-    }
     // 参数：model_path shm_path [workdir] [card]
     if (argc < 3) {
         printf("Usage: %s <model.tflite> <shm_path> [workdir] [card]\n", argv[0]);

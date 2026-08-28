@@ -1,32 +1,5 @@
 LOCAL_PATH := $(call my-dir)
 
-# ===================== Capstone 反汇编库（坐标解密 ring-service 发现） =====================
-include $(CLEAR_VARS)
-LOCAL_MODULE := jiemi_capstone
-LOCAL_C_INCLUDES += $(LOCAL_PATH)/3rd/capstone/include
-LOCAL_C_INCLUDES += $(LOCAL_PATH)/3rd/capstone
-LOCAL_CFLAGS := -DCAPSTONE_HAS_ARM64 -DCAPSTONE_USE_SYS_DYN_MEM -DCAPSTONE_AARCH64_COMPAT_HEADER
-LOCAL_SRC_FILES := \
-    3rd/capstone/cs.c \
-    3rd/capstone/utils.c \
-    3rd/capstone/MCInst.c \
-    3rd/capstone/MCInstrDesc.c \
-    3rd/capstone/MCRegisterInfo.c \
-    3rd/capstone/Mapping.c \
-    3rd/capstone/SStream.c \
-    3rd/capstone/arch/AArch64/AArch64BaseInfo.c \
-    3rd/capstone/arch/AArch64/AArch64Disassembler.c \
-    3rd/capstone/arch/AArch64/AArch64InstPrinter.c \
-    3rd/capstone/arch/AArch64/AArch64Mapping.c \
-    3rd/capstone/arch/AArch64/AArch64Module.c
-include $(BUILD_STATIC_LIBRARY)
-
-# ===================== Unicorn 模拟器库（坐标解密执行） =====================
-include $(CLEAR_VARS)
-LOCAL_MODULE := jiemi_unicorn
-LOCAL_SRC_FILES := 3rd/unicorn/lib/libunicorn.a
-include $(PREBUILT_STATIC_LIBRARY)
-
 include $(CLEAR_VARS)
 # 使用 opengl 绘制（1=opengl，0=vulkan）
 OPENGL_DRAW = 0
@@ -36,23 +9,11 @@ LOCAL_MODULE := imgui
 LOCAL_CFLAGS := -std=c++17
 LOCAL_CPPFLAGS := -std=c++17
 
-# 坐标解密/Unicorn 的可执行 TLS 段必须原生 TLS（不能 emutls）：
-# 关闭模拟 TLS，让 main.cpp 里的 alignas(64) thread_local 落到真实 .tbss，
-# 才能把可执行文件 PT_TLS p_align 抬到 64，满足 ARM64 Bionic loader
-# ("TLS segment is underaligned") 的加载要求。
-LOCAL_CPPFLAGS += -fno-emulated-tls
-LOCAL_CFLAGS += -fno-emulated-tls
-
 # T3 验证 SDK 依赖异常与 RTTI
 LOCAL_CPPFLAGS += -fexceptions -frtti
 
 LOCAL_CFLAGS += -DVK_USE_PLATFORM_ANDROID_KHR
 LOCAL_CPPFLAGS += -DVK_USE_PLATFORM_ANDROID_KHR
-
-# 坐标解密（jiemi）：启用 Unicorn 解密执行 + Capstone ARM64 反汇编
-LOCAL_CFLAGS += -DCAPSTONE_HAS_ARM64 -DCAPSTONE_USE_SYS_DYN_MEM -DCAPSTONE_AARCH64_COMPAT_HEADER
-LOCAL_CPPFLAGS += -DCAPSTONE_HAS_ARM64 -DCAPSTONE_USE_SYS_DYN_MEM -DCAPSTONE_AARCH64_COMPAT_HEADER
-LOCAL_CPPFLAGS += -DJIEMI_WITH_UNICORN
 
 ifeq ($(OPENGL_DRAW), 1)
     LOCAL_CFLAGS += -DUSE_OPENGL
@@ -71,9 +32,6 @@ LOCAL_C_INCLUDES += $(LOCAL_PATH)/src
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/src/inference
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/src/injection
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/driver
-LOCAL_C_INCLUDES += $(LOCAL_PATH)/3rd/capstone/include
-LOCAL_C_INCLUDES += $(LOCAL_PATH)/3rd/capstone
-LOCAL_C_INCLUDES += $(LOCAL_PATH)/3rd/unicorn
 
 # 源码
 LOCAL_SRC_FILES := \
@@ -92,16 +50,8 @@ LOCAL_SRC_FILES := \
     src/injection/touch_core.cpp \
     src/injection/time_driver_wrap.cpp \
     src/injection/stderr_shim.cpp \
-    src/memory/memory_esp.cpp \
     src/t3sdk/t3sdk.cpp \
-    src/auth/t3auth.cpp \
-    src/jiemi/coord_decrypt.cpp \
-    src/jiemi/coord_decrypt_discovery.cpp \
-    src/jiemi/coord_decrypt_dump.cpp \
-    src/jiemi/coord_decrypt_execution.cpp \
-    src/jiemi/qarma_pac.cpp \
-    src/jiemi/coord_driver_bridge.cpp \
-    src/jiemi/fortify_stubs.cpp
+    src/auth/t3auth.cpp
 
 ifeq ($(OPENGL_DRAW), 1)
     LOCAL_SRC_FILES += src/ImGui/backends/imgui_impl_opengl3.cpp
@@ -123,8 +73,5 @@ LOCAL_LDLIBS += -lQnnTFLiteDelegate -lQnnHtp -lQnnSystem
 # 内核驱动（TimeDriver）静态库：arm64-v8a 预编译 .a，提供内核陀螺仪 hook（触摸仍走 uinput）
 LOCAL_LDLIBS += -L$(LOCAL_PATH)/driver/arm64-v8a
 LOCAL_LDLIBS += -ltime_driver
-
-# 坐标解密静态库：Capstone 反汇编 + Unicorn 模拟器
-LOCAL_STATIC_LIBRARIES += jiemi_capstone jiemi_unicorn
 
 include $(BUILD_EXECUTABLE)
