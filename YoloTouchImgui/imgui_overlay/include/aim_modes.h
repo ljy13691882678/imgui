@@ -17,6 +17,9 @@
 // smoothstep(t) = t*t*(3-2t)，等价于两端控制点重合的贝塞尔曲线。
 class BezierMover {
 public:
+    // curve：0=Smoothstep(慢-快-慢)；1=三次缓入缓出(中段更圆润加速、起止更柔)
+    void setCurve(int curve) { m_curve = (curve == 1) ? 1 : 0; }
+
     void start(long long startMs, long long endMs) {
         m_start = startMs;
         m_end = endMs;
@@ -31,7 +34,7 @@ public:
         if (duration < 1.0f) duration = 1.0f;
         float rawT = (float)(nowMs - m_start) / duration;
         rawT = std::clamp(rawT, 0.0f, 1.0f);
-        float curSmooth = smoothstep(rawT);
+        float curSmooth = ease(rawT);
         float delta = curSmooth - m_prevSmooth;
         m_prevSmooth = curSmooth;
         if (rawT >= 1.0f) m_active = false;
@@ -42,9 +45,20 @@ public:
     void cancel() { m_active = false; }
 
 private:
+    // 指定缓动函数（拉枪曲线弧度）
+    float ease(float t) const {
+        if (m_curve == 1)
+            return easeInOutCubic(t);   // 中段加速更圆润、起止更柔和
+        return smoothstep(t);           // 默认：慢-快-慢
+    }
     static float smoothstep(float t) { return t * t * (3.0f - 2.0f * t); }
+    static float easeInOutCubic(float t) {
+        return t < 0.5f ? 4.0f * t * t * t
+                        : 1.0f - std::pow(-2.0f * t + 2.0f, 3.0f) * 0.5f;
+    }
 
     bool      m_active = false;
+    int       m_curve = 0;
     long long m_start = 0, m_end = 0;
     float     m_prevSmooth = 0.0f;
 };
@@ -111,6 +125,14 @@ public:
         moveY = m_lastY * sm + moveY * (1.0f - sm);
         m_lastX = moveX; m_lastY = moveY;
 
+        // PID 接近减速区：误差距离小于 pidApproachBand 时按比例线性减速，
+        // 吞掉收敛尾部的过冲/抖动，实现平滑收敛（数值越大越早放慢、越柔和）
+        if (cfg.pidApproachBand > 0.0f && dist < cfg.pidApproachBand) {
+            float k = std::clamp(dist / cfg.pidApproachBand, 0.05f, 1.0f);
+            moveX *= k;
+            moveY *= k;
+        }
+
         // 单帧最大步长（像素，参考实现为 1200，基本无约束）
         const float maxPerFrame = 1200.0f;
         float md = std::sqrt(moveX * moveX + moveY * moveY);
@@ -149,6 +171,8 @@ public:
                       float scrW, float scrH) {
         AimOutput out;
         if (!cfg.aimEnabled || !cfg.enabled) return out;
+
+        m_mover.setCurve(cfg.bezierCurve);
 
         float px = t.cx + t.vx * cfg.predictGain;
         float py = t.cy + t.vy * cfg.predictGain;

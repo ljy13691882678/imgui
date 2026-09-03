@@ -81,6 +81,12 @@ struct AimConfig {
     float convergeThresh = 10.0f;
     // 输出移动平滑（PID/贝塞尔共用，0~0.95，越大越平滑）
     float aimMoveSmooth = 0.35f;
+    // PID 接近减速区(px)：误差像素距离小于该值时按比例线性减速，平滑收敛、避免尾部过冲。
+    // 数值越大越早在接近目标时就放慢(更柔和)，0=关闭(只在收敛阈值内才硬停)。PID 模式生效。
+    float pidApproachBand = 60.0f;
+    // 贝塞尔拉枪曲线(缓动弧度)：0=Smoothstep(慢-快-慢,默认)；1=三次缓入缓出(中段更圆润加速、
+    // 起止更柔) —— 控制拉枪轨迹的弧度/节奏。贝塞尔(aimMode=1)模式生效。
+    int   bezierCurve = 0;
     // 自瞄类别锁定：-1=所有启用类别；>=0=仅锁定该类（模型类别索引，面板按类别名选择）
     int   aimClass = -1;
 

@@ -1649,10 +1649,15 @@ static void drawControlPanel() {
         ImGui::SliderFloat("I##pidKi", &g_cfg.pidKi, 0.0f, 0.020f);
         ImGui::SliderFloat("D##pidKd", &g_cfg.pidKd, 0.0f, 0.010f);
         ImGui::SliderFloat("采样周期(ms)", &g_cfg.pidSamplePeriodMs, 1.0f, 50.0f);
+        ImGui::SliderFloat("收敛减速区(px)", &g_cfg.pidApproachBand, 0.0f, 300.0f, "%.0f");
     }
     if (g_cfg.aimMode == 1) {
         ImGui::Text("贝塞尔参数");
         ImGui::SliderFloat("时长系数", &g_cfg.bezierDuration, 5.0f, 100.0f);
+        const char* bcurves[] = {"Smoothstep(慢快慢)", "三次缓入缓出(更圆润)"};
+        int cur = (g_cfg.bezierCurve == 1) ? 1 : 0;
+        if (ImGui::Combo("拉枪曲线##bezierCurve", &cur, bcurves, 2))
+            g_cfg.bezierCurve = cur;
     }
     // PID/贝塞尔共用参数
     if (g_cfg.aimMode == 0 || g_cfg.aimMode == 1) {
