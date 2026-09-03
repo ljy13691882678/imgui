@@ -121,6 +121,7 @@ static float g_gyroLastTargetPitch = 0.0f; // 上一帧目标 pitch（用于变�
 static float g_gyroLastTargetYaw   = 0.0f; // 上一帧目标 yaw（用于变化率限制）
 static bool  g_gyroTargetActive = false;  // 推理线程是否有有效目标
 static bool  g_gyroTargetDirReversed = false; // 目标方向反转标记（主线程快速收敛）
+static long long g_gyroApplyAtMs = 0;   // 陀螺仪注入节能：上次实际注入时间戳(ms)
 
 // T3 卡密验证状态（防破解：验证通过后才启用推理/自瞄/注入）
 static std::atomic<bool> g_t3Verified{false};   // 是否已通过卡密验证
@@ -537,6 +538,9 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     }
     const bool gyroMode = g_cfg.gyroAim && touch_kernel_connected();
     const bool kernelTouchModeOn = g_cfg.kernelTouch && kdrv_connected();
+    // "主手副陀"联合瞄准：需内置陀螺仪模式且勾选混合开关（触控为主 + 陀螺仪精修同时注入）。
+    // 触控通道不可用时自动降级为纯陀螺仪（见注入处 hybridTouchRatio 计算）。
+    const bool hybridMode = g_cfg.hybridAim && gyroMode;
 
     // 自瞄触发区/倍镜区门控：开启时物理手指需点在对应区域内才允许自瞄
     bool aimGateOk = true;
@@ -603,8 +607,8 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
     }
     const bool recoilArmed = g_cfg.enabled && !zoneEditing &&
                              g_cfg.recoilEnabled &&
-                             (gyroMode ? (g_cfg.recoilDegPerSec > 0.0f)
-                                       : ((g_touchReady || kernelTouchModeOn) && g_cfg.recoilStrength > 0));
+                             ((gyroMode && !hybridMode) ? (g_cfg.recoilDegPerSec > 0.0f)
+                                      : ((g_touchReady || kernelTouchModeOn) && g_cfg.recoilStrength > 0));
     if (recoilArmed && touch_is_finger_in_fire_zone()) {
         if (!g_recoilFiring) { g_recoilFiring = true; g_recoilStartMs = now; }
     } else {
@@ -614,100 +618,117 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
                                (now - g_recoilStartMs >= (long long)g_cfg.recoilStartMs);
 
     // ── 自瞄/压枪统一输出 ──
-    // 陀螺仪模式：自瞄增量换算为 pitch/yaw 角度，压枪叠加下拉角速度。
-    // 关键：推理线程只计算目标，写入 g_gyroTargetPitch/Yaw，不直接注入。
-    // 主线程每帧（~1ms）读取目标并平滑插值注入，实现丝滑陀螺仪手感。
-    if (gyroMode) {
-        if (aimActiveNow || recoilPulling) {
-            // 屏幕增量（像素）→ 角度：Y 增量 → pitch（俯仰），X 增量 → yaw（偏航）
-            float pitch = dpy * g_cfg.gyroSens;
-            float yaw   = dpx * g_cfg.gyroSens;
-            
-            // 方向反转检测：当前目标方向与上帧注入方向相反
-            bool dirReversed = false;
-            {
-                float prevPitch = g_gyroLastTargetPitch;
-                float prevYaw = g_gyroLastTargetYaw;
-                bool signRevPitch = (pitch > 0 && prevPitch < 0) || (pitch < 0 && prevPitch > 0);
-                bool signRevYaw = (yaw > 0 && prevYaw < 0) || (yaw < 0 && prevYaw > 0);
-                dirReversed = signRevPitch || signRevYaw;
-            }
-
-            if (!dirReversed) {
-                // 限制变化率
-                float maxChange = 3.0f / (g_cfg.gyroSens + 0.5f);
-                float dp = pitch - g_gyroLastTargetPitch;
-                float dy = yaw - g_gyroLastTargetYaw;
-                float changeMag = std::sqrt(dp*dp + dy*dy);
-                if (changeMag > maxChange) {
-                    float k = maxChange / changeMag;
-                    pitch = g_gyroLastTargetPitch + dp * k;
-                    yaw = g_gyroLastTargetYaw + dy * k;
-                }
-            }
-            g_gyroLastTargetPitch = pitch;
-            g_gyroLastTargetYaw = yaw;
-            
-            // 分离自瞄和压枪的限幅：
-            float maxDeg = g_cfg.gyroMaxDeg;
-            float maxYawDeg = maxDeg * 1.5f;
-
-            // 自瞄 Yaw 限幅
-            if (std::fabs(yaw) > maxYawDeg) {
-                yaw = (yaw > 0) ? maxYawDeg : -maxYawDeg;
-            }
-            // 自瞄 Pitch 限幅
-            if (std::fabs(pitch) > maxDeg) {
-                pitch = (pitch > 0) ? maxDeg : -maxDeg;
-            }
-
-            // 反转在压枪之前应用
-            if (g_cfg.gyroInvertPitch) pitch = -pitch;
-            if (g_cfg.gyroInvertYaw)   yaw = -yaw;
-
-            // 压枪：在反转之后应用，确保方向始终往下压
-            // 使用 -= 确保压枪方向不受反转设置影响
-            if (recoilPulling) {
-                float recoilDt = g_cfg.recoilDegPerSec * dt;
-                // 移动时额外压枪补偿
-                float moveSpeed = std::sqrt(dpx*dpx + dpy*dpy);
-                if (moveSpeed > 50.0f) {
-                    float boost = std::min(moveSpeed / 200.0f, 1.0f);
-                    recoilDt *= (1.0f + boost * 0.5f);
-                }
-                pitch -= recoilDt;
-            }
-            float finalPitch = pitch;
-
-            {
-                std::lock_guard<std::mutex> lock(g_gyroMutex);
-                g_gyroTargetPitch = finalPitch;
-                g_gyroTargetYaw   = yaw;
-                g_gyroTargetActive = true;
-                g_gyroTargetDirReversed = dirReversed;
-            }
-            g_aimActive = aimActiveNow;
-            if (aimActiveNow) {
-                g_aimX = out.targetX;
-                g_aimY = out.targetY;
-            }
-        } else {
-            // 目标丢失/自瞄锁定：通知主线程渐停注入。
-            // 只清 active，保留 g_gyroLastTargetPitch/Yaw 作为最近一次真实注入角记忆，
-            // 解锁重新追时基于上一真实角度接续，而非从 0 突跳，
-            // 避免陀螺仪注入角度 0↔值 反复突变造成“时拉时卡”。
-            {
-                std::lock_guard<std::mutex> lock(g_gyroMutex);
-                g_gyroTargetActive = false;
-                g_gyroTargetDirReversed = false;
-            }
-            g_aimActive = false;
+    // 触控为"主手"、内核陀螺仪为"副陀"。主手副陀模式：按 hybridTouchRatio 拆分同一份自瞄
+    // 增量，触控承担大角度快速粗移、陀螺仪承担剩余小角度稳定精修，两通道同时注入。
+    // 纯陀螺仪模式触控份额为0；纯触摸模式陀螺仪份额为0；触摸不可用时自动降级全陀螺仪。
+    // 关键：推理线程只计算目标，写入 g_gyroTargetPitch/Yaw，不直接注入；
+    // 主线程每帧(~1ms)读取目标并平滑插值注入，实现丝滑陀螺仪手感。
+    const bool touchAvail = canInjectTouch();
+    float touchShare = 0.0f, gyroShare = 0.0f;
+    if (hybridMode) {
+        if (!touchAvail) { touchShare = 0.0f; gyroShare = 1.0f; }      // 触摸不可用→全陀螺仪降级
+        else {
+            touchShare = g_cfg.hybridTouchRatio;
+            gyroShare = 1.0f - touchShare;
         }
-    } else if (canInjectTouch() && (aimActiveNow || recoilPulling)) {
-        // 视角手指：自瞄增量 + 压枪下拉合并移动
-        // 根据当前模式选择 uinput 或内核驱动注入
-        float dx = dpx;
-        float dy = dpy;
+    } else if (gyroMode) {  // 纯陀螺仪
+        touchShare = 0.0f;  gyroShare = 1.0f;
+    } else {                // 纯触摸
+        touchShare = 1.0f;  gyroShare = 0.0f;
+    }
+    const bool wantTouch = touchAvail && touchShare > 0.0f;
+    const bool wantGyro  = gyroShare > 0.0f;
+    const bool doInject  = (aimActiveNow || recoilPulling);
+
+    // ── 陀螺仪通道（副陀 / 纯陀螺仪）──
+    if (wantGyro && doInject) {
+        // 屏幕增量（像素）→ 角度：Y 增量 → pitch（俯仰），X 增量 → yaw（偏航）
+        float pitch = dpy * gyroShare * g_cfg.gyroSens;
+        float yaw   = dpx * gyroShare * g_cfg.gyroSens;
+
+        // 方向反转检测：当前目标方向与上帧注入方向相反
+        bool dirReversed = false;
+        {
+            float prevPitch = g_gyroLastTargetPitch;
+            float prevYaw = g_gyroLastTargetYaw;
+            bool signRevPitch = (pitch > 0 && prevPitch < 0) || (pitch < 0 && prevPitch > 0);
+            bool signRevYaw = (yaw > 0 && prevYaw < 0) || (yaw < 0 && prevYaw > 0);
+            dirReversed = signRevPitch || signRevYaw;
+        }
+
+        if (!dirReversed) {
+            // 限制变化率
+            float maxChange = 3.0f / (g_cfg.gyroSens + 0.5f);
+            float dp = pitch - g_gyroLastTargetPitch;
+            float dy = yaw - g_gyroLastTargetYaw;
+            float changeMag = std::sqrt(dp*dp + dy*dy);
+            if (changeMag > maxChange) {
+                float k = maxChange / changeMag;
+                pitch = g_gyroLastTargetPitch + dp * k;
+                yaw = g_gyroLastTargetYaw + dy * k;
+            }
+        }
+        g_gyroLastTargetPitch = pitch;
+        g_gyroLastTargetYaw = yaw;
+
+        // 分离自瞄和压枪的限幅：
+        float maxDeg = g_cfg.gyroMaxDeg;
+        float maxYawDeg = maxDeg * 1.5f;
+        // 自瞄 Yaw 限幅
+        if (std::fabs(yaw) > maxYawDeg) yaw = (yaw > 0) ? maxYawDeg : -maxYawDeg;
+        // 自瞄 Pitch 限幅
+        if (std::fabs(pitch) > maxDeg) pitch = (pitch > 0) ? maxDeg : -maxDeg;
+
+        // 反转在压枪之前应用
+        if (g_cfg.gyroInvertPitch) pitch = -pitch;
+        if (g_cfg.gyroInvertYaw)   yaw = -yaw;
+
+        // 压枪叠加下拉角速度：仅纯陀螺仪模式下陀螺承担压枪；
+        // 主手副陀下压枪由主手(触控)承担，避免两通道重复下拉。
+        if (recoilPulling && !hybridMode) {
+            float recoilDt = g_cfg.recoilDegPerSec * dt;
+            // 移动时额外压枪补偿
+            float moveSpeed = std::sqrt(dpx*dpx + dpy*dpy);
+            if (moveSpeed > 50.0f) {
+                float boost = std::min(moveSpeed / 200.0f, 1.0f);
+                recoilDt *= (1.0f + boost * 0.5f);
+            }
+            pitch -= recoilDt;
+        }
+        float finalPitch = pitch;
+
+        {
+            std::lock_guard<std::mutex> lock(g_gyroMutex);
+            g_gyroTargetPitch = finalPitch;
+            g_gyroTargetYaw   = yaw;
+            g_gyroTargetActive = true;
+            g_gyroTargetDirReversed = dirReversed;
+        }
+        g_aimActive = aimActiveNow;
+        if (aimActiveNow) {
+            g_aimX = out.targetX;
+            g_aimY = out.targetY;
+        }
+    } else if (wantGyro) {
+        // 目标丢失/自瞄锁定：通知主线程渐停注入。
+        // 只清 active，保留 g_gyroLastTargetPitch/Yaw 作为最近一次真实注入角记忆，
+        // 解锁重新追时基于上一真实角度接续，而非从 0 突跳，
+        // 避免陀螺仪注入角度 0↔值 反复突变造成“时拉时卡”。
+        {
+            std::lock_guard<std::mutex> lock(g_gyroMutex);
+            g_gyroTargetActive = false;
+            g_gyroTargetDirReversed = false;
+        }
+        g_aimActive = false;
+    }
+
+    // ── 触控通道（主手）──
+    // 与陀螺仪可同时进行(主手副陀)；纯触摸时陀螺仪关闭。
+    if (wantTouch && doInject) {
+        // 视角手指：自瞄增量(×份) + 压枪下拉合并移动
+        // 压枪在主手通道(纯触摸或主手副陀)：下拉用 px/s
+        float dx = dpx * touchShare;
+        float dy = dpy * touchShare;
         if (recoilPulling) dy += g_cfg.recoilStrength * dt;  // 压枪下拉（px/s × s）
         if (!g_aimFingerDown) {
             // 手指从触控区中心按下
@@ -736,11 +757,10 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
             g_aimX = out.targetX;
             g_aimY = out.targetY;
         }
-    } else {
-        if (g_aimFingerDown) {
-            inject_up(TOUCH_VIRTUAL_SLOT);
-            g_aimFingerDown = false;
-        }
+    } else if (wantTouch && g_aimFingerDown) {
+        // 无注入时抬起视角手指
+        inject_up(TOUCH_VIRTUAL_SLOT);
+        g_aimFingerDown = false;
         g_aimActive = false;
     }
 
@@ -1722,6 +1742,20 @@ static void drawControlPanel() {
             : (g_cfg.gyroAim
                 ? "陀螺仪驱动未连接，回退 uinput 注入（自瞄/扳机仍走 uinput）"
                 : "触摸模式：注入统一走 uinput"));
+        // 主手副陀：触摸(主手)承担大角度粗移、陀螺仪(副)承担小角度精修，两通道同时注入。
+        // 需同时勾选"内核陀螺仪"；触摸不可用时自动降级纯陀螺仪。
+        ImGui::Checkbox("主手副陀(触摸+陀螺仪同时)", &g_cfg.hybridAim);
+        if (g_cfg.hybridAim) {
+            if (!g_cfg.gyroAim)
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                                   "需同时勾选“内核陀螺仪”才启用手+陀联合瞄准");
+            ImGui::SliderFloat("触控承担比例", &g_cfg.hybridTouchRatio, 0.0f, 1.0f, "%.2f");
+            ImGui::TextDisabled("触控承担大角度快速粗移，剩余交给陀螺仪精修稳定");
+        }
+        // 陀螺仪注入节能：增大注入间隔降低内核调用频率，省电/降热（手感仍平滑）
+        ImGui::SliderInt("陀螺注入间隔(ms)", &g_cfg.gyroThrottleMs, 0, 20, "%d");
+        if (g_cfg.gyroThrottleMs < 0) g_cfg.gyroThrottleMs = 0;
+        ImGui::TextDisabled("0=每次注入(约1000Hz)；越大越省电降热，手感仍平滑");
         ImGui::Separator();
 
         if (g_cfg.gyroAim && !touch_kernel_connected()) {
@@ -2175,7 +2209,13 @@ int main(int argc, char* argv[]) {
                     g_gyroSmoothPitch = g_gyroTargetPitch;
                     g_gyroSmoothYaw   = g_gyroTargetYaw;
                 }
-                touch_gyro_apply(true, g_gyroSmoothPitch, g_gyroSmoothYaw);
+                // 陀螺仪注入节能：按 gyroThrottleMs 节流注入 syscall 频率，
+                // 平滑插值(EMA)仍每帧计算，只降低内核注入频率以省电/降热。
+                long long nowG = getTimeNowMs();
+                if (g_cfg.gyroThrottleMs <= 0 || nowG - g_gyroApplyAtMs >= (long long)g_cfg.gyroThrottleMs) {
+                    g_gyroApplyAtMs = nowG;
+                    touch_gyro_apply(true, g_gyroSmoothPitch, g_gyroSmoothYaw);
+                }
             } else if (!g_gyroTargetActive) {
                 // 渐停式锁定：锁定后不硬切归零，而是按阶梯衰减、每帧持续注入当前衰减值；
                 // 直到残余角足够小(<0.3°)才吸住归零停注，杜绝准星“咔”的突变与长尾毛毛刺。
@@ -2189,7 +2229,11 @@ int main(int argc, char* argv[]) {
                     g_gyroSmoothPitch = 0.0f;
                     g_gyroSmoothYaw   = 0.0f;
                 } else {
-                    touch_gyro_apply(true, g_gyroSmoothPitch, g_gyroSmoothYaw);
+                    long long nowG = getTimeNowMs();
+                    if (g_cfg.gyroThrottleMs <= 0 || nowG - g_gyroApplyAtMs >= (long long)g_cfg.gyroThrottleMs) {
+                        g_gyroApplyAtMs = nowG;
+                        touch_gyro_apply(true, g_gyroSmoothPitch, g_gyroSmoothYaw);
+                    }
                 }
             }
         }

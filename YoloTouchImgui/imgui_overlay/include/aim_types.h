@@ -133,6 +133,16 @@ struct AimConfig {
     bool  gyroInvertPitch = false;      // 反转 Pitch（上下）
     bool  gyroInvertYaw = false;        // 反转 Yaw（左右）
 
+    // "主手副陀"联合瞄准：开启后触控(主手,粗移)与内核陀螺仪(副,精修)同时注入，
+    // 按 hybridTouchRatio 拆分同一份自瞄增量——触摸承担大角度快速跟随，陀螺仪承担小角度稳定收敛，
+    // 兼顾速度与稳定。需同时勾选"内核陀螺仪"；触摸通道不可用时自动降级为纯陀螺仪。
+    bool  hybridAim = false;            // 主手副陀开关
+    float hybridTouchRatio = 0.7f;      // 触控承担比例(0~1)，剩余(1-ratio)交给陀螺仪精修
+
+    // 陀螺仪注入节能：注入 syscall 节流间隔(ms)。0=不节流(每次主循环都注入)。
+    // 增大该值降低内核注入频率以减少 CPU/发热（如 1→5：约1000Hz→200Hz，手感依旧平滑）。
+    int   gyroThrottleMs = 5;
+
     // 内核触摸（TimeDriver 触摸注入，替代 uinput）
     // 勾选后自瞄/压枪/扳机的虚拟触摸走 TimeDriver 内核驱动注入，
     // 而非 uinput。物理触摸不受影响（Touch_Init 后立即 Touch_Disable）。
