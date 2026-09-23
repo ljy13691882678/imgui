@@ -1626,6 +1626,23 @@ static void drawControlPanel() {
             ImGui::TextDisabled(g_cfg.pcListenMode
                                 ? "本机监听端口, PC 侧用 --connect 本机IP"
                                 : "本机连 PC(PC 侧默认监听)");
+
+            // ★ 投影参数: 直接在这里调, 改完立刻通过 TCP 发给 PC(PC 实时改算法)
+            ImGui::SeparatorText("投影参数（发给 PC，实时生效）");
+            bool cfgChanged = false;
+            cfgChanged |= ImGui::SliderFloat("FOV##pcfov", &g_cfg.pcFov, 30.0f, 140.0f, "%.0f°");
+            cfgChanged |= ImGui::SliderFloat("宽高比##pcasp", &g_cfg.pcAspect, 1.00f, 2.80f, "%.2f");
+            cfgChanged |= ImGui::SliderFloat("身体中心##pcz", &g_cfg.pcZOffset, 0.0f, 180.0f, "%.0fcm");
+            cfgChanged |= ImGui::Checkbox("左右镜像##pcflipx", &g_cfg.pcFlipX);
+            ImGui::SameLine();
+            cfgChanged |= ImGui::Checkbox("上下镜像##pcflipy", &g_cfg.pcFlipY);
+            if (ImGui::Button("重新应用##pccfg")) cfgChanged = true;
+            if (cfgChanged) {
+                g_cfgLastSaved = g_cfg;       // 顺手标记配置已变(退出时会保存)
+                EspFeed::SendConfig(g_cfg.pcFov, g_cfg.pcAspect, g_cfg.pcZOffset,
+                                    g_cfg.pcFlipX, g_cfg.pcFlipY);
+            }
+            ImGui::TextDisabled("框比人偏大就把 FOV 调小, 偏小就调大; 左右反了勾镜像");
             EspFeed::Stats ps = EspFeed::GetStats();
             ImGui::TextColored(ps.connected ? ImVec4(0.2f, 1.0f, 0.4f, 1.0f)
                                             : ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
@@ -2055,6 +2072,21 @@ void Layout_tick_UI() {
     else drawControlPanel();
     drawDetectionOverlay();
     drawZoneEditor();
+
+    // ★ 手机刚连上 PC 时, 把本机保存的投影参数(FOV/宽高比/镜像)主动推给 PC 一次,
+    //   这样 PC 用的是"手机上看到的值", 不用去改命令行。
+    if (g_cfg.pcSourceMode != 0) {
+        static bool s_pcWasConnected = false;
+        EspFeed::Stats ps = EspFeed::GetStats();
+        if (ps.connected && !s_pcWasConnected) {
+            EspFeed::SendConfig(g_cfg.pcFov, g_cfg.pcAspect, g_cfg.pcZOffset,
+                                g_cfg.pcFlipX, g_cfg.pcFlipY);
+            printf("[pc] 已把投影参数推给 PC: FOV=%.0f 宽高比=%.2f 身体中心=%.0fcm\n",
+                   (double)g_cfg.pcFov, (double)g_cfg.pcAspect, (double)g_cfg.pcZOffset);
+            fflush(stdout);
+        }
+        s_pcWasConnected = ps.connected;
+    }
 }
 
 // ---------------------------------------------------------------------------

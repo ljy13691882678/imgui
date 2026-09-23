@@ -26,6 +26,8 @@ long              gFrames = 0;
 long              gBytes = 0;
 bool              gConnected = false;
 std::string       gMessage = "未启动";
+int               gSock = -1;          // ★ 当前连接(用于反向发送配置)
+long long         gLastCfgMs = 0;      // 配置发送节流
 
 std::string       gHost = "192.168.137.1";
 int               gPort = 27015;
@@ -125,12 +127,13 @@ void worker() {
             }
             ::close(srv);
             if (!gRun.load() || fd < 0) { if (fd >= 0) ::close(fd); continue; }
-            {
-                std::lock_guard<std::mutex> lk(gMutex);
-                gConnected = true;
-                gMessage = "PC 已连入(监听模式)";
-                gLastByteMs = nowMs();
-            }
+        {
+            std::lock_guard<std::mutex> lk(gMutex);
+            gConnected = true;
+            gSock = fd;
+            gMessage = "PC 已连入(监听模式)";
+            gLastByteMs = nowMs();
+        }
             printf("[esp] PC 已连入\n");
             fflush(stdout);
         } else {
@@ -171,6 +174,7 @@ void worker() {
             {
                 std::lock_guard<std::mutex> lk(gMutex);
                 gConnected = true;
+                gSock = fd;
                 gMessage = "已连接 " + host + ":" + std::to_string(port);
                 gLastByteMs = nowMs();
             }
@@ -232,6 +236,7 @@ void worker() {
         {
             std::lock_guard<std::mutex> lk(gMutex);
             gConnected = false;
+            gSock = -1;
             gBoxes.clear();
             gMessage = "连接断开, 重试中…";
         }
@@ -268,8 +273,25 @@ void Stop() {
     if (gThread.joinable()) gThread.join();
     std::lock_guard<std::mutex> lk(gMutex);
     gConnected = false;
+    gSock = -1;
     gBoxes.clear();
     gMessage = "已停止";
+}
+
+void SendConfig(float fov, float aspect, float zOffsetCm, bool flipX, bool flipY) {
+    std::lock_guard<std::mutex> lk(gMutex);
+    if (gSock < 0) return;
+    long long now = nowMs();
+    if (now - gLastCfgMs < 100) return;      // 节流: 滑条拖动时别把网络刷爆
+    gLastCfgMs = now;
+    char line[128];
+    int n = snprintf(line, sizeof(line), "S %.1f %.3f %.0f %d %d\n",
+                     (double)fov, (double)aspect, (double)zOffsetCm,
+                     flipX ? 1 : 0, flipY ? 1 : 0);
+    if (n > 0) {
+        ssize_t r = ::send(gSock, line, (size_t)n, MSG_NOSIGNAL);
+        (void)r;
+    }
 }
 
 bool Running() { return gRun.load(); }

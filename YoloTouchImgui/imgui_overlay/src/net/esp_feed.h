@@ -59,4 +59,8 @@ bool GetLatest(std::vector<Box>& out, uint64_t& frameId);
 
 Stats GetStats();
 
+// ★ 反向配置: 把本机(手机)调好的投影参数发给 PC, PC 侧立刻改用这些值算框。
+//   PC 端收到的是 "S <fov> <aspect> <zoff> <flipX> <flipY>" 一行(带 100ms 节流)。
+void SendConfig(float fov, float aspect, float zOffsetCm, bool flipX, bool flipY);
+
 }  // namespace EspFeed

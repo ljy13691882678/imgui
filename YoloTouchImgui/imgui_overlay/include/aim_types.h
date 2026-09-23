@@ -184,6 +184,14 @@ struct AimConfig {
     bool  pcShowBoxEnt  = false;
     // 连接方向: false = 本机连 PC(默认) ; true = 本机监听, 等 PC 来连(--connect 手机IP)
     bool  pcListenMode  = false;
+
+    // ★ 投影参数(手机端滑条调, 通过 TCP 反向发给 PC 实时生效)
+    //   PC 用它把"世界坐标"投影成屏幕框: 视场角/屏幕宽高比/身体中心高度/左右上下镜像
+    float pcFov      = 90.0f;    // 游戏水平 FOV(度)
+    float pcAspect   = 2.22f;    // 手机屏幕宽高比(W/H)
+    float pcZOffset  = 90.0f;    // 坐标抬到身体中心的 cm
+    bool  pcFlipX    = false;    // 左右镜像(反向横屏后框左右反了就勾)
+    bool  pcFlipY    = false;    // 上下镜像
 };
 
 // 共享内存帧头（与 APK 侧严格一致）
