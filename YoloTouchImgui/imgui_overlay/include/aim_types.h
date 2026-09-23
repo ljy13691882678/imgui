@@ -90,6 +90,15 @@ struct AimConfig {
     // 自瞄类别锁定：-1=所有启用类别；>=0=仅锁定该类（模型类别索引，面板按类别名选择）
     int   aimClass = -1;
 
+    // ===== ★ PC 数据(TCP) 模式 =====
+    // 打开后: 不再跑本地 YOLO / 不抓 UDP / 不读内存, 直接用 PC(自建 TGCP 网关+解析器)
+    // 通过 TCP 送来的【屏幕归一化检测框】画框 + 自瞄。坐标由 PC 侧解密, 手机零解密负担。
+    // 类别约定: 0=敌人 1=AI 2=队友 3=物资 4=死亡盒
+    bool  pcEspEnabled = false;
+    char  pcHost[64] = "192.168.137.1";   // PC 在热点里的地址(默认 192.168.137.1)
+    int   pcPort = 27015;
+    bool  pcShowName = true;              // 框上显示 PC 送来的名字+距离
+
     // 触控区（自瞄拖拽注入区域，归一化 [0,1]）：虚拟手指只在该区域内拖动视角。
     // 游戏通常只在特定区域响应拖屏转向，此区域应与游戏的转向/瞄准区域对齐。
     float touchZoneL = 0.40f, touchZoneT = 0.10f, touchZoneR = 1.0f, touchZoneB = 0.90f;

@@ -15,6 +15,10 @@
 
 struct Detection {
     float x1, y1, x2, y2, score, classId;
+    // ★ PC 数据(TCP) 模式专用: 名字/距离(来自 PC 侧解密出的实体)。
+    //   有默认值 ⇒ 现有 {x1,y1,x2,y2,score,classId} 的聚合初始化写法不受影响。
+    char  name[28] = {0};
+    float distM = -1.0f;
 };
 
 inline long long getTimeUs() {

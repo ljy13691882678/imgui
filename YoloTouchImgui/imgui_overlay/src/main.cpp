@@ -11,6 +11,7 @@
 #include "injection/touch_core.h"
 #include "injection/time_driver_wrap.h"
 #include "auth/t3auth.h"
+#include "net/esp_feed.h"      // ★ PC 数据(TCP): 用 PC 解密出的坐标画框/自瞄
 
 #include <atomic>
 #include <mutex>
@@ -141,7 +142,7 @@ static void saveConfig() {
     FILE* f = fopen(g_cfgFile.c_str(), "wb");
     if (!f) return;
     const char magic[4] = {'Y', 'T', 'C', 'T'};
-    uint32_t version = 1;
+    uint32_t version = 2;      // ★ 2: 增加 PC 数据(TCP) 字段 ⇒ 旧配置自动回默认
     fwrite(magic, 1, 4, f);
     fwrite(&version, 4, 1, f);
     fwrite(&g_cfg, 1, sizeof(g_cfg), f);
@@ -156,7 +157,7 @@ static bool loadConfig() {
     uint32_t version = 0;
     bool ok = false;
     if (fread(magic, 1, 4, f) == 4 && fread(&version, 4, 1, f) == 1 &&
-        memcmp(magic, "YTCT", 4) == 0 && version == 1) {
+        memcmp(magic, "YTCT", 4) == 0 && version == 2) {
         AimConfig cfg;
         if (fread(&cfg, 1, sizeof(cfg), f) == sizeof(cfg)) {
             g_cfg = cfg;
@@ -401,17 +402,44 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         regionH = cropSize;
     }
 
-    // 读锁保护引擎（切换模型时会取写锁等待）
-    std::shared_lock<std::shared_mutex> engLock(g_engineMutex);
-    if (!g_engine) return;
-
-    auto dets = g_engine->detect(
-        const_cast<uint8_t*>(frame), cropOffX, cropOffY, regionW, regionH,
-        w, hh,
-        (int)h->rowStride, (int)h->pixelStride);
+    // ★★★ PC 数据(TCP) 模式: 不跑本地 YOLO, 直接用 PC 送来的屏幕归一化框。
+    //     坐标来源 = 自建 TGCP 网关(PC) → 解析器 → pc_esp_feed.py 投影 → TCP → 这里。
+    //     手机端彻底不需要: UDP 抓包 / 内存读取 / 模型推理。
+    std::vector<Detection> dets;
+    if (g_cfg.pcEspEnabled) {
+        static uint64_t s_pcFid = 0;
+        static std::vector<Detection> s_pcDets;
+        std::vector<EspFeed::Box> boxes;
+        uint64_t fid = 0;
+        if (EspFeed::GetLatest(boxes, fid) && fid != s_pcFid) {
+            s_pcFid = fid;
+            s_pcDets.clear();
+            s_pcDets.reserve(boxes.size());
+            for (const EspFeed::Box& b : boxes) {
+                Detection d;
+                d.x1 = b.x1; d.y1 = b.y1; d.x2 = b.x2; d.y2 = b.y2;
+                d.score = b.score;
+                d.classId = (float)b.cls;
+                d.distM = b.distM;
+                snprintf(d.name, sizeof(d.name), "%s", b.name.c_str());
+                s_pcDets.push_back(d);
+            }
+        }
+        // PC 数据是 15Hz 左右, 手机按帧率复用最近一帧, 由 Kalman 跟踪器做插值/预测
+        dets = s_pcDets;
+    } else {
+        // 读锁保护引擎（切换模型时会取写锁等待）
+        std::shared_lock<std::shared_mutex> engLock(g_engineMutex);
+        if (!g_engine) return;
+        dets = g_engine->detect(
+            const_cast<uint8_t*>(frame), cropOffX, cropOffY, regionW, regionH,
+            w, hh,
+            (int)h->rowStride, (int)h->pixelStride);
+    }
 
     // 类别过滤：仅保留启用显示的类别（同时影响自瞄/扳机目标选择）
-    if (!g_classEnabled.empty()) {
+    // ★ PC 模式的类别编号是我们自己约定的(0=敌 1=AI 3=物资…), 不走模型类别过滤
+    if (!g_cfg.pcEspEnabled && !g_classEnabled.empty()) {
         std::vector<Detection> filtered;
         filtered.reserve(dets.size());
         for (const auto& d : dets) {
@@ -1105,7 +1133,7 @@ static void drawDetectionOverlay() {
             int outline = thick + 3;
             draw->AddRect(p1, p2, IM_COL32(0, 0, 0, 200), 0.0f, 0, (float)outline);
             draw->AddRect(p1, p2, IM_COL32(0, 255, 0, 255), 0.0f, 0, (float)thick);
-            if (g_cfg.showBoxLabels) {
+            if (g_cfg.showBoxLabels && !g_cfg.pcEspEnabled) {
                 char lbl[64];
                 const char* cname = g_engine ? g_engine->getClassName(t.classId) : nullptr;
                 if (cname && cname[0])
@@ -1123,6 +1151,36 @@ static void drawDetectionOverlay() {
             if (currentIds.find(it->first) == currentIds.end())
                 it = g_trackStates.erase(it);
             else ++it;
+        }
+    }
+
+    // ★ PC 数据模式: 直接在框上写"名字 + 距离"(数据来自 PC, 不经过跟踪器)
+    if (g_cfg.pcEspEnabled && g_cfg.pcShowName) {
+        std::vector<EspFeed::Box> pcBoxes;
+        uint64_t pcFid = 0;
+        if (EspFeed::GetLatest(pcBoxes, pcFid)) {
+            for (const EspFeed::Box& b : pcBoxes) {
+                if (b.name.empty()) continue;
+                char lbl[96];
+                if (b.distM >= 0.0f)
+                    snprintf(lbl, sizeof(lbl), "%s %.0fm", b.name.c_str(), b.distM);
+                else
+                    snprintf(lbl, sizeof(lbl), "%s", b.name.c_str());
+                ImVec2 tp(b.x1 * sx + 4.0f, b.y1 * sy + 4.0f);
+                // 类别配色: 0敌人红 / 1AI橙 / 2队友绿 / 3物资黄 / 4盒子紫
+                ImU32 col = IM_COL32(255, 255, 255, 255);
+                switch (b.cls) {
+                case 0: col = IM_COL32(255, 80, 80, 255); break;
+                case 1: col = IM_COL32(255, 170, 60, 255); break;
+                case 2: col = IM_COL32(90, 255, 120, 255); break;
+                case 3: col = IM_COL32(255, 220, 80, 255); break;
+                case 4: col = IM_COL32(190, 130, 255, 255); break;
+                default: break;
+                }
+                draw->AddText(ImVec2(tp.x - 1, tp.y - 1), IM_COL32(0, 0, 0, 220), lbl);
+                draw->AddText(ImVec2(tp.x + 1, tp.y + 1), IM_COL32(0, 0, 0, 220), lbl);
+                draw->AddText(tp, col, lbl);
+            }
         }
     }
 
@@ -1275,6 +1333,7 @@ static void drawZoneEditor() {
 // 用 _exit 而不走主循环退出+join，避免推理线程卡在 QNN invoke 时 join 阻塞导致无法退出。
 static void exitImgui() {
     main_thread_flag = false;
+    EspFeed::Stop();
     fflush(stdout);
     _exit(0);
 }
@@ -1456,6 +1515,32 @@ static void drawControlPanel() {
         ImGui::Checkbox("显示区域", &g_cfg.showZones);
         ImGui::Checkbox("显示连线", &g_cfg.showAimLines);
         ImGui::SliderFloat("置信度阈值", &g_cfg.confidence, 0.05f, 0.95f);
+
+        // ===== ★ PC 数据(TCP)：坐标由 PC 侧解密, 手机只画框+自瞄 =====
+        if (ImGui::CollapsingHeader("PC 数据(TCP)")) {
+            bool on = g_cfg.pcEspEnabled;
+            if (ImGui::Checkbox("启用 PC 数据##pc", &on)) {
+                g_cfg.pcEspEnabled = on;
+                EspFeed::Configure(g_cfg.pcHost, g_cfg.pcPort);
+                if (on) EspFeed::Start(); else EspFeed::Stop();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("重连##pc")) {
+                EspFeed::Stop();
+                EspFeed::Configure(g_cfg.pcHost, g_cfg.pcPort);
+                if (g_cfg.pcEspEnabled) EspFeed::Start();
+            }
+            ImGui::InputText("PC 地址##pc", g_cfg.pcHost, sizeof(g_cfg.pcHost));
+            ImGui::InputInt("端口##pc", &g_cfg.pcPort);
+            ImGui::Checkbox("显示名字/距离##pc", &g_cfg.pcShowName);
+            EspFeed::Stats ps = EspFeed::GetStats();
+            ImGui::TextColored(ps.connected ? ImVec4(0.2f, 1.0f, 0.4f, 1.0f)
+                                            : ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
+                               "状态: %s  目标 %d  帧 %ld  最近 %.0fms",
+                               ps.message.c_str(), ps.boxes, ps.frames,
+                               (double)ps.lastFrameMs);
+            ImGui::TextDisabled("数据来自 PC(自建网关+解析器)；本机不跑 YOLO/不抓 UDP");
+        }
 
         // 居中裁剪尺寸选择（面板切换后，传给 APK 重建共享内存）
         {
@@ -2027,6 +2112,14 @@ int main(int argc, char* argv[]) {
         printf("no saved config, using defaults\n");
     }
     g_cfgLastSaved = g_cfg;
+
+    // ★ PC 数据(TCP): 配置里开着就在启动时连 PC(自建网关那台)
+    printf("[pc] PC数据(TCP) %s  地址=%s:%d\n",
+           g_cfg.pcEspEnabled ? "开启" : "关闭", g_cfg.pcHost, g_cfg.pcPort);
+    if (g_cfg.pcEspEnabled) {
+        EspFeed::Configure(g_cfg.pcHost, g_cfg.pcPort);
+        EspFeed::Start();
+    }
 
     // 扫描模型目录（模型文件所在目录），供面板切换
     {

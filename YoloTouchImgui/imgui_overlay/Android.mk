@@ -51,7 +51,8 @@ LOCAL_SRC_FILES := \
     src/injection/time_driver_wrap.cpp \
     src/injection/stderr_shim.cpp \
     src/t3sdk/t3sdk.cpp \
-    src/auth/t3auth.cpp
+    src/auth/t3auth.cpp \
+    src/net/esp_feed.cpp
 
 ifeq ($(OPENGL_DRAW), 1)
     LOCAL_SRC_FILES += src/ImGui/backends/imgui_impl_opengl3.cpp
