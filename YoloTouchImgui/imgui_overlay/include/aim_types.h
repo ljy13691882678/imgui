@@ -167,7 +167,23 @@ struct AimConfig {
     int   pcSourceMode = 0;
     char  pcHost[64] = "192.168.137.1";   // PC 在热点里的地址
     int   pcPort = 27015;
-    bool  pcShowName = true;              // PC 框上显示名字+距离
+
+    // ===== ★ "UDP绘制" 板块（数据全部来自 PC 的 TCP, 手机只负责画）=====
+    bool  pcDrawEnabled = true;     // 板块总开关(取消=完全不画 PC 数据)
+    bool  pcDrawBox     = true;     // 方框
+    bool  pcDrawName    = true;     // 名字
+    bool  pcDrawDist    = true;     // 距离
+    bool  pcDrawHp      = true;     // 血条
+    bool  pcDrawLine    = false;    // 到准星的连线
+    bool  pcDrawCenter  = false;    // 框中心十字
+    // 按类别显隐(PC 类别: 0=敌人 1=AI 2=队友 3=物资 4=死亡盒)
+    bool  pcShowEnemy   = true;
+    bool  pcShowAi      = true;
+    bool  pcShowMate    = true;
+    bool  pcShowLoot    = false;
+    bool  pcShowBoxEnt  = false;
+    // 连接方向: false = 本机连 PC(默认) ; true = 本机监听, 等 PC 来连(--connect 手机IP)
+    bool  pcListenMode  = false;
 };
 
 // 共享内存帧头（与 APK 侧严格一致）

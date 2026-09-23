@@ -23,6 +23,8 @@ struct Box {
     float       score = 1.0f;
     float       x1 = 0, y1 = 0, x2 = 1, y2 = 1;
     float       distM = -1.0f;
+    float       hp = 100.0f, maxHp = 100.0f;   // 血量(PC 侧解析器给出)
+    int         team = 0;                       // 队伍(0=未知)
     std::string name;
 };
 
@@ -41,6 +43,12 @@ struct Stats {
 // 设置目标 PC 地址(改完需要 Stop→Start 生效)
 void Configure(const std::string& host, int port);
 
+// ★ 连接方向:
+//   false(默认) = 本机作为客户端, 主动连 PC(PC 端跑 pc_esp_feed.py 监听)
+//   true        = 本机作为服务端监听 gPort, 等 PC 来连(PC 端用 --connect 手机IP)
+void SetListenMode(bool on);
+bool ListenMode();
+
 // 启动/停止后台接收线程; 重复调用安全
 void Start();
 void Stop();
@@ -52,4 +60,3 @@ bool GetLatest(std::vector<Box>& out, uint64_t& frameId);
 Stats GetStats();
 
 }  // namespace EspFeed
-

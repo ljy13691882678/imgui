@@ -29,6 +29,7 @@ std::string       gMessage = "未启动";
 
 std::string       gHost = "192.168.137.1";
 int               gPort = 27015;
+bool              gListen = false;      // true = 本机监听等 PC 来连
 
 std::atomic<bool> gRun{false};
 std::thread       gThread;
@@ -38,18 +39,34 @@ long long nowMs() {
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
-// 拆一行: "A 0 0.99 0.1 0.2 0.3 0.4 12.5 名字"
+// 拆一行:
+//   A2 <cls> <score> <x1> <y1> <x2> <y2> <dist> <hp> <maxhp> <team> <名字…>
+//   A  <cls> <score> <x1> <y1> <x2> <y2> <dist> <名字…>            (旧格式, 兼容)
 bool parseActorLine(const std::string& line, Box& out) {
     int cls = 0;
     float score = 1.0f, x1 = 0, y1 = 0, x2 = 0, y2 = 0, dist = -1.0f;
+    float hp = 100.0f, maxHp = 100.0f;
+    int team = 0;
     int consumed = 0;
-    int n = sscanf(line.c_str(), "A %d %f %f %f %f %f %f %n",
+    int n = 0;
+    if (line.rfind("A2", 0) == 0) {
+        n = sscanf(line.c_str(), "A2 %d %f %f %f %f %f %f %f %f %d %n",
+                   &cls, &score, &x1, &y1, &x2, &y2, &dist, &hp, &maxHp, &team, &consumed);
+        if (n < 10) return false;
+    } else if (line.size() >= 1 && line[0] == 'A') {
+        n = sscanf(line.c_str(), "A %d %f %f %f %f %f %f %n",
                    &cls, &score, &x1, &y1, &x2, &y2, &dist, &consumed);
-    if (n < 7) return false;
+        if (n < 7) return false;
+    } else {
+        return false;
+    }
     out.cls = cls;
     out.score = score;
     out.x1 = x1; out.y1 = y1; out.x2 = x2; out.y2 = y2;
     out.distM = dist;
+    out.hp = hp;
+    out.maxHp = maxHp > 0.0f ? maxHp : 100.0f;
+    out.team = team;
     // 名字: 第 7 个空格之后的全部内容(允许空格/中文)
     out.name.clear();
     if (consumed > 0 && consumed < (int)line.size())
@@ -64,52 +81,102 @@ bool parseActorLine(const std::string& line, Box& out) {
 void worker() {
     std::string host;
     int port = 0;
+    bool listen = false;
     {
         std::lock_guard<std::mutex> lk(gMutex);
         host = gHost;
         port = gPort;
+        listen = gListen;
     }
     while (gRun.load()) {
-        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        int fd = -1;
+        if (listen) {
+            // ★ 监听模式: 本机 bind/listen, 等 PC 主动连过来
+            int srv = ::socket(AF_INET, SOCK_STREAM, 0);
+            if (srv < 0) { std::this_thread::sleep_for(std::chrono::seconds(2)); continue; }
+            int one = 1;
+            setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+            sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = htonl(INADDR_ANY);
+            addr.sin_port = htons((uint16_t)port);
+            if (::bind(srv, (sockaddr*)&addr, sizeof(addr)) != 0 ||
+                ::listen(srv, 2) != 0) {
+                {
+                    std::lock_guard<std::mutex> lk(gMutex);
+                    gMessage = "监听 " + std::to_string(port) + " 失败(端口被占?)";
+                }
+                ::close(srv);
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                continue;
+            }
+            {
+                std::lock_guard<std::mutex> lk(gMutex);
+                gConnected = false;
+                gMessage = "监听中(等 PC 连本机 " + std::to_string(port) + ")";
+            }
+            printf("[esp] 监听 %d, 等 PC 连接…\n", port);
+            fflush(stdout);
+            while (gRun.load()) {
+                fd = ::accept(srv, nullptr, nullptr);
+                if (fd >= 0) break;
+                if (errno == EINTR) continue;
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+            ::close(srv);
+            if (!gRun.load() || fd < 0) { if (fd >= 0) ::close(fd); continue; }
+            {
+                std::lock_guard<std::mutex> lk(gMutex);
+                gConnected = true;
+                gMessage = "PC 已连入(监听模式)";
+                gLastByteMs = nowMs();
+            }
+            printf("[esp] PC 已连入\n");
+            fflush(stdout);
+        } else {
+            fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        }
         if (fd < 0) { std::this_thread::sleep_for(std::chrono::seconds(2)); continue; }
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons((uint16_t)port);
-        if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
-            // 允许填域名
-            hostent* he = gethostbyname(host.c_str());
-            if (!he) {
-                std::lock_guard<std::mutex> lk(gMutex);
-                gMessage = "地址无效: " + host;
+        if (!listen) {
+            sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons((uint16_t)port);
+            if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+                // 允许填域名
+                hostent* he = gethostbyname(host.c_str());
+                if (!he) {
+                    std::lock_guard<std::mutex> lk(gMutex);
+                    gMessage = "地址无效: " + host;
+                    ::close(fd);
+                    std::this_thread::sleep_for(std::chrono::seconds(3));
+                    continue;
+                }
+                memcpy(&addr.sin_addr, he->h_addr, sizeof(addr.sin_addr));
+            }
+
+            if (::connect(fd, (sockaddr*)&addr, sizeof(addr)) != 0) {
+                {
+                    std::lock_guard<std::mutex> lk(gMutex);
+                    gConnected = false;
+                    gMessage = "连不上 PC " + host + ":" + std::to_string(port);
+                }
                 ::close(fd);
-                std::this_thread::sleep_for(std::chrono::seconds(3));
+                for (int i = 0; i < 20 && gRun.load(); ++i)      // 2 秒后重试
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
-            memcpy(&addr.sin_addr, he->h_addr, sizeof(addr.sin_addr));
-        }
-
-        if (::connect(fd, (sockaddr*)&addr, sizeof(addr)) != 0) {
             {
                 std::lock_guard<std::mutex> lk(gMutex);
-                gConnected = false;
-                gMessage = "连不上 PC " + host + ":" + std::to_string(port);
+                gConnected = true;
+                gMessage = "已连接 " + host + ":" + std::to_string(port);
+                gLastByteMs = nowMs();
             }
-            ::close(fd);
-            for (int i = 0; i < 20 && gRun.load(); ++i)      // 2 秒后重试
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            continue;
+            printf("[esp] 已连接 PC %s:%d\n", host.c_str(), port);
+            fflush(stdout);
         }
-        {
-            std::lock_guard<std::mutex> lk(gMutex);
-            gConnected = true;
-            gMessage = "已连接 " + host + ":" + std::to_string(port);
-            gLastByteMs = nowMs();
-        }
-        printf("[esp] 已连接 PC %s:%d\n", host.c_str(), port);
-        fflush(stdout);
 
         std::string buf;
         std::vector<Box> pending;
@@ -181,6 +248,16 @@ void Configure(const std::string& host, int port) {
     if (port > 0 && port < 65536) gPort = port;
 }
 
+void SetListenMode(bool on) {
+    std::lock_guard<std::mutex> lk(gMutex);
+    gListen = on;
+}
+
+bool ListenMode() {
+    std::lock_guard<std::mutex> lk(gMutex);
+    return gListen;
+}
+
 void Start() {
     if (gRun.exchange(true)) return;
     gThread = std::thread(worker);
@@ -220,4 +297,3 @@ Stats GetStats() {
 }
 
 }  // namespace EspFeed
-

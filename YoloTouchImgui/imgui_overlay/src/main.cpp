@@ -423,7 +423,7 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
                 Detection d;
                 d.x1 = b.x1; d.y1 = b.y1; d.x2 = b.x2; d.y2 = b.y2;
                 d.score = b.score;
-                d.classId = (float)b.cls;
+                d.classId = 100.0f + (float)b.cls;   // ★ +100 标记"来自 PC", 供绘制分流
                 d.distM = b.distM;
                 snprintf(d.name, sizeof(d.name), "%s", b.name.c_str());
                 s_pcDets.push_back(d);
@@ -1072,7 +1072,10 @@ static void drawDetectionOverlay() {
     if (g_cfg.showBoxes) {
         std::unordered_set<int> currentIds;
 
-        for (const auto& t : g_tracks) {
+    for (const auto& t : g_tracks) {
+        // ★ PC 数据的框由下面"UDP绘制"板块单独画(classId 用 100+类别 标记), 这里跳过,
+        //   避免同一目标被画两次(或颜色/标签打架)。YOLO 的框照旧由这里画。
+        if (t.classId >= 100.0f) continue;
             currentIds.insert(t.trackId);
             float hw = (t.x2 - t.x1) * 0.5f;
             float hh = (t.y2 - t.y1) * 0.5f;
@@ -1179,32 +1182,80 @@ static void drawDetectionOverlay() {
         }
     }
 
-    // ★ PC 数据模式: 直接在框上写"名字 + 距离"(数据来自 PC, 不经过跟踪器)
-    if (g_cfg.pcSourceMode != 0 && g_cfg.pcShowName) {
+    // ★★★ "UDP绘制" 板块：全部数据来自 PC 的 TCP(自建雷达解密出的坐标), 手机只负责画
+    if (g_cfg.pcSourceMode != 0 && g_cfg.pcDrawEnabled) {
         std::vector<EspFeed::Box> pcBoxes;
         uint64_t pcFid = 0;
         if (EspFeed::GetLatest(pcBoxes, pcFid)) {
             for (const EspFeed::Box& b : pcBoxes) {
-                if (b.name.empty()) continue;
-                char lbl[96];
-                if (b.distM >= 0.0f)
-                    snprintf(lbl, sizeof(lbl), "%s %.0fm", b.name.c_str(), b.distM);
-                else
-                    snprintf(lbl, sizeof(lbl), "%s", b.name.c_str());
-                ImVec2 tp(b.x1 * sx + 4.0f, b.y1 * sy + 4.0f);
-                // 类别配色: 0敌人红 / 1AI橙 / 2队友绿 / 3物资黄 / 4盒子紫
+                // 类别显隐
+                switch (b.cls) {
+                case 0: if (!g_cfg.pcShowEnemy) continue; break;
+                case 1: if (!g_cfg.pcShowAi) continue; break;
+                case 2: if (!g_cfg.pcShowMate) continue; break;
+                case 3: if (!g_cfg.pcShowLoot) continue; break;
+                case 4: if (!g_cfg.pcShowBoxEnt) continue; break;
+                default: break;
+                }
+                // 类别配色: 0=敌红 1=AI橙 2=友绿 3=物资黄 4=盒子紫
                 ImU32 col = IM_COL32(255, 255, 255, 255);
                 switch (b.cls) {
-                case 0: col = IM_COL32(255, 80, 80, 255); break;
+                case 0: col = IM_COL32(255, 70, 70, 255); break;
                 case 1: col = IM_COL32(255, 170, 60, 255); break;
                 case 2: col = IM_COL32(90, 255, 120, 255); break;
                 case 3: col = IM_COL32(255, 220, 80, 255); break;
                 case 4: col = IM_COL32(190, 130, 255, 255); break;
                 default: break;
                 }
-                draw->AddText(ImVec2(tp.x - 1, tp.y - 1), IM_COL32(0, 0, 0, 220), lbl);
-                draw->AddText(ImVec2(tp.x + 1, tp.y + 1), IM_COL32(0, 0, 0, 220), lbl);
-                draw->AddText(tp, col, lbl);
+                const float bx1 = b.x1 * sx, by1 = b.y1 * sy;
+                const float bx2 = b.x2 * sx, by2 = b.y2 * sy;
+                const float bw = bx2 - bx1, bh = by2 - by1;
+                const float thick = (float)std::max(1, g_cfg.boxThickness);
+
+                // 1) 方框
+                if (g_cfg.pcDrawBox) {
+                    draw->AddRect(ImVec2(bx1 - 1, by1 - 1), ImVec2(bx2 + 1, by2 + 1),
+                                  IM_COL32(0, 0, 0, 200), 0.0f, 0, thick + 3.0f);
+                    draw->AddRect(ImVec2(bx1, by1), ImVec2(bx2, by2), col, 0.0f, 0, thick);
+                }
+                // 2) 到准星的连线（线条）
+                if (g_cfg.pcDrawLine) {
+                    draw->AddLine(ImVec2(sx * 0.5f, 0.0f),
+                                  ImVec2((bx1 + bx2) * 0.5f, by1), col, 1.5f);
+                }
+                // 3) 中心十字
+                if (g_cfg.pcDrawCenter) {
+                    const float cx = (bx1 + bx2) * 0.5f, cy = (by1 + by2) * 0.5f;
+                    draw->AddLine(ImVec2(cx - 5, cy), ImVec2(cx + 5, cy), col, 1.5f);
+                    draw->AddLine(ImVec2(cx, cy - 5), ImVec2(cx, cy + 5), col, 1.5f);
+                }
+                // 4) 血条（贴框左侧）
+                if (g_cfg.pcDrawHp && b.maxHp > 1.0f && b.cls <= 2) {
+                    const float hr = std::max(0.0f, std::min(1.0f, b.hp / b.maxHp));
+                    const float hx = bx1 - 5.0f;
+                    draw->AddRectFilled(ImVec2(hx, by1), ImVec2(hx + 3.0f, by2),
+                                        IM_COL32(0, 0, 0, 180));
+                    draw->AddRectFilled(ImVec2(hx, by2 - bh * hr), ImVec2(hx + 3.0f, by2),
+                                        IM_COL32(60, 230, 90, 255));
+                }
+                // 5) 名字 + 距离
+                if ((g_cfg.pcDrawName && !b.name.empty()) || g_cfg.pcDrawDist) {
+                    char lbl[128];
+                    const char* nm = b.name.empty() ? "" : b.name.c_str();
+                    if (g_cfg.pcDrawName && g_cfg.pcDrawDist && b.distM >= 0.0f)
+                        snprintf(lbl, sizeof(lbl), "%s %.0fm", nm, b.distM);
+                    else if (g_cfg.pcDrawDist && b.distM >= 0.0f)
+                        snprintf(lbl, sizeof(lbl), "%.0fm", b.distM);
+                    else
+                        snprintf(lbl, sizeof(lbl), "%s", nm);
+                    if (lbl[0]) {
+                        ImVec2 tp(bx1 + 3.0f, by1 - 16.0f);
+                        if (tp.y < 0.0f) tp.y = by2 + 2.0f;
+                        draw->AddText(ImVec2(tp.x - 1, tp.y - 1), IM_COL32(0, 0, 0, 220), lbl);
+                        draw->AddText(ImVec2(tp.x + 1, tp.y + 1), IM_COL32(0, 0, 0, 220), lbl);
+                        draw->AddText(tp, col, lbl);
+                    }
+                }
             }
         }
     }
@@ -1541,8 +1592,12 @@ static void drawControlPanel() {
         ImGui::Checkbox("显示连线", &g_cfg.showAimLines);
         ImGui::SliderFloat("置信度阈值", &g_cfg.confidence, 0.05f, 0.95f);
 
-        // ===== ★ 目标来源：YOLO(本机推理) / PC 数据(TCP) / 两者混合 =====
-        if (ImGui::CollapsingHeader("目标来源（YOLO / PC数据）")) {
+        // ===== ★ "UDP绘制" 板块 =====
+        //   板块名字沿用你的叫法(UDP绘制), 但数据【全部来自 PC 的 TCP】:
+        //   自建 TGCP 网关解密出的坐标 → 世界坐标投影成屏幕框 → TCP → 本机只负责画/瞄。
+        //   手机端不抓 UDP、不读内存; YOLO 推理按需保留(见下面数据源三档)。
+        if (ImGui::CollapsingHeader("UDP绘制（PC数据）")) {
+            ImGui::TextDisabled("数据源: PC(自建TGCP网关) → TCP → 本机只负责画框/自瞄");
             int mode = g_cfg.pcSourceMode;
             bool changed = false;
             if (ImGui::RadioButton("只用 YOLO（原版）##src", mode == 0)) { mode = 0; changed = true; }
@@ -1562,13 +1617,47 @@ static void drawControlPanel() {
             }
             ImGui::InputText("PC 地址##pc", g_cfg.pcHost, sizeof(g_cfg.pcHost));
             ImGui::InputInt("端口##pc", &g_cfg.pcPort);
-            ImGui::Checkbox("PC 框显示名字/距离##pc", &g_cfg.pcShowName);
+            if (ImGui::Checkbox("监听模式（PC主动连本机）##pc", &g_cfg.pcListenMode)) {
+                EspFeed::Stop();
+                EspFeed::SetListenMode(g_cfg.pcListenMode);
+                if (g_cfg.pcSourceMode != 0) EspFeed::Start();
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled(g_cfg.pcListenMode
+                                ? "本机监听端口, PC 侧用 --connect 本机IP"
+                                : "本机连 PC(PC 侧默认监听)");
             EspFeed::Stats ps = EspFeed::GetStats();
             ImGui::TextColored(ps.connected ? ImVec4(0.2f, 1.0f, 0.4f, 1.0f)
                                             : ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
                                "状态: %s  目标 %d  帧 %ld  最近 %.0fms",
                                ps.message.c_str(), ps.boxes, ps.frames,
                                (double)ps.lastFrameMs);
+
+            ImGui::SeparatorText("绘制类型");
+            ImGui::Checkbox("总开关##pcdraw", &g_cfg.pcDrawEnabled);
+            ImGui::SameLine();
+            ImGui::Checkbox("方框##pcdraw", &g_cfg.pcDrawBox);
+            ImGui::SameLine();
+            ImGui::Checkbox("线条##pcdraw", &g_cfg.pcDrawLine);
+            ImGui::SameLine();
+            ImGui::Checkbox("中心点##pcdraw", &g_cfg.pcDrawCenter);
+            ImGui::Checkbox("名字##pcdraw", &g_cfg.pcDrawName);
+            ImGui::SameLine();
+            ImGui::Checkbox("距离##pcdraw", &g_cfg.pcDrawDist);
+            ImGui::SameLine();
+            ImGui::Checkbox("血量##pcdraw", &g_cfg.pcDrawHp);
+
+            ImGui::SeparatorText("显示类别");
+            ImGui::Checkbox("敌人##pccls", &g_cfg.pcShowEnemy);
+            ImGui::SameLine();
+            ImGui::Checkbox("AI##pccls", &g_cfg.pcShowAi);
+            ImGui::SameLine();
+            ImGui::Checkbox("队友##pccls", &g_cfg.pcShowMate);
+            ImGui::SameLine();
+            ImGui::Checkbox("物资##pccls", &g_cfg.pcShowLoot);
+            ImGui::SameLine();
+            ImGui::Checkbox("死亡盒##pccls", &g_cfg.pcShowBoxEnt);
+
             ImGui::TextDisabled("PC 数据 = 自建网关解密出的坐标(世界坐标→屏幕框)");
             ImGui::TextDisabled("混合模式: 与 PC 框重叠的 YOLO 框会自动去重(PC 为准)");
         }
@@ -2152,6 +2241,7 @@ int main(int argc, char* argv[]) {
            g_cfg.pcHost, g_cfg.pcPort);
     if (g_cfg.pcSourceMode != 0) {
         EspFeed::Configure(g_cfg.pcHost, g_cfg.pcPort);
+        EspFeed::SetListenMode(g_cfg.pcListenMode);
         EspFeed::Start();
     }
 
