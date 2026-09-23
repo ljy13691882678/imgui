@@ -149,21 +149,23 @@ static void saveConfig() {
     fclose(f);
 }
 
-// 从文件加载配置（版本/大小不符时静默忽略，保留默认值）
-static bool loadConfig() {
-    FILE* f = fopen(g_cfgFile.c_str(), "rb");
-    if (!f) return false;
-    char magic[4] = {0};
-    uint32_t version = 0;
-    bool ok = false;
-    if (fread(magic, 1, 4, f) == 4 && fread(&version, 4, 1, f) == 1 &&
-        memcmp(magic, "YTCT", 4) == 0 && version == 2) {
-        AimConfig cfg;
-        if (fread(&cfg, 1, sizeof(cfg), f) == sizeof(cfg)) {
-            g_cfg = cfg;
-            ok = true;
+    // 从文件加载配置（★ 新字段都追加在结构体末尾, 所以旧配置可以"前缀兼容"读入:
+    //   旧文件只覆盖前面的老字段, 新字段保持默认值 —— 用户之前调好的参数不会丢）
+    static bool loadConfig() {
+        FILE* f = fopen(g_cfgFile.c_str(), "rb");
+        if (!f) return false;
+        char magic[4] = {0};
+        uint32_t version = 0;
+        bool ok = false;
+        if (fread(magic, 1, 4, f) == 4 && fread(&version, 4, 1, f) == 1 &&
+            memcmp(magic, "YTCT", 4) == 0 && (version == 1 || version == 2)) {
+            AimConfig cfg;                       // 默认值(含新字段)
+            size_t n = fread(&cfg, 1, sizeof(cfg), f);
+            if (n >= 64) {                       // 至少读到了前 64 字节 ⇒ 认可
+                g_cfg = cfg;
+                ok = true;
+            }
         }
-    }
     fclose(f);
     return ok;
 }
@@ -402,13 +404,15 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
         regionH = cropSize;
     }
 
-    // ★★★ PC 数据(TCP) 模式: 不跑本地 YOLO, 直接用 PC 送来的屏幕归一化框。
-    //     坐标来源 = 自建 TGCP 网关(PC) → 解析器 → pc_esp_feed.py 投影 → TCP → 这里。
-    //     手机端彻底不需要: UDP 抓包 / 内存读取 / 模型推理。
-    std::vector<Detection> dets;
-    if (g_cfg.pcEspEnabled) {
+    // ★★★ 目标来源: 0=只用 YOLO(默认, 同原版)  1=只用 PC 数据  2=YOLO+PC 混合
+    const int  srcMode = g_cfg.pcSourceMode;
+    const bool pcOn = (srcMode == 1 || srcMode == 2);
+    const bool yoloOn = (srcMode == 0 || srcMode == 2);
+
+    // ---- PC 数据(TCP): 自建网关解密出的坐标 → 屏幕归一化框 ----
+    static std::vector<Detection> s_pcDets;
+    if (pcOn) {
         static uint64_t s_pcFid = 0;
-        static std::vector<Detection> s_pcDets;
         std::vector<EspFeed::Box> boxes;
         uint64_t fid = 0;
         if (EspFeed::GetLatest(boxes, fid) && fid != s_pcFid) {
@@ -425,30 +429,51 @@ static void processFrame(const uint8_t* frame, const ShmFrameHeader* h) {
                 s_pcDets.push_back(d);
             }
         }
-        // PC 数据是 15Hz 左右, 手机按帧率复用最近一帧, 由 Kalman 跟踪器做插值/预测
-        dets = s_pcDets;
-    } else {
-        // 读锁保护引擎（切换模型时会取写锁等待）
-        std::shared_lock<std::shared_mutex> engLock(g_engineMutex);
-        if (!g_engine) return;
-        dets = g_engine->detect(
-            const_cast<uint8_t*>(frame), cropOffX, cropOffY, regionW, regionH,
-            w, hh,
-            (int)h->rowStride, (int)h->pixelStride);
+        // PC 数据 ~15Hz, 手机按帧率复用最近一帧, 由 Kalman 跟踪器插值/预测
     }
 
-    // 类别过滤：仅保留启用显示的类别（同时影响自瞄/扳机目标选择）
-    // ★ PC 模式的类别编号是我们自己约定的(0=敌 1=AI 3=物资…), 不走模型类别过滤
-    if (!g_cfg.pcEspEnabled && !g_classEnabled.empty()) {
-        std::vector<Detection> filtered;
-        filtered.reserve(dets.size());
-        for (const auto& d : dets) {
-            int cid = (int)d.classId;
-            if (cid >= 0 && cid < (int)g_classEnabled.size() && g_classEnabled[cid])
-                filtered.push_back(d);
+    // ---- YOLO 推理(原版路径, 完全保留) ----
+    std::vector<Detection> dets;
+    if (yoloOn) {
+        // 读锁保护引擎（切换模型时会取写锁等待）
+        std::shared_lock<std::shared_mutex> engLock(g_engineMutex);
+        if (g_engine) {
+            dets = g_engine->detect(
+                const_cast<uint8_t*>(frame), cropOffX, cropOffY, regionW, regionH,
+                w, hh,
+                (int)h->rowStride, (int)h->pixelStride);
         }
-        dets = std::move(filtered);
+        // 类别过滤：仅保留启用显示的类别（同时影响自瞄/扳机目标选择）
+        // ★ 只滤 YOLO 的框; PC 数据的类别是我们自己约定的(0=敌 1=AI 3=物资…), 不受模型类别影响
+        if (!g_classEnabled.empty()) {
+            std::vector<Detection> filtered;
+            filtered.reserve(dets.size());
+            for (const auto& d : dets) {
+                int cid = (int)d.classId;
+                if (cid >= 0 && cid < (int)g_classEnabled.size() && g_classEnabled[cid])
+                    filtered.push_back(d);
+            }
+            dets = std::move(filtered);
+        }
+        // 混合模式: PC 是权威坐标 —— 丢掉与任一 PC 框重叠的 YOLO 框, 避免同一人画两个框
+        if (pcOn && !s_pcDets.empty()) {
+            std::vector<Detection> keep;
+            keep.reserve(dets.size());
+            for (const Detection& y : dets) {
+                const float ycx = (y.x1 + y.x2) * 0.5f, ycy = (y.y1 + y.y2) * 0.5f;
+                bool dup = false;
+                for (const Detection& p : s_pcDets) {
+                    const float w = (p.x2 - p.x1) * 0.3f, h = (p.y2 - p.y1) * 0.3f;
+                    if (ycx >= p.x1 - w && ycx <= p.x2 + w &&
+                        ycy >= p.y1 - h && ycy <= p.y2 + h) { dup = true; break; }
+                }
+                if (!dup) keep.push_back(y);
+            }
+            dets.swap(keep);
+        }
     }
+    // 合并 PC 数据(纯 PC 模式时 dets 原本就是空, 直接装 PC 框)
+    if (pcOn) dets.insert(dets.end(), s_pcDets.begin(), s_pcDets.end());
 
     // 更新检测结果（供绘制）
     {
@@ -1133,7 +1158,7 @@ static void drawDetectionOverlay() {
             int outline = thick + 3;
             draw->AddRect(p1, p2, IM_COL32(0, 0, 0, 200), 0.0f, 0, (float)outline);
             draw->AddRect(p1, p2, IM_COL32(0, 255, 0, 255), 0.0f, 0, (float)thick);
-            if (g_cfg.showBoxLabels && !g_cfg.pcEspEnabled) {
+            if (g_cfg.showBoxLabels) {
                 char lbl[64];
                 const char* cname = g_engine ? g_engine->getClassName(t.classId) : nullptr;
                 if (cname && cname[0])
@@ -1155,7 +1180,7 @@ static void drawDetectionOverlay() {
     }
 
     // ★ PC 数据模式: 直接在框上写"名字 + 距离"(数据来自 PC, 不经过跟踪器)
-    if (g_cfg.pcEspEnabled && g_cfg.pcShowName) {
+    if (g_cfg.pcSourceMode != 0 && g_cfg.pcShowName) {
         std::vector<EspFeed::Box> pcBoxes;
         uint64_t pcFid = 0;
         if (EspFeed::GetLatest(pcBoxes, pcFid)) {
@@ -1516,30 +1541,36 @@ static void drawControlPanel() {
         ImGui::Checkbox("显示连线", &g_cfg.showAimLines);
         ImGui::SliderFloat("置信度阈值", &g_cfg.confidence, 0.05f, 0.95f);
 
-        // ===== ★ PC 数据(TCP)：坐标由 PC 侧解密, 手机只画框+自瞄 =====
-        if (ImGui::CollapsingHeader("PC 数据(TCP)")) {
-            bool on = g_cfg.pcEspEnabled;
-            if (ImGui::Checkbox("启用 PC 数据##pc", &on)) {
-                g_cfg.pcEspEnabled = on;
-                EspFeed::Configure(g_cfg.pcHost, g_cfg.pcPort);
-                if (on) EspFeed::Start(); else EspFeed::Stop();
-            }
+        // ===== ★ 目标来源：YOLO(本机推理) / PC 数据(TCP) / 两者混合 =====
+        if (ImGui::CollapsingHeader("目标来源（YOLO / PC数据）")) {
+            int mode = g_cfg.pcSourceMode;
+            bool changed = false;
+            if (ImGui::RadioButton("只用 YOLO（原版）##src", mode == 0)) { mode = 0; changed = true; }
             ImGui::SameLine();
+            if (ImGui::RadioButton("只用 PC 数据##src", mode == 1)) { mode = 1; changed = true; }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("YOLO + PC##src", mode == 2)) { mode = 2; changed = true; }
+            if (changed) {
+                g_cfg.pcSourceMode = mode;
+                EspFeed::Configure(g_cfg.pcHost, g_cfg.pcPort);
+                if (mode == 0) EspFeed::Stop(); else EspFeed::Start();
+            }
             if (ImGui::Button("重连##pc")) {
                 EspFeed::Stop();
                 EspFeed::Configure(g_cfg.pcHost, g_cfg.pcPort);
-                if (g_cfg.pcEspEnabled) EspFeed::Start();
+                if (g_cfg.pcSourceMode != 0) EspFeed::Start();
             }
             ImGui::InputText("PC 地址##pc", g_cfg.pcHost, sizeof(g_cfg.pcHost));
             ImGui::InputInt("端口##pc", &g_cfg.pcPort);
-            ImGui::Checkbox("显示名字/距离##pc", &g_cfg.pcShowName);
+            ImGui::Checkbox("PC 框显示名字/距离##pc", &g_cfg.pcShowName);
             EspFeed::Stats ps = EspFeed::GetStats();
             ImGui::TextColored(ps.connected ? ImVec4(0.2f, 1.0f, 0.4f, 1.0f)
                                             : ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
                                "状态: %s  目标 %d  帧 %ld  最近 %.0fms",
                                ps.message.c_str(), ps.boxes, ps.frames,
                                (double)ps.lastFrameMs);
-            ImGui::TextDisabled("数据来自 PC(自建网关+解析器)；本机不跑 YOLO/不抓 UDP");
+            ImGui::TextDisabled("PC 数据 = 自建网关解密出的坐标(世界坐标→屏幕框)");
+            ImGui::TextDisabled("混合模式: 与 PC 框重叠的 YOLO 框会自动去重(PC 为准)");
         }
 
         // 居中裁剪尺寸选择（面板切换后，传给 APK 重建共享内存）
@@ -2113,10 +2144,13 @@ int main(int argc, char* argv[]) {
     }
     g_cfgLastSaved = g_cfg;
 
-    // ★ PC 数据(TCP): 配置里开着就在启动时连 PC(自建网关那台)
-    printf("[pc] PC数据(TCP) %s  地址=%s:%d\n",
-           g_cfg.pcEspEnabled ? "开启" : "关闭", g_cfg.pcHost, g_cfg.pcPort);
-    if (g_cfg.pcEspEnabled) {
+    // ★ 目标来源: 0=只用 YOLO(默认) 1=只用 PC 数据 2=混合; 非 0 时启动就连 PC
+    if (g_cfg.pcSourceMode < 0 || g_cfg.pcSourceMode > 2) g_cfg.pcSourceMode = 0;
+    printf("[pc] 目标来源=%s  PC=%s:%d\n",
+           g_cfg.pcSourceMode == 0 ? "YOLO(本机)" :
+           (g_cfg.pcSourceMode == 1 ? "PC数据(TCP)" : "YOLO+PC混合"),
+           g_cfg.pcHost, g_cfg.pcPort);
+    if (g_cfg.pcSourceMode != 0) {
         EspFeed::Configure(g_cfg.pcHost, g_cfg.pcPort);
         EspFeed::Start();
     }
