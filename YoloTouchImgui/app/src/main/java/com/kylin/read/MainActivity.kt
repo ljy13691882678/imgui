@@ -2,6 +2,7 @@ package com.kylin.read
 
 import android.Manifest
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -32,6 +33,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // ★★★ 强制"逆时针 90° 横屏"(Android 里叫 reverseLandscape = SCREEN_ORIENTATION_REVERSE_LANDSCAPE)
+        //   清单里已经写了 screenOrientation=reverseLandscape, 这里再兜一次 ——
+        //   部分 ROM/分屏模式下会忽略清单值, 用代码请求更保险。
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
         setContentView(R.layout.activity_main)
 
         statusText = findViewById(R.id.status_text)
